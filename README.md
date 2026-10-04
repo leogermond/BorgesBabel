@@ -70,51 +70,104 @@ direct au GPU et la souris reste libre ; le Godot Windows capture la souris et r
 
 ## Recherche inverse
 
-Le texte cherché est normalisé : minuscules, accents retirés, œ → oe, æ → ae, ß → ss, k et q → c,
-w → v, y → i, blancs → espace, autres caractères retirés ; puis complété par des espaces jusqu'à
-3200 symboles (la suite d'un texte plus long est ignorée). Une image est ajustée à 50 × 64 en gardant
-ses proportions, bordée de l'encre la plus sombre, puis tramée aux 25 encres par Floyd–Steinberg.
-L'ajustement ne lit que les points d'une grille calculée en arithmétique entière (au plus 4 × 4
-points par pixel de la page, 200 × 256 points en tout ; formules dans l'en-tête de `python/babel.py`) :
-le jeu et la ligne de commande lisent les mêmes pixels, donc une même image donne la même adresse
-dans le jeu et hors du jeu, quelle que soit sa taille. La recherche de texte rend un livre de texte,
-la recherche d'image un livre d'images.
+L'unité est le livre. Chacun des 25^1 312 000 livres possibles (410 pages × 3200 symboles) existe
+exactement une fois : `python/babel.py` réalise une bijection exacte entre ces livres et les
+adresses de livres (hexagone, niveau, mur, étagère, livre). La Bibliothèque est donc finie mais
+immense : toute galerie dont l'hexagone et le niveau ont au plus 917 045 chiffres décimaux est
+pleine ; au-delà d'une dernière galerie à moitié garnie (emplacements 0 à 384), les étagères sont
+vides. Une adresse prise au hasard, ou trouvée par une recherche, a un hexagone et un niveau
+d'environ 917 000 chiffres décimaux chacun. Le détail (rang, région, mélange) est dans l'en-tête
+de `python/babel.py`.
+
+- **Texte.** Le texte cherché est normalisé : minuscules, accents retirés, œ → oe, æ → ae,
+  ß → ss, k et q → c, w → v, y → i, blancs → espace, autres caractères retirés ; puis complété par
+  des espaces jusqu'à la fin du livre. La recherche rend l'unique livre qui contient ce texte suivi
+  seulement d'espaces ; un texte de plusieurs pages occupe les pages 0, 1, 2 … du même livre. Au-delà
+  de 1 312 000 symboles (un livre), la suite est ignorée et la réponse le signale.
+- **Livres d'images.** Un livre est un livre d'images quand ses deux premiers symboles autres que
+  l'espace sont des signes (« , » ou « . ») ; les espaces ne comptent pas. C'est une propriété du
+  contenu, qui touche exactement 1 livre sur 144. Un texte qui commence ainsi (par exemple « .. »)
+  tombe donc dans un livre d'images, et la réponse le signale ; tout autre texte tombe dans un livre
+  de texte. Chaque page d'un livre d'images se lit comme une image de 50 × 64 pixels dans la palette
+  des 25 encres.
+- **Image.** Une image est ajustée à 50 × 64 en gardant ses proportions, bordée de l'encre la plus
+  sombre, puis tramée aux 25 encres par Floyd–Steinberg ; ses deux premiers pixels ne prennent que
+  les encres des signes, ce qui écrit la marque des livres d'images. La recherche rend l'unique livre
+  dont la page 0 est cette image et dont les pages suivantes sont d'encre 0. L'ajustement ne lit que
+  les points d'une grille calculée en arithmétique entière (au plus 4 × 4 points par pixel de la page,
+  200 × 256 points en tout) : le jeu et la ligne de commande lisent les mêmes pixels, donc une même
+  image donne la même adresse dans le jeu et hors du jeu, quelle que soit sa taille.
+
+Temps mesurés (Python 3.11, une machine de développement à 4 cœurs ; `.foreman/scratch/perf.py`) :
+
+| Opération | Temps |
+|---|---|
+| recherche d'un texte d'une page / de 410 pages | 0,55 s / 1,9 s |
+| recherche d'une image 512 × 512 | 0,54 s |
+| page 0 d'un livre jamais ouvert (adresse proche / trouvée) | 3 ms / 0,11 s |
+| page 409 d'un livre jamais ouvert (chaîne des 410 pages) | 0,8 à 0,9 s |
+| page suivante d'un livre ouvert (service, par clé) | 6 ms |
+| genres des 640 livres d'une galerie (proche / trouvée) | 15 ms / 0,14 s |
+| mémoire d'un livre en cache, 410 pages calculées | 0,8 à 2,1 Mo |
+
+### Ligne de commande
+
+Une adresse s'écrit `hexagone:niveau:mur:étagère:livre[:page]` en décimal (mur 0-3, étagère 0-4,
+livre 0-31, page 0-409), ou `b25:hexagone:niveau:…` avec hexagone et niveau en base 25 (rapide).
+Le décimal complet d'une adresse trouvée compte ~1,8 million de chiffres : il s'écrit en ~1,5 s et se
+relit en ~5 s, et dépasse la limite de 128 Ko d'un argument de commande sous Linux ; `page -` lit
+l'adresse sur l'entrée standard.
 
 ```sh
-python3 python/babel.py page 12:-3:0:4:17:205        # hexagone:niveau:mur:étagère:livre:page (mur 0-3, étagère 0-4, livre 0-31, page 0-409)
-python3 python/babel.py page -12:-3:0:4:17:205       # un hexagone négatif s'écrit tel quel
-python3 python/babel.py page "$(python3 python/babel.py search-text citation.txt)"
-python3 python/babel.py search-text citation.txt     # adresse complète sur la sortie, forme courte sur l'erreur
-echo "la bibliotheque de babel" | python3 python/babel.py search-text -
-python3 python/babel.py search-image gravure.png     # PNG 8 bits sans gamma (gAMA) particulier : convertir d'abord un JPG en PNG
-python3 python/babel.py search-text citation.txt --json
+python3 python/babel.py page 12:-3:0:4:17:205          # page 205 du livre (hexagone 12, niveau -3, mur 0, étagère 4, livre 17)
+python3 python/babel.py page -12:-3:0:4:17 --page 205  # un hexagone négatif s'écrit tel quel
+python3 python/babel.py search-text citation.txt | python3 python/babel.py page -
+python3 python/babel.py search-text citation.txt --base25   # « b25:… » : rapide
+python3 python/babel.py search-text citation.txt --json     # adresse JSON (base 25), clé, is_image
+echo "la bibliotheque de babel" | python3 python/babel.py search-text - --base25
+python3 python/babel.py search-image gravure.png --base25   # PNG 8 bits : convertir d'abord un JPG en PNG
 ```
+
+La forme courte (abrégée) part sur l'erreur standard, avec les avis (texte tronqué, livre d'images).
+
+### Service JSON (protocole 3)
 
 Dans le jeu, `BookText.search_text_file(chemin)` et `BookText.search_image_file(chemin)` acceptent
 un fichier texte, ou une image PNG, JPG ou WebP (Godot la décode et n'envoie au service que ses
-points de grille : 140 Ko de requête pour une photo de 6000 × 4000).
-
-Le service `python3 python/babel.py serve` lit une requête JSON par ligne et répond sur une ligne ;
-une adresse y est `{"hexagon": "<décimal>", "level": "<décimal>", "wall": 0, "shelf": 0, "book": 0, "page": 0}`.
+points de grille). Le service `python3 python/babel.py serve` lit une requête JSON par ligne et répond
+sur une ligne. Une adresse de livre y est
+`{"hexagon": "<base 25>", "level": "<base 25>", "wall": 0, "shelf": 0, "book": 0}` : hexagone et
+niveau sont des chaînes en base 25 signées (`-` facultatif, chiffres `0123456789abcdefghijklmno`,
+poids fort en premier, `"0"` pour zéro ; la notation de `int(texte, 25)`), lues et écrites en temps
+linéaire. Un entier JSON est aussi accepté pour une petite coordonnée. Un livre se désigne par
+`address`, ou par `key`, la clé rendue par une réponse précédente : le service garde les 256 dernières
+clés et le contenu des 4 derniers livres ouverts, ce qui évite de renvoyer 1,3 Mo d'adresse à chaque
+page tournée.
 
 | `op` | Requête | Réponse |
 |---|---|---|
-| `ping` | — | `{"protocol": 2}` |
-| `page` | `address`, `as_image` (facultatif) | `{"lines": [40 chaînes], "is_image": bool, "indices": base64}` ; `indices` (3200 encres 0-24, ligne par ligne) pour un livre d'images ou avec `as_image` |
-| `search_text` | `text` | `{"address": …, "tries": n}` |
-| `search_image` | `width`, `height` de l'image d'origine, et soit `samples` (base64 : les points de grille seuls, 4 octets RGBA par point, ligne de grille après ligne de grille ; ce qu'envoie le jeu), soit `rgba` (base64 : l'image complète, 4 octets par pixel) | `{"address": …, "tries": n}` |
-| `is_image_book` | `books` : liste d'adresses de livres (`page` facultative) | `{"is_image": [bool…]}` |
-| `display` | `address` | `{"short": "hexagone 1909…0195 (2234 chiffres) · …", "full": "h:n:m:é:l:p"}` |
+| `ping` | — | `{"protocol": 3}` |
 | `palette` | — | `{"palette": ["#1a1410", … 25 encres], "width": 50, "height": 64}` |
+| `book_info` | `address` ou `key` | `{"key", "exists": true, "is_image", "address", "short"}`, ou `{"exists": false}` pour un emplacement vide |
+| `page` | `address` ou `key`, `page` (0-409, 0 par défaut ; aussi lue dans `address`), `as_image` (facultatif) | `{"key", "page", "lines": [40 chaînes], "is_image", "indices"}` ; `indices` (base64 des 3200 encres 0-24, ligne par ligne) pour un livre d'images ou avec `as_image` |
+| `pages` | `address` ou `key`, `pages` : liste de 1 à 410 numéros, `as_image` (facultatif) | `{"key", "is_image", "pages": [{"page", "lines", "indices"?}, …]}` |
+| `search_text` | `text` | `{"address", "key", "is_image", "text_pages": pages occupées, "truncated": bool, "notice"?}` |
+| `search_image` | `width`, `height` de l'image d'origine, et soit `samples` (base64 : les points de grille seuls, 4 octets RGBA par point, ligne de grille après ligne de grille ; ce qu'envoie le jeu), soit `rgba` (base64 : l'image complète) | `{"address", "key", "is_image": true}` |
+| `is_image_book` | `books` : liste d'adresses de livres, ou `gallery` : `{"hexagon", "level"}` | `{"is_image": [true, false ou null (emplacement vide) …]}` ; pour `gallery`, 640 valeurs dans l'ordre (mur·5 + étagère)·32 + livre |
+| `display` | `address` (page facultative) ou `key`, `full` (facultatif) | `{"short": "hexagone -1096…7662 (917047 chiffres) · …", "hexagon": {"sign", "digits", "lead", "tail"}, "level": {…}}` ; `full: true` ajoute `"full"` (décimal complet, ~1,5 s) |
 
-Un champ `id` facultatif revient tel quel dans la réponse. Toute erreur répond `{"error": "…"}` sur
-sa ligne et le service continue.
+Un champ `id` facultatif revient tel quel dans la réponse. Toute erreur répond
+`{"error": "…", "code": "…"}` sur sa ligne et le service continue ; `code` vaut `bad_request`,
+`unknown_op`, `unknown_key` (clé oubliée : renvoyer l'adresse), `empty_slot` (adresse hors de la
+région habitée) ou `internal`.
 
 Tests de la bijection, de la recherche, du PNG et du service :
 
 ```sh
-uv run --with pytest --with hypothesis pytest python/
-godot --headless --path . -s tests/test_babel_service.gd   # temps de réponse, recherche d'image, absence de Python
+uv run --with pytest --with hypothesis pytest python/            # ~1 min 30 ; les cas lents sont marqués
+uv run --with pytest --with hypothesis pytest python/ -m slow    # texte de 410 pages, texte plus long qu'un livre
+uv run --no-project --python 3.10 --with pytest --with hypothesis pytest python/
+godot --headless --path . -s tests/test_babel_service.gd         # temps de réponse, recherche d'image, absence de Python
 ```
 
 ## Tests

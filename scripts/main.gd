@@ -20,6 +20,7 @@ var reader: Reader
 var _galleries: Dictionary = {}   # "hexagone:niveau" → Gallery
 var _highlight: MeshInstance3D
 var _target: Dictionary = {}
+var _mouse_captured := false
 
 
 func _ready() -> void:
@@ -57,7 +58,7 @@ func _ready() -> void:
 	reader = Reader.new()
 	add_child(reader)
 
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	_capture_mouse()
 
 
 func _physics_process(_delta: float) -> void:
@@ -79,28 +80,62 @@ func _unhandled_input(event: InputEvent) -> void:
 			_close_book()
 		return
 
-	var captured := Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
-	if event is InputEventMouseMotion and captured:
-		player.look(event.relative)
+	if event is InputEventMouseMotion and _mouse_captured:
+		_look_from_motion(event)
 	elif event.is_action_pressed("toggle_mouse"):
-		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if captured else Input.MOUSE_MODE_CAPTURED
+		if _mouse_captured:
+			_release_mouse()
+		else:
+			_capture_mouse()
 	elif event.is_action_pressed("interact"):
-		if not captured:
-			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+		if not _mouse_captured:
+			_capture_mouse()
 		elif not _target.is_empty():
 			_open_book()
 
 
 func _open_book() -> void:
 	player.frozen = true
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	_release_mouse()
 	reader.open(_target)
 
 
 func _close_book() -> void:
 	reader.close()
 	player.frozen = false
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	_capture_mouse()
+
+
+# Mouse capture. Some display servers (WSLg, some Wayland compositors) ignore
+# MOUSE_MODE_CAPTURED and let the pointer leave the window. The game therefore
+# hides and confines the cursor, then warps it back to the window centre after
+# each motion and turns the camera by the offset from that centre.
+func _capture_mouse() -> void:
+	_mouse_captured = true
+	Input.mouse_mode = Input.MOUSE_MODE_CONFINED_HIDDEN
+	_recentre_mouse()
+
+
+func _release_mouse() -> void:
+	_mouse_captured = false
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+
+func _recentre_mouse() -> void:
+	get_viewport().warp_mouse(get_viewport().get_visible_rect().size * 0.5)
+
+
+func _look_from_motion(event: InputEventMouseMotion) -> void:
+	var offset: Vector2 = event.position - get_viewport().get_visible_rect().size * 0.5
+	if offset.length_squared() < 0.25:
+		return
+	player.look(offset)
+	_recentre_mouse()
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_APPLICATION_FOCUS_IN and _mouse_captured:
+		_capture_mouse()
 
 
 func _show_target(target: Dictionary) -> void:

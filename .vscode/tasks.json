@@ -1,0 +1,14 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Lancer le jeu",
+      "type": "process",
+      "command": "godot",
+      "args": ["--path", "${workspaceFolder}"],
+      "group": { "kind": "build", "isDefault": true },
+      "presentation": { "reveal": "silent", "panel": "dedicated", "clear": true },
+      "problemMatcher": []
+    }
+  ]
+}

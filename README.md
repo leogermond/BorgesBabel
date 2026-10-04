@@ -11,6 +11,8 @@ godot --path .            # joue la scène principale
 godot -e --path .         # ouvre le projet dans l'éditeur
 ```
 
+Dans VS Code, Ctrl+Maj+B lance le jeu (tâche « Lancer le jeu », `.vscode/tasks.json`).
+
 ## Commandes
 
 | Touche | Geste |
@@ -48,6 +50,14 @@ godot --headless --path . --import
 godot --headless --path . -s tests/test_book_text.gd   # texte : déterminisme, 40 × 80, alphabet, diversité
 godot --headless --path . -s tests/test_world.gd       # monde : apparition, livre visé, lecture, vestibule, balustrade
 ```
+
+Captures de rendu dans un écran virtuel Xvfb (paquet `xvfb`), sans fenêtre :
+
+```sh
+xvfb-run -a -s "-screen 0 1600x900x24" godot --rendering-driver opengl3 --path . -s tests/render_shots.gd
+```
+
+Les PNG vont dans `.foreman/scratch/screenshots` (ou dans le dossier passé après `--`).
 
 Chaque test affiche ses vérifications et sort avec le code 0 quand toutes passent.
 

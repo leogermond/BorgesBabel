@@ -4,7 +4,10 @@ extends SceneTree
 ## godot --headless --path . -s tests/test_world.gd
 
 const GalleryScript := preload("res://scripts/gallery.gd")
-const GALLERIES := 17 * 3 + 6
+# 17 galeries sur 3 niveaux le long du vestibule, 6 niveaux du puits en galeries entières,
+# et de chaque côté les diagonales vues par les puits voisins (|dz| − 1 ≤ |dy| ≤ |dz| + 1,
+# hors des trois rangées) : 2 cases à |dz| = 1, 4 à |dz| = 2, 6 de |dz| = 3 à 8.
+const GALLERIES := 17 * 3 + 6 + 2 * (2 + 4 + 6 * 6)
 
 var _failures := 0
 
@@ -17,7 +20,6 @@ func _initialize() -> void:
 	var player: CharacterBody3D = main.player
 	var start: int = main.origin_hexagon
 	_check(player.is_on_floor() and absf(player.position.y) < 0.05, "le bibliothécaire tient debout (y = %.3f)" % player.position.y)
-	# 17 galeries sur 3 niveaux le long du vestibule, plus 6 niveaux du puits en galeries entières.
 	_check(_gallery_count(main) == GALLERIES, "%d galeries entretenues (lu : %d)" % [GALLERIES, _gallery_count(main)])
 
 	# Chaque livre se retrouve à partir d'un point de la façade devant lui.

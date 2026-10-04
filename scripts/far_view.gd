@@ -3,14 +3,19 @@ extends Node3D
 ## Au-delà des galeries construites, la vue continue.
 ##
 ## - Le puits : de niveau en niveau, l'anneau de plancher, la balustrade et les
-##   lampes, sans le reste de la galerie (seul l'anneau se voit par le puits). Un
-##   seul MultiMesh ; ses niveaux sont relatifs à l'origine et ne bougent jamais.
+##   lampes, sans le reste de la galerie (seul l'anneau se voit par le puits : vu à
+##   travers cinq dalles percées ou plus, le regard ne dépasse pas 2,7 m de l'axe). Un
+##   seul MultiMesh ; ses niveaux sont relatifs à l'origine et ne bougent jamais. Ses
+##   surfaces ont le nuanceur et les matériaux des galeries : même lumière.
 ## - Quatre trompe-l'œil ferment la vue : un à chaque bout du vestibule, un en haut
 ##   et un en bas du puits. Chacun peint, pour chaque pixel, le point du couloir
 ##   infini (ou du puits infini) que le regard atteindrait au-delà : la même suite
 ##   de galeries et de niveaux, de plus en plus petite, noyée dans le même brouillard
 ##   que la géométrie. À l'endroit du trompe-l'œil, le couloir peint prolonge donc
-##   le vrai, et s'assombrit jusqu'au noir à l'infini.
+##   le vrai, et s'assombrit jusqu'au noir à l'infini. Comme la géométrie, il se
+##   fond entièrement dans la brume au-delà de Gallery.FAR_FADE_END : posé à plus de
+##   95 m de l'œil, il ne montre que la brume, et son saut d'une galerie (ou d'un
+##   niveau) à chaque pas ne se voit pas.
 ##
 ## Repère : celui du monde (le nœud reste à l'origine) ; galerie d'origine au centre.
 
@@ -33,6 +38,9 @@ uniform vec3 profile_mean : source_color;
 // Brouillard exponentiel, le même que celui de l'environnement, sur toute la distance.
 uniform vec3 fog_color : source_color;
 uniform float fog_density;
+// Fondu au noir de brume au loin, le même que celui du nuanceur des galeries.
+uniform float fade_begin;
+uniform float fade_end;
 
 varying vec3 world_pos;
 
@@ -65,7 +73,8 @@ void fragment() {
 	float blur = clamp(fwidth(s) * 2.0 - 0.5, 0.0, 1.0);
 	vec3 base = mix(texture(profile, vec2(s, 0.5)).rgb, profile_mean, blur) * plane_tint[hit];
 	float distance_to_wall = reach * length(ray);
-	ALBEDO = mix(fog_color, base, exp(-fog_density * distance_to_wall));
+	float fade = 1.0 - smoothstep(fade_begin, fade_end, distance_to_wall);
+	ALBEDO = mix(fog_color, base, exp(-fog_density * distance_to_wall) * fade);
 }
 """
 
@@ -160,6 +169,8 @@ static func _material(shader: Shader, axis_point: Vector3, cross_u: Vector3, cro
 	material.set_shader_parameter("profile_mean", _mean(profile.gradient))
 	material.set_shader_parameter("fog_color", fog_color)
 	material.set_shader_parameter("fog_density", fog_density)
+	material.set_shader_parameter("fade_begin", Gallery.FAR_FADE_BEGIN)
+	material.set_shader_parameter("fade_end", Gallery.FAR_FADE_END)
 	return material
 
 

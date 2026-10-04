@@ -1,14 +1,30 @@
 extends Node3D
 ## Monde : tire une galerie au hasard, y place le bibliothécaire, et entretient
-## autour de lui les galeries voisines (le long du vestibule, et un niveau
-## au-dessus et au-dessous, visibles par le puits).
+## autour de lui les galeries voisines, sur une centaine de mètres le long du
+## vestibule et par le puits, au-dessus et au-dessous.
 ##
 ## L'origine du monde suit le bibliothécaire : quand il franchit le milieu d'un
 ## vestibule, la galerie qu'il atteint devient l'origine et tout se décale d'un
-## pas. Les coordonnées restent petites, quelle que soit la distance parcourue.
+## pas ; de même d'un niveau quand il passe à mi-hauteur vers le niveau voisin.
+## Les coordonnées restent petites, quelle que soit la distance parcourue.
+##
+## Degrés de détail des galeries (dz : galeries le long du vestibule, dy : niveaux) :
+## - complète, avec collisionneurs : dy = 0, |dz| ≤ 1 ;
+## - éclairée (livres un à un, vraies lampes) : |dz| ≤ 2 et |dy| ≤ 1, ou dy = 0 et
+##   |dz| ≤ LIT_ALONG_HALL, ou dz = 0 et |dy| ≤ LIT_VERTICAL ;
+## - lointaine (maillage partagé, lumière cuite) : |dy| ≤ 1 et |dz| ≤ REACH_ALONG_HALL,
+##   ou dz = 0 et |dy| ≤ ROOMS_VERTICAL.
+## Au-delà, le puits garde ses anneaux jusqu'à REACH_VERTICAL, puis les trompe-l'œil
+## de FarView prolongent la vue dans les quatre directions.
 
-const REACH_ALONG_HALL := 2   # galeries entretenues de chaque côté le long du vestibule
-const REACH_VERTICAL := 1     # niveaux entretenus au-dessus et au-dessous
+const REACH_ALONG_HALL := 8    # galeries de chaque côté le long du vestibule : 8 × 12 m = 96 m
+const REACH_VERTICAL := 30     # niveaux au-dessus et au-dessous, par le puits : 30 × 3,4 m = 102 m
+const ROOMS_VERTICAL := 4      # niveaux du puits construits en galeries entières ; au-delà, l'anneau
+const LIT_ALONG_HALL := 3      # galeries éclairées par de vraies lampes le long du vestibule
+const LIT_VERTICAL := 2        # niveaux éclairés par de vraies lampes dans le puits
+
+const FOG_COLOR := Color(0.05, 0.035, 0.022)
+const FOG_DENSITY := 0.04      # reste de lumière : 38 % à 24 m, 15 % à 48 m, 2 % à 96 m
 
 ## Adresse de la galerie placée à l'origine du monde.
 var origin_hexagon: int
@@ -17,6 +33,8 @@ var origin_level: int
 var player: Player
 var hud: Hud
 var reader: Reader
+var far_view: FarView
+static var _cells: Dictionary = {}   # cache de gallery_cells()
 var _galleries: Dictionary = {}   # "hexagone:niveau" → Gallery
 var _highlight: MeshInstance3D
 var _target: Dictionary = {}
@@ -27,6 +45,8 @@ func _ready() -> void:
 	process_physics_priority = 10   # après le bibliothécaire
 	_setup_input()
 	_setup_environment()
+	far_view = FarView.create(REACH_ALONG_HALL, ROOMS_VERTICAL + 1, REACH_VERTICAL, FOG_COLOR, FOG_DENSITY)
+	add_child(far_view)
 
 	var rng := RandomNumberGenerator.new()
 	rng.randomize()
@@ -68,6 +88,11 @@ func _physics_process(_delta: float) -> void:
 		_shift(1)
 	elif player.position.z < -half:
 		_shift(-1)
+	var half_level := Gallery.LEVEL_PITCH * 0.5
+	if player.position.y > half_level:
+		_shift_level(1)
+	elif player.position.y < -half_level:
+		_shift_level(-1)
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -142,38 +167,101 @@ func _shift(step: int) -> void:
 	hud.set_address(origin_hexagon, origin_level)
 
 
-## Crée les galeries manquantes autour de l'origine, replace les autres, libère les lointaines.
-func _update_galleries() -> void:
-	var wanted: Dictionary = {}
+## Fait du niveau voisin (+1 au-dessus, −1 au-dessous) la nouvelle origine.
+func _shift_level(step: int) -> void:
+	origin_level += step
+	player.position.y -= step * Gallery.LEVEL_PITCH
+	_update_galleries()
+	hud.set_address(origin_hexagon, origin_level)
+
+
+## Degré de détail de la galerie décalée de (dz, dy) par rapport à l'origine, ou −1
+## quand elle reste à construire (hors de vue, ou réduite à l'anneau du puits).
+static func detail_at(dz: int, dy: int) -> int:
+	var along := absi(dz)
+	var across := absi(dy)
+	if dy == 0 and along <= 1:
+		return Gallery.Detail.FULL
+	if (along <= 2 and across <= 1) or (dy == 0 and along <= LIT_ALONG_HALL) \
+			or (dz == 0 and across <= LIT_VERTICAL):
+		return Gallery.Detail.LIT
+	if (across <= 1 and along <= REACH_ALONG_HALL) or (dz == 0 and across <= ROOMS_VERTICAL):
+		return Gallery.Detail.DISTANT
+	return -1
+
+
+## Les cases construites autour de l'origine : Vector2i(dz, dy) → degré de détail.
+static func gallery_cells() -> Dictionary:
+	if not _cells.is_empty():
+		return _cells
+	var cells := {}
 	for dz in range(-REACH_ALONG_HALL, REACH_ALONG_HALL + 1):
-		for dy in range(-REACH_VERTICAL, REACH_VERTICAL + 1):
-			var hexagon := origin_hexagon + dz
-			var level := origin_level + dy
-			var key := "%d:%d" % [hexagon, level]
-			var gallery: Gallery = _galleries.get(key)
-			if gallery == null:
-				gallery = Gallery.create(hexagon, level)
-				add_child(gallery)
-			gallery.position = Vector3(0.0, dy * Gallery.LEVEL_PITCH, dz * Gallery.PITCH)
-			wanted[key] = gallery
+		for dy in range(-ROOMS_VERTICAL, ROOMS_VERTICAL + 1):
+			var detail := detail_at(dz, dy)
+			if detail >= 0:
+				cells[Vector2i(dz, dy)] = detail
+	_cells = cells
+	return cells
+
+
+## Place les galeries autour de l'origine, chacune à son degré de détail. Les galeries
+## sorties du champ servent aux cases nouvelles (même détail d'abord) : un pas ne
+## refait que les livres et les collisionneurs qui changent de main.
+func _update_galleries() -> void:
+	var cells := gallery_cells()
+	var wanted: Dictionary = {}
+	var placed: Dictionary = {}   # clé → [case, détail]
+	for cell: Vector2i in cells:
+		var key := "%d:%d" % [origin_hexagon + cell.x, origin_level + cell.y]
+		placed[key] = [cell, cells[cell]]
+	var spares: Array = [[], [], []]   # par degré de détail
 	for key in _galleries:
-		if not wanted.has(key):
-			_galleries[key].queue_free()
+		if not placed.has(key):
+			var spare: Gallery = _galleries[key]
+			spares[spare.detail].append(spare)
+	for key: String in placed:
+		var cell: Vector2i = placed[key][0]
+		var detail: int = placed[key][1]
+		var gallery: Gallery = _galleries.get(key)
+		if gallery == null:
+			gallery = _take_spare(spares, detail)
+			if gallery == null:
+				gallery = Gallery.create(origin_hexagon + cell.x, origin_level + cell.y, detail as Gallery.Detail)
+				add_child(gallery)
+			else:
+				gallery.readdress(origin_hexagon + cell.x, origin_level + cell.y, detail as Gallery.Detail)
+		elif gallery.detail != detail:
+			gallery.set_detail(detail as Gallery.Detail)
+		gallery.position = Vector3(0.0, cell.y * Gallery.LEVEL_PITCH, cell.x * Gallery.PITCH)
+		wanted[key] = gallery
+	for pool: Array in spares:
+		for spare: Gallery in pool:
+			spare.queue_free()
 	_galleries = wanted
+
+
+## Une galerie libérée, de préférence au même degré de détail, ou null.
+static func _take_spare(spares: Array, detail: int) -> Gallery:
+	if not spares[detail].is_empty():
+		return spares[detail].pop_back()
+	for pool: Array in spares:
+		if not pool.is_empty():
+			return pool.pop_back()
+	return null
 
 
 func _setup_environment() -> void:
 	var env := Environment.new()
-	var dusk := Color(0.05, 0.035, 0.022)
 	env.background_mode = Environment.BG_COLOR
-	env.background_color = dusk
+	env.background_color = FOG_COLOR
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = Color(0.55, 0.42, 0.3)
-	env.ambient_light_energy = 0.35
+	env.ambient_light_color = Gallery.AMBIENT_COLOR
+	env.ambient_light_energy = Gallery.AMBIENT_ENERGY
 	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
 	env.fog_enabled = true
-	env.fog_light_color = dusk
-	env.fog_density = 0.06
+	env.fog_mode = Environment.FOG_MODE_EXPONENTIAL
+	env.fog_light_color = FOG_COLOR
+	env.fog_density = FOG_DENSITY
 	env.glow_enabled = true
 	var world := WorldEnvironment.new()
 	world.environment = env

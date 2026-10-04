@@ -4,6 +4,7 @@ extends SceneTree
 ## godot --headless --path . -s tests/test_world.gd
 
 const GalleryScript := preload("res://scripts/gallery.gd")
+const GALLERIES := 17 * 3 + 6
 
 var _failures := 0
 
@@ -16,7 +17,8 @@ func _initialize() -> void:
 	var player: CharacterBody3D = main.player
 	var start: int = main.origin_hexagon
 	_check(player.is_on_floor() and absf(player.position.y) < 0.05, "le bibliothécaire tient debout (y = %.3f)" % player.position.y)
-	_check(_gallery_count(main) == 15, "15 galeries entretenues (lu : %d)" % _gallery_count(main))
+	# 17 galeries sur 3 niveaux le long du vestibule, plus 6 niveaux du puits en galeries entières.
+	_check(_gallery_count(main) == GALLERIES, "%d galeries entretenues (lu : %d)" % [GALLERIES, _gallery_count(main)])
 
 	# Chaque livre se retrouve à partir d'un point de la façade devant lui.
 	var gallery: Gallery = main.get_node("Gallery_%d_%d" % [start, main.origin_level])
@@ -62,7 +64,7 @@ func _initialize() -> void:
 	Input.action_release("move_forward")
 	_check(main.origin_hexagon == start + 1, "la galerie voisine devient l'origine (Δ = %d)" % (main.origin_hexagon - start))
 	_check(player.position.y > -0.05 and player.position.z < 0.0, "le bibliothécaire arrive dans la galerie voisine (%s)" % player.position)
-	_check(_gallery_count(main) == 15, "toujours 15 galeries après le décalage")
+	_check(_gallery_count(main) == GALLERIES, "toujours %d galeries après le décalage (lu : %d)" % [GALLERIES, _gallery_count(main)])
 
 	player.rotation.y = 0.0
 	Input.action_press("move_forward")

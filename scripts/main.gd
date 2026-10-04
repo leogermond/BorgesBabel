@@ -6,7 +6,9 @@ extends Node3D
 ## L'origine du monde suit le bibliothécaire : quand il franchit le milieu d'un
 ## vestibule, la galerie qu'il atteint devient l'origine et tout se décale d'un
 ## pas ; de même d'un niveau quand il passe à mi-hauteur vers le niveau voisin.
-## Les coordonnées restent petites, quelle que soit la distance parcourue.
+## Les coordonnées restent petites, quelle que soit la distance parcourue ; l'adresse de
+## l'origine, elle, est un entier de toute taille (origin_hexagon_b25, origin_level_b25), jusqu'aux
+## ~917 000 chiffres décimaux d'une adresse trouvée par la recherche.
 ##
 ## Degrés de détail des galeries (dz : galeries le long du vestibule, dy : niveaux) :
 ## - complète, avec collisionneurs : dy = 0, |dz| ≤ 1 ;

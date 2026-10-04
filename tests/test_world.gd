@@ -165,6 +165,7 @@ func _measure_steps(main: Node3D, player: CharacterBody3D) -> Dictionary:
 		worst[axis] = maxi(worst[axis], spent)
 		player.position = Vector3(0.0, 0.05, 3.2)
 	times.sort()
+	@warning_ignore("integer_division")
 	worst.median = times[times.size() / 2]
 	return worst
 

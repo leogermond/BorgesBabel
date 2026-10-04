@@ -132,11 +132,6 @@ func set_address(hexagon: Variant, level: Variant, moved := Vector2i.ZERO) -> vo
 	_refresh_widget(moved if stepping else Vector2i.ZERO)
 
 
-## Hexagone et niveau de la galerie courante, en base 25.
-func address() -> Dictionary:
-	return {"hexagon": _hexagon, "level": _level}
-
-
 ## Le résumé d'écran d'une coordonnée après un pas : celui d'avant (pas nul sur cet axe), ou
 ## avancé du pas quand il le permet (BookText.summary_step) ; sinon recalculé (exact en int, ou
 ## par le service, une fois tous les 10 000 pas au plus).

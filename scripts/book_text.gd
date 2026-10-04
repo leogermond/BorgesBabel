@@ -204,14 +204,13 @@ static func b25_valid(text: String) -> bool:
 static func b25_from_int(value: int) -> String:
 	if value == 0:
 		return "0"
-	var negative := value < 0
 	var out := ""
 	var rest := value
 	while rest != 0:
-		var digit := absi(rest % 25)
-		out = B25_DIGITS[digit] + out
-		rest = -(-rest / 25) if negative else rest / 25   # vers zéro, sans déborder sur -2^63
-	return "-" + out if negative else out
+		out = B25_DIGITS[absi(rest % 25)] + out
+		@warning_ignore("integer_division")
+		rest = rest / 25   # division tronquée vers zéro : aucun débordement, même pour -2^63
+	return "-" + out if value < 0 else out
 
 
 ## La valeur d'une petite coordonnée canonique (voir b25_fits_int).
@@ -416,6 +415,7 @@ static func _borrow_run(x: String, y: String, from: int, length: int) -> int:
 			run += count
 			probe *= 2
 		else:
+			@warning_ignore("integer_division")
 			probe = maxi(1, probe / 2)
 	return run
 

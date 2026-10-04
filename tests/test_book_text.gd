@@ -78,6 +78,7 @@ func _init() -> void:
 	# Un texte de plusieurs pages occupe les pages 0, 1, 2 … consécutives d'un même livre.
 	var long_text := ""
 	for i in 7000:
+		@warning_ignore("integer_division")
 		long_text += BookTextScript.ALPHABET[(i * 31 + i / 7) % 25]
 	var long_book := BookTextScript.search_text(long_text)
 	_check(BookTextScript.last_search.get("text_pages") == 3, "texte de 7000 symboles : 3 pages (lu : %s)" % BookTextScript.last_search.get("text_pages"))

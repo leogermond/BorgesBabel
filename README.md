@@ -57,16 +57,26 @@ direct au GPU et la souris reste libre ; le Godot Windows capture la souris et r
 - Format de Borges : 410 pages, 40 lignes par page, 80 caractères par ligne.
 - 25 symboles : les 22 lettres `abcdefghijlmnoprstuvxz` (l'alphabet latin privé de k, q, w, y),
   l'espace, la virgule et le point.
-- Chaque page est l'image de son adresse (hexagone, niveau, mur, étagère, livre, page) par une
-  bijection en grands entiers, calculée par `python/babel.py` : un même livre montre toujours le
-  même texte, et tout texte se retrouve à une adresse (recherche inverse).
-- Un livre sur 50 environ est un livre d'images, reconnu à sa seule adresse : chacune de ses pages
-  se lit comme une image de 50 × 64 pixels, un symbole par pixel, dans une palette fixe de 25 encres
-  chaudes (noir de fumée, sépia, vélin, vermillon, ocre, vert-de-gris, indigo…).
+- L'unité est le livre : chaque livre est l'image de son adresse (hexagone, niveau, mur, étagère,
+  livre) par une bijection exacte, calculée par `python/babel.py`. Chacun des 25^1 312 000 livres
+  possibles existe une fois et une seule ; un même livre montre toujours le même texte, et tout texte
+  se retrouve dans un livre, à une adresse (recherche inverse), ses pages se suivant dans ce livre.
+- La Bibliothèque est donc finie, mais immense : toute galerie dont l'hexagone et le niveau ont au
+  plus 917 045 chiffres décimaux est pleine ; au-delà d'une dernière galerie à moitié garnie, les
+  étagères sont vides. Une adresse trouvée par la recherche a un hexagone et un niveau d'environ
+  917 000 chiffres décimaux : le jeu les garde en base 25 (la forme du service), les fait avancer
+  de ±1 à chaque pas sans les relire, et les affiche en abrégé, « 1096…5346 (917047 chiffres) ».
+- Un livre sur 144 exactement est un livre d'images, reconnu à son contenu (ses deux premiers
+  symboles autres que l'espace sont des signes) et calculé depuis l'adresse sans calculer le livre :
+  chacune de ses pages se lit comme une image de 50 × 64 pixels, un symbole par pixel, dans une
+  palette fixe de 25 encres chaudes (noir de fumée, sépia, vélin, vermillon, ocre, vert-de-gris,
+  indigo…).
 - Le jeu lance le service Python au premier livre ouvert ; il faut Python 3.10 ou plus, sans
   autre paquet. Sans Python, la page ouverte affiche l'erreur. Le réglage de projet
   `babel/python_command` choisit l'interpréteur (par défaut `py -3`, `python`, puis `python3` sous
-  Windows ; `python3` sous Linux).
+  Windows ; `python3` sous Linux). Un service qui ne répond pas dans le délai (3 s pour une page,
+  10 s pour une recherche) est arrêté : la page affiche l'erreur, le jeu ne se fige pas, et le
+  service est relancé à la requête suivante.
 
 ## Recherche inverse
 
@@ -98,7 +108,13 @@ de `python/babel.py`.
   200 × 256 points en tout) : le jeu et la ligne de commande lisent les mêmes pixels, donc une même
   image donne la même adresse dans le jeu et hors du jeu, quelle que soit sa taille.
 
-Temps mesurés (Python 3.11, une machine de développement à 4 cœurs ; `.foreman/scratch/perf.py`) :
+Temps mesurés (Python 3.11, une machine de développement à 4 cœurs) : chaque opération est appelée
+directement dans `babel.py` et chronométrée par `time.perf_counter()`, meilleur de 2 à 20 essais ;
+texte d'une page : « La bibliothèque de Babel, » répété 100 fois ; texte de 410 pages : 1 312 000
+symboles tirés au hasard ; image : 512 × 512 octets RGBA au hasard ; adresse proche :
+(123456, -42, 1, 2, 3), adresse trouvée : celle du texte d'une page (cache des coordonnées vidé
+avant chaque essai) ; page suivante : requête `page` par clé passée par `handle`, JSON compris ;
+mémoire : `tracemalloc` autour d'un livre dont les 410 pages sont calculées.
 
 | Opération | Temps |
 |---|---|
@@ -142,7 +158,10 @@ poids fort en premier, `"0"` pour zéro ; la notation de `int(texte, 25)`), lues
 linéaire. Un entier JSON est aussi accepté pour une petite coordonnée. Un livre se désigne par
 `address`, ou par `key`, la clé rendue par une réponse précédente : le service garde les 256 dernières
 clés et le contenu des 4 derniers livres ouverts, ce qui évite de renvoyer 1,3 Mo d'adresse à chaque
-page tournée.
+page tournée. Le client du jeu (`scripts/book_text.gd`) demande ainsi les pages d'un livre déjà ouvert
+par sa clé, renvoie l'adresse quand le service répond `unknown_key`, et lit chaque réponse sous un
+délai : au-delà de 3 s (10 s pour une recherche), un chien de garde arrête le service, l'appel rend
+l'erreur (`BookText.last_error`) et le service repart à la requête suivante.
 
 | `op` | Requête | Réponse |
 |---|---|---|

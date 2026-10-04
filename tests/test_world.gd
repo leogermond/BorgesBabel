@@ -4,6 +4,10 @@ extends SceneTree
 ## godot --headless --path . -s tests/test_world.gd
 
 const GalleryScript := preload("res://scripts/gallery.gd")
+const BookTextScript := preload("res://scripts/book_text.gd")
+const QuestScript := preload("res://scripts/quest.gd")
+## Budget d'un pas (vestibule ou niveau), celui de test_depth : moins d'une demi-image à 60 i/s.
+const SHIFT_BUDGET_USEC := 8000
 # 17 galeries sur 3 niveaux le long du vestibule, 6 niveaux du puits en galeries entières,
 # et de chaque côté les diagonales vues par les puits voisins (|dz| − 1 ≤ |dy| ≤ |dz| + 1,
 # hors des trois rangées) : 2 cases à |dz| = 1, 4 à |dz| = 2, 6 de |dz| = 3 à 8.
@@ -64,7 +68,7 @@ func _initialize() -> void:
 	Input.action_press("move_forward")
 	await _steps(75)
 	Input.action_release("move_forward")
-	_check(main.origin_hexagon == start + 1, "la galerie voisine devient l'origine (Δ = %d)" % (main.origin_hexagon - start))
+	_check(main.origin_hexagon == start + 1 and main.origin_hexagon_b25 == BookTextScript.b25(start + 1), "la galerie voisine devient l'origine, en int et en base 25 (Δ = %d)" % (main.origin_hexagon - start))
 	_check(player.position.y > -0.05 and player.position.z < 0.0, "le bibliothécaire arrive dans la galerie voisine (%s)" % player.position)
 	_check(_gallery_count(main) == GALLERIES, "toujours %d galeries après le décalage (lu : %d)" % [GALLERIES, _gallery_count(main)])
 
@@ -83,8 +87,86 @@ func _initialize() -> void:
 	_check(player.position.z > GalleryScript.RAIL_APOTHEM and player.position.y > -0.05,
 		"la balustrade arrête le bibliothécaire (z = %.2f)" % player.position.z)
 
+	await _test_far_walk(main, player)
+
 	print("test_world : %s" % ("OK" if _failures == 0 else "%d échec(s)" % _failures))
+	BookTextScript.shutdown()
 	quit(1 if _failures else 0)
+
+
+## Marche à une adresse de ~917 000 chiffres décimaux (la galerie du livre de « La biblioteca de
+## Babel ») : ±1 galerie et ±1 niveau, temps d'un pas, adresse affichée, traversée à pied, et
+## lecture du livre du catalogue à son adresse.
+func _test_far_walk(main: Node3D, player: CharacterBody3D) -> void:
+	var entry: Dictionary = QuestScript.load_catalogue()[0]
+	var target: Dictionary = entry.address
+	var near := _measure_steps(main, player)
+	_check(main.place_origin(target.hexagon, target.level), "l'origine se place sur la galerie d'un livre du catalogue (%d chiffres base 25)" % target.hexagon.length())
+	player.position = Vector3(0.0, 0.05, 3.2)
+	await _steps(5)
+	_check(main.origin_hexagon_b25 == target.hexagon and main.origin_level_b25 == target.level and _gallery_count(main) == GALLERIES,
+		"%d galeries entretenues autour de l'origine lointaine" % GALLERIES)
+	var shown: String = main.hud._address.text
+	_check(shown.contains("…") and shown.contains("chiffres)"), "adresse lointaine affichée en abrégé : %s" % shown)
+
+	var far := _measure_steps(main, player)
+	_check(main.origin_hexagon_b25 == target.hexagon and main.origin_level_b25 == target.level, "pas aller et retour : l'origine revient exactement")
+	print("  pas de vestibule : pire %.2f ms près de 0, %.2f ms à 917 000 chiffres ; niveau : %.2f ms / %.2f ms (médianes %.2f / %.2f ms)" % [
+		near.hall / 1000.0, far.hall / 1000.0, near.level / 1000.0, far.level / 1000.0, near.median / 1000.0, far.median / 1000.0])
+	_check(far.hall <= SHIFT_BUDGET_USEC, "pas de vestibule à 917 000 chiffres en moins de %.0f ms (pire : %.2f ms)" % [SHIFT_BUDGET_USEC / 1000.0, far.hall / 1000.0])
+	_check(far.level <= SHIFT_BUDGET_USEC, "changement de niveau à 917 000 chiffres en moins de %.0f ms (pire : %.2f ms)" % [SHIFT_BUDGET_USEC / 1000.0, far.level / 1000.0])
+	main._shift(1)
+	main._shift_level(-1)
+	var h := BookTextScript.b25_add_small(target.hexagon, 1)
+	var l := BookTextScript.b25_add_small(target.level, -1)
+	_check(main.origin_hexagon_b25 == h and main.origin_level_b25 == l, "un pas +1 galerie, −1 niveau : l'adresse suit exactement")
+	var expected := "Hexagone %s · niveau %s" % [BookTextScript.summary_text(BookTextScript.coordinate_summary(h)), BookTextScript.summary_text(BookTextScript.coordinate_summary(l))]
+	_check(main.hud._address.text == expected, "l'adresse affichée suit les pas, comme la relecture par le service : %s" % main.hud._address.text)
+	main._shift(-1)
+	main._shift_level(1)
+
+	# À pied : traversée du vestibule +Z jusqu'à la galerie voisine.
+	player.position = Vector3(0.0, 0.05, 3.2)
+	player.rotation.y = PI
+	player.camera.rotation.x = 0.0
+	await _steps(3)
+	Input.action_press("move_forward")
+	await _steps(75)
+	Input.action_release("move_forward")
+	_check(main.origin_hexagon_b25 == h and main.origin_level_b25 == target.level, "à pied, la galerie voisine de la galerie lointaine devient l'origine")
+	main._shift(-1)
+
+	# Le livre du catalogue, lu à son adresse depuis la galerie : sa première page a le condensat du catalogue.
+	var local := {"hexagon": main.origin_hexagon, "level": main.origin_level, "wall": target.wall, "shelf": target.shelf, "book": target.book}
+	var book: Dictionary = main.target_address(local)
+	_check(book == target, "le livre visé dans la galerie lointaine a l'adresse du catalogue")
+	main.reader.open(book)
+	var text: String = main.reader._text.text.replace("\n", "")
+	_check(text.sha256_text() == entry.pages[0].sha256, "le lecteur montre la page 1 du livre de « %s »" % entry.title)
+	_check(main.reader._heading.text.contains("chiffres"), "en-tête du lecteur abrégé : %s" % main.reader._heading.text.left(140))
+	main.reader.turn(1)
+	_check(main.reader._text.text.replace("\n", "").sha256_text() == entry.pages[1].sha256, "page 2 : le texte continue")
+	main.reader.close()
+
+
+## Pas de vestibule et de niveau, aller et retour : {hall, level : pires temps, median : médiane}, en µs.
+func _measure_steps(main: Node3D, player: CharacterBody3D) -> Dictionary:
+	var times := []
+	var worst := {"hall": 0, "level": 0}
+	for step in [Vector2i(1, 0), Vector2i(1, 0), Vector2i(-1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1), Vector2i(0, -1), Vector2i(0, 1)]:
+		var t := Time.get_ticks_usec()
+		if step.x != 0:
+			main._shift(step.x)
+		else:
+			main._shift_level(step.y)
+		var spent := Time.get_ticks_usec() - t
+		times.append(spent)
+		var axis := "hall" if step.x != 0 else "level"
+		worst[axis] = maxi(worst[axis], spent)
+		player.position = Vector3(0.0, 0.05, 3.2)
+	times.sort()
+	worst.median = times[times.size() / 2]
+	return worst
 
 
 func _steps(count: int) -> void:

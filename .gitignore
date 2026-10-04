@@ -2,3 +2,4 @@
 .godot/
 .claude/
 tools/.travail/
+tools/__pycache__/

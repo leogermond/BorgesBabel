@@ -17,32 +17,34 @@ extends AudioStreamPlayer3D
 ## Le filtre passe-bas de distance du moteur (attenuation_filter_*) reste à sa valeur par défaut : le lointain s'étouffe.
 ##
 ## SYNCHRONISATION. Une seule horloge globale : music_position() = (temps écoulé depuis le premier haut-parleur) modulo la
-## durée du morceau. Un haut-parleur créé ou recyclé démarre à cette position (play(from_position)), il ne redémarre
+## durée du morceau. Un haut-parleur créé démarre à cette position (play(from_position), à la première image libre), il ne redémarre
 ## jamais le morceau : décalage d'origine, recyclage de galerie et arrivée tardive tombent à la même phase, à quelques
 ## millisecondes près (une période de mixage). Tous les lecteurs partagent le même mélangeur : une fois lancés, ils ne
 ## dérivent pas entre eux. Le premier haut-parleur vivant sert de référence : l'horloge murale s'ajuste doucement
 ## sur son horloge audio (sans saut), et un haut-parleur qui s'écarterait de plus de 0,25 s se recale (rare).
+## Garde : l'horloge murale avance pendant une pause de l'arbre, les lecteurs non. Après une pause (NOTIFICATION_UNPAUSED),
+## ou une image de plus de STALL_USEC (0,5 s), resync_all() recale l'horloge sur la position de lecture de la référence
+## et ramène sur elle tout lecteur qui s'en écarte de plus de RESYNC_TOLERANCE ; sans cette garde, les lecteurs se
+## recaleraient un à un sur l'horloge murale, loin de la référence, et s'éloigneraient d'elle pour de bon.
 ##
 ## BUS « Ambiance » créé en code s'il manque (envoi vers Master) : AmbientSpeaker.set_bus_volume(db), set_bus_muted(bool).
 ##
-## INTÉGRATION (gallery.gd ; main.gd garde la règle « un seul niveau, 2 galeries de chaque côté ») :
-##   # gallery.gd, variable de membre
-##   var _speaker: AmbientSpeaker
-##   # gallery.gd, méthode publique : appelée par main._update_galleries() pour chaque case, après gallery.position = …
-##   func set_speaker(wanted: bool) -> void:
-##       if wanted and _speaker == null:
-##           _speaker = AmbientSpeaker.create()
-##           _speaker.position = Vector3(0.0, AmbientSpeaker.HEIGHT, APOTHEM + HALL_LENGTH * 0.5)   # (0 ; 2,4 ; 6)
-##           add_child(_speaker)
-##       elif not wanted and _speaker != null:
-##           _speaker.retire()      # fondu de 1 s puis queue_free ; le nœud n'est plus la propriété de la galerie
-##           _speaker = null
-##   # main.gd, dans la boucle de _update_galleries(), après le placement :
-##   gallery.set_speaker(cell.y == 0 and absi(cell.x) <= AmbientSpeaker.REACH_GALLERIES)
-## Recyclage : une galerie relabellisée (readdress) garde son haut-parleur tant que sa case reste dans la règle ; la case
-## d'arrivée d'un décalage d'origine est à plus de 26 m du joueur, donc muette : pas de claquement. Une galerie qui
-## quitte la règle appelle retire() (pas de queue_free direct, sinon le volume coupe net s'il restait audible).
-## Hors de la portée de l'oreille, create() démarre à plein volume ; à moins de MAX_DISTANCE du joueur, fondu d'entrée de 0,5 s.
+## INTÉGRATION. gallery.gd : Gallery.set_speaker(wanted) pose le haut-parleur au milieu du vestibule +Z de la galerie,
+## en (0 ; 2,4 ; 6), ou le retire (retire() : fondu de 1 s puis queue_free ; le nœud n'est plus la propriété de la
+## galerie). main._update_galleries() l'appelle pour chaque case, une fois la galerie à sa place :
+##   gallery.set_speaker(AmbientSpeaker.has_speaker(cell))
+## Disposition : le vestibule de la case x est à z = 12·x + 6 ; has_speaker garde les cases x de −HALLWAYS_EACH_SIDE à
+## HALLWAYS_EACH_SIDE − 1 du niveau du joueur, soit des haut-parleurs à z = −30, −18, −6, 6, 18, 30 : trois de chaque côté
+## du centre de la galerie d'origine, symétriques. Le joueur reste entre z = −6 et 6 (l'origine change au milieu du
+## vestibule) : tout vestibule à moins de MAX_DISTANCE (26 m) de lui est dans |z| ≤ 32, donc pourvu, et ceux à ±30 sont
+## déjà à plus de 24 m (−44 dB). Au décalage _shift(±1), le joueur passe en z = ∓6 : le haut-parleur qui naît (à ±30)
+## et celui qui part (à ∓42) sont à 36 m de lui, inaudibles, dans les deux sens. Au changement de niveau, les six
+## haut-parleurs du niveau quitté partent en fondu de sortie et ceux du nouveau niveau, audibles, naissent en fondu
+## d'entrée : create() fond l'entrée (FADE_IN, 0,5 s) de tout haut-parleur à moins de MAX_DISTANCE de la caméra active,
+## ou quand il n'y a pas encore de caméra (naissance du monde) ; plus loin, il démarre à plein volume, inaudible.
+## Pas de haut-parleur aux autres niveaux : à 3,4 m à la verticale le gain vaudrait −6 dB, trop pour une dalle de 0,4 m.
+## Recyclage : une galerie relabellisée (readdress) garde son haut-parleur tant que sa case reste dans la règle ; une
+## galerie qui quitte la règle appelle retire() (pas de queue_free direct, sinon le volume coupe net s'il restait audible).
 
 const AmbientSpeakerScript := preload("res://scripts/ambient_speaker.gd")
 
@@ -51,7 +53,7 @@ const DEFAULT_PATH := "res://audio/ambiance.ogg"
 const CUSTOM_PATH := "res://audio/ambiance_custom.ogg"
 
 const HEIGHT := 2.4                     # hauteur du haut-parleur dans le couloir (plafond à 3 m)
-const REACH_GALLERIES := 2              # galeries de chaque côté de l'origine qui reçoivent un haut-parleur
+const HALLWAYS_EACH_SIDE := 3           # vestibules pourvus de chaque côté du centre de la galerie d'origine
 const UNIT_SIZE := 2.0                  # distance du gain 1 (modèle inverse : gain = unit_size / distance)
 const MAX_DISTANCE := 26.0              # le moteur y ajoute une décroissance linéaire jusqu'à zéro
 const MAX_DB := 0.0                     # plafond sous le haut-parleur (le modèle inverse tend vers l'infini en 0)
@@ -59,20 +61,34 @@ const FADE_IN := 0.5
 const FADE_OUT := 1.0
 const RESYNC_AFTER := 0.25              # écart de lecture (s) au-delà duquel un haut-parleur se recale
 const RESYNC_EVERY := 4.0               # secondes entre deux contrôles de dérive
+const STALL_USEC := 500000              # image plus longue (ou pause de l'arbre) : tous les lecteurs se recalent
+const RESYNC_TOLERANCE := 0.1           # écart (s) à la référence toléré par resync_all (granularité du mixage)
+## Départs par image, au plus : play() attend le mélangeur (0,5 ms, des dizaines de ms quand il mixe) ; un haut-parleur
+## entré dans l'arbre démarre à la première image libre (dans son _process), jamais pendant le pas qui l'a créé.
+const STARTS_PER_FRAME := 1
 
 static var _stream: AudioStream
 static var _stream_loaded := false
 static var _origin_usec := -1           # musique à la position 0 à cet instant (Time.get_ticks_usec)
 static var _reference: AudioStreamPlayer3D
+static var _speakers: Array = []        # haut-parleurs dans l'arbre
+static var _last_tick_usec := -1        # dernière image vue par _watch_clock
+static var _last_tick_frame := -1
+static var _resync_requested := false
+static var resync_count := 0            # recalages faits par resync_all (pour contrôle)
+static var _start_frame := -1
+static var _starts := 0
 
 var start_position := 0.0               # position de départ réelle, pour contrôle
 var start_usec := 0
+var started := false                    # vrai une fois la lecture lancée
 var _fade_in := FADE_IN
 var _retiring := false
 var _since_check := 0.0
+var _fade_tween: Tween
 
 
-## Un haut-parleur prêt à entrer dans l'arbre : il démarre dans _ready à la position de l'horloge globale.
+## Un haut-parleur prêt à entrer dans l'arbre : il démarre à la première image libre, à la position de l'horloge globale.
 static func create(fade_in: float = FADE_IN) -> AmbientSpeakerScript:
 	var speaker := AmbientSpeakerScript.new()
 	speaker._fade_in = fade_in
@@ -85,6 +101,17 @@ static func create(fade_in: float = FADE_IN) -> AmbientSpeakerScript:
 	speaker.volume_db = 0.0
 	speaker.name = "AmbientSpeaker"
 	return speaker
+
+
+## Vrai pour les cases (dz, dy relatives à l'origine) dont le vestibule reçoit un haut-parleur : niveau du joueur,
+## vestibules à z = 12·dz + 6 entre −30 et 30 m (voir l'en-tête).
+static func has_speaker(cell: Vector2i) -> bool:
+	return cell.y == 0 and cell.x >= -HALLWAYS_EACH_SIDE and cell.x < HALLWAYS_EACH_SIDE
+
+
+## Les haut-parleurs vivants (dans l'arbre), retirés ou non.
+static func speakers() -> Array:
+	return _speakers.filter(func(s: Object) -> bool: return is_instance_valid(s))
 
 
 ## Gain linéaire du modèle d'atténuation du moteur à la distance donnée (inverse de la distance, plafonné à max_db,
@@ -174,14 +201,17 @@ func retire(fade_out: float = FADE_OUT) -> void:
 	if not is_inside_tree() or not playing or fade_out <= 0.0:
 		queue_free()
 		return
-	var tween := create_tween()
-	tween.tween_method(_set_linear, 1.0, 0.0, fade_out)
-	tween.tween_callback(queue_free)
+	if _fade_tween != null:
+		_fade_tween.kill()   # un fondu d'entrée inachevé repart de son volume du moment
+	_fade_tween = create_tween()
+	_fade_tween.tween_method(_set_linear, db_to_linear(volume_db), 0.0, fade_out)
+	_fade_tween.tween_callback(queue_free)
 
 
-func _ready() -> void:
-	if stream == null:
-		return
+## Lance la lecture à l'horloge globale, en fondu d'entrée si un auditeur l'entend déjà.
+func _start() -> void:
+	started = true
+	_watch_clock()   # une pause qui vient de finir recale l'horloge avant ce départ
 	if _reference == null or not is_instance_valid(_reference):
 		_reference = self
 	start_position = music_position()
@@ -191,15 +221,32 @@ func _ready() -> void:
 		volume_db = -80.0
 	play(start_position)
 	if fade:
-		create_tween().tween_method(_set_linear, 0.0, 1.0, _fade_in)
+		_fade_tween = create_tween()
+		_fade_tween.tween_method(_set_linear, 0.0, 1.0, _fade_in)
+
+
+func _enter_tree() -> void:
+	if not _speakers.has(self):
+		_speakers.append(self)
 
 
 func _exit_tree() -> void:
+	_speakers.erase(self)
 	if _reference == self:
 		_reference = null
 
 
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_UNPAUSED:
+		_resync_requested = true
+
+
 func _process(delta: float) -> void:
+	_watch_clock()
+	if not started:
+		if stream != null and not _retiring and _may_start():
+			_start()
+		return
 	if not playing or _retiring:
 		return
 	if _reference == null or not is_instance_valid(_reference) or not _reference.playing:
@@ -217,6 +264,63 @@ func _process(delta: float) -> void:
 			play(start_position)
 
 
+## Vrai si un départ tient encore dans le budget de l'image (STARTS_PER_FRAME).
+static func _may_start() -> bool:
+	var frame := Engine.get_process_frames()
+	if frame != _start_frame:
+		_start_frame = frame
+		_starts = 0
+	if _starts >= STARTS_PER_FRAME:
+		return false
+	_starts += 1
+	return true
+
+
+## Une fois par image (le premier haut-parleur qui passe) : après une pause de l'arbre, ou une image de plus de
+## STALL_USEC, tous les lecteurs se recalent ensemble (resync_all).
+static func _watch_clock() -> void:
+	var frame := Engine.get_process_frames()
+	if frame == _last_tick_frame:
+		return
+	_last_tick_frame = frame
+	var now := Time.get_ticks_usec()
+	var stalled := _last_tick_usec >= 0 and now - _last_tick_usec > STALL_USEC
+	_last_tick_usec = now
+	if stalled or _resync_requested:
+		_resync_requested = false
+		resync_all()
+
+
+## Recale l'horloge globale sur la position de lecture du haut-parleur de référence (le premier qui joue), puis ramène
+## sur elle tout lecteur qui s'en écarte de plus de RESYNC_TOLERANCE. Aucun lecteur ne revient à l'horloge murale
+## seule : après une pause, tous reprennent là où la référence s'est arrêtée, ensemble.
+static func resync_all() -> void:
+	var length := music_length()
+	if length <= 0.0:
+		return
+	var reference: AudioStreamPlayer3D = _reference if is_instance_valid(_reference) and _reference.playing else null
+	if reference == null:
+		for s: AmbientSpeakerScript in speakers():
+			if s.playing:
+				reference = s
+				break
+	if reference == null:
+		return
+	_reference = reference
+	resync_count += 1
+	var position := reference.get_playback_position()
+	var now := Time.get_ticks_usec()
+	_origin_usec = now - int(position * 1.0e6)
+	for s: AmbientSpeakerScript in speakers():
+		if not s.playing:
+			continue
+		if s != reference and absf(_circular_diff(s.get_playback_position(), position)) > RESYNC_TOLERANCE:
+			s.play(position)
+		s.start_position = s.get_playback_position() if s != reference else position
+		s.start_usec = now
+		s._since_check = 0.0
+
+
 ## Rapproche l'horloge murale de l'horloge audio du haut-parleur de référence, de 5 % de l'écart par image.
 func _steer_clock() -> void:
 	var length := music_length()
@@ -227,10 +331,13 @@ func _steer_clock() -> void:
 		_origin_usec -= int(err * 0.05 * 1.0e6)
 
 
-## Vrai si un auditeur (caméra active) se trouve assez près pour entendre ce haut-parleur dès maintenant.
+## Vrai si un auditeur (caméra active) se trouve assez près pour entendre ce haut-parleur dès maintenant, ou s'il n'y
+## a pas encore de caméra (le monde naît : on entrera en fondu).
 func _audible_now() -> bool:
-	var camera := get_viewport().get_camera_3d() if is_inside_tree() else null
-	return camera != null and camera.global_position.distance_to(global_position) < MAX_DISTANCE
+	if not is_inside_tree():
+		return false
+	var camera := get_viewport().get_camera_3d()
+	return camera == null or camera.global_position.distance_to(global_position) < MAX_DISTANCE
 
 
 func _set_linear(value: float) -> void:

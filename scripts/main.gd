@@ -26,6 +26,7 @@ extends Node3D
 ## Gallery.FAR_FADE_END de l'œil, là où la brume a tout recouvert.
 
 const GalleryScript := preload("res://scripts/gallery.gd")
+const AmbientSpeakerScript := preload("res://scripts/ambient_speaker.gd")
 const FarViewScript := preload("res://scripts/far_view.gd")
 const HudScript := preload("res://scripts/hud.gd")
 const PlayerScript := preload("res://scripts/player.gd")
@@ -104,6 +105,7 @@ func _exit_tree() -> void:
 
 func _process(_delta: float) -> void:
 	_update_lamps()
+	GalleryScript.pump_titles()
 
 
 func _physics_process(_delta: float) -> void:
@@ -278,6 +280,7 @@ func _update_galleries(moved := Vector2i.ZERO) -> void:
 		elif gallery.detail != detail:
 			gallery.set_detail(detail as GalleryScript.Detail)
 		gallery.position = Vector3(0.0, cell.y * GalleryScript.LEVEL_PITCH, cell.x * GalleryScript.PITCH)
+		gallery.set_speaker(AmbientSpeakerScript.has_speaker(cell))   # musique : vestibules du niveau, ±30 m
 	for pool: Array in spares:
 		for spare: GalleryScript in pool:
 			spare.queue_free()
@@ -285,6 +288,7 @@ func _update_galleries(moved := Vector2i.ZERO) -> void:
 	_lit.clear()
 	for cell: Vector2i in lit_cells():
 		_lit.append(placed[cell])
+	GalleryScript.prefetch_titles(origin_hexagon, origin_level, lit_cells())   # titres du prochain pas
 	_update_lamps()
 
 

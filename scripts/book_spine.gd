@@ -6,28 +6,16 @@ extends RefCounted
 ## de son contenu : SHA-256 de l'adresse, puis un tirage simple d'octets parmi les 25 symboles.
 ## Le même livre porte donc toujours le même titre, sur toute machine.
 ##
-## Affichage : un seul matériau partagé (material()) dessine le titre sur la face du dos dans le
-## shader, à partir d'un atlas des 25 glyphes de Lora rendu une fois sur le processeur. Une galerie
-## n'écrit que 4 flottants par livre dans la donnée personnalisée de son MultiMesh (encode_title).
+## Affichage : le nuanceur des livres de gallery.gd (variante BOOKS de Gallery.LIBRARY_SHADER)
+## dessine le titre sur la face du dos, à partir d'un atlas des 47 glyphes de Lora rendu une fois
+## sur le processeur (glyph_atlas). Les titres d'une galerie arrivent par une petite texture de
+## données propre à la galerie (gallery_title_bytes) : RGBA8, TEXTURE_WIDTH × TEXTURE_HEIGHT
+## texels, 3 texels (12 octets) par livre, lue au texel près par texelFetch(INSTANCE_ID) ; elle
+## vaut sous Forward+, Mobile et Compatibility (aucune donnée personnalisée de MultiMesh).
 ##
 ## Affiché, le titre prend une capitale à sa première lettre et à la première lettre après chaque
-## point (display_title) ; le shader applique la même règle en lisant les symboles. Le titre codé,
+## point (display_title) ; le nuanceur applique la même règle en lisant les symboles. Le titre codé,
 ## lui, reste en 25 symboles minuscules.
-##
-## Branchement dans gallery.gd :
-##   _book_mesh.material = BookSpine.material()          # au lieu de _material("book")
-##   multimesh.use_custom_data = true                     # tampon : 20 flottants par livre
-##   var codes := BookSpine.gallery_codes(hexagon, level, image_flags)   # 640 Color, ordre (mur·5 + étagère)·32 + livre
-##   buffer[o + 16] = codes[i].r ; buffer[o + 17] = codes[i].g ; buffer[o + 18] = codes[i].b ; buffer[o + 19] = codes[i].a
-## Avec use_colors et use_custom_data, une instance occupe 20 flottants : 12 de transformation,
-## 4 de couleur, 4 de titre (disposition constatée sous opengl3 ; le moteur sans écran ne fait
-## que renvoyer le tampon). Dans gallery.gd, trois endroits supposent 16 flottants par livre :
-##   _new_books        `var o := i * 16`  (≈ ligne 218)
-##   _book_template    `_book_buffer.resize(... * 16)`  (≈ ligne 243)
-##   _book_template    `var o := (...) * 16` et `for k in 16` (≈ lignes 253 et 256)
-## Le titre exige des flottants 32 bits par instance : Forward+ et Mobile. Le moteur Compatibility
-## (OpenGL) range la donnée personnalisée en demi-flottants ; le shader le reconnaît et montre
-## alors le cuir nu, sans titre.
 
 ## Les 25 symboles de Borges, dans l'ordre de BookText.ALPHABET.
 const ALPHABET := "abcdefghijlmnoprstuvxz ,."
@@ -39,29 +27,32 @@ const GLYPHS := ALPHABET + "ABCDEFGHIJLMNOPRSTUVXZ"
 const MIN_LENGTH := 6
 const MAX_LENGTH := 16
 const SYMBOL_BITS := 5
-const SYMBOLS_PER_CHANNEL := 4
-const IMAGE_BIT := 20                    # drapeau « livre d'images », dans la composante r
-## Chaque composante vaut MARK + charge utile : entier exact en flottant 32 bits (< 2^24),
-## et un zéro (donnée absente) se distingue d'un titre.
-const MARK := 8388608                    # 2^23
+const SYMBOLS_PER_CHANNEL := 4           # 4 symboles de 5 bits par mot de 20 bits
+const CHANNELS := 4                      # 4 mots par titre : 16 symboles
+const IMAGE_BIT := 20                    # drapeau « livre d'images », au bit 20 du premier mot
 const WALLS := 4
 const SHELVES := 5
 const BOOKS := 32
+## Texture des titres d'une galerie : chaque mot tient en 3 octets (petit-boutiste), un titre en
+## 12 octets, soit 3 texels RGBA8. Ligne = mur·5 + étagère, colonne = livre·3 : le livre de rang
+## i = (mur·5 + étagère)·32 + livre (INSTANCE_ID du MultiMesh) commence à l'octet 12·i.
+const BYTES_PER_BOOK := 12
+const TEXELS_PER_BOOK := 3
+const TEXTURE_WIDTH := BOOKS * TEXELS_PER_BOOK     # 96
+const TEXTURE_HEIGHT := WALLS * SHELVES            # 20
 
 const FONT_PATH := "res://fonts/Lora-VariableFont_wght.ttf"
-const SHADER_PATH := "res://shaders/book_spine.gdshader"
 const FONT_WEIGHT := 600                 # Lora variable : 400 à 700 ; demi-gras pour la dorure
 const FONT_PX := 64                      # corps du rendu de l'atlas : 1 em = 64 pixels
 const CELL_PX := 96                      # case carrée par glyphe
 const ATLAS_COLUMNS := 7                 # 7 × 7 cases (47 occupées) : 672 × 672 pixels
 const PEN_PX := Vector2i(16, 70)         # point de chasse (origine de la ligne de base) dans la case
-## Mise en page du titre, transmise au shader par material() et reprise par title_layout().
+## Mise en page du titre, écrite dans le nuanceur des livres (Gallery) et reprise par title_layout().
 const TRACKING_EM := 0.06                # espace ajouté entre deux lettres
 const TITLE_MARGIN := 0.035              # réserve en tête et en pied du dos, en mètres
 const TITLE_SIZE_FRACTION := 0.42        # corps maximal (1 em) rapporté à l'épaisseur du dos
 const TITLE_CENTER_EM := 0.25            # milieu de l'œil des minuscules, au-dessus de la ligne de base
 
-static var _material: ShaderMaterial
 static var _atlas: Image
 static var _advances := PackedFloat32Array()
 
@@ -164,93 +155,84 @@ static func title_layout(text: String, thickness: float, height: float) -> Vecto
 	return Vector2(minf(thickness * TITLE_SIZE_FRACTION, room / maxf(width, 0.001)), width)
 
 
-# --- Codage pour le shader ------------------------------------------------------------------
+# --- Codage pour le nuanceur ----------------------------------------------------------------
 
-## Les 4 flottants d'INSTANCE_CUSTOM pour ce titre : 4 symboles de 5 bits par composante
-## (0 : fin, 1 à 25 : rang + 1), le drapeau d'image au bit 20 de r, MARK ajouté partout.
-## La casse est ignorée (un titre affiché donne le même code), les symboles hors alphabet sont
-## omis ; au-delà de 16 symboles, le titre est tronqué.
-static func encode_title(text: String, image_book := false) -> Color:
+## Les 12 octets du titre dans la texture : 4 mots de 20 bits, 4 symboles de 5 bits chacun
+## (0 : fin, 1 à 25 : rang + 1), le drapeau d'image au bit 20 du premier mot. La casse est
+## ignorée (un titre affiché donne le même code), les symboles hors alphabet sont omis ; au-delà
+## de 16 symboles, le titre est tronqué.
+static func encode_title(text: String, image_book := false) -> PackedByteArray:
 	var indices := PackedByteArray()
 	for c in text:
 		var index := ALPHABET.find(c.to_lower())
 		if index >= 0:
 			indices.append(index)
-	return _encode(indices, image_book)
+	var bytes := PackedByteArray()
+	bytes.resize(BYTES_PER_BOOK)
+	_encode(indices, image_book, bytes, 0)
+	return bytes
 
 
-static func _encode(indices: PackedByteArray, image_book: bool) -> Color:
-	var payload := PackedInt32Array([0, 0, 0, 0])
+## Écrit le titre de rangs `indices` dans `bytes` à partir de l'octet `at`.
+static func _encode(indices: PackedByteArray, image_book: bool, bytes: PackedByteArray, at: int) -> void:
+	var words := PackedInt32Array([0, 0, 0, 0])
 	for i in mini(indices.size(), MAX_LENGTH):
-		payload[i / SYMBOLS_PER_CHANNEL] |= (indices[i] + 1) << (SYMBOL_BITS * (i % SYMBOLS_PER_CHANNEL))
+		words[i / SYMBOLS_PER_CHANNEL] |= (indices[i] + 1) << (SYMBOL_BITS * (i % SYMBOLS_PER_CHANNEL))
 	if image_book:
-		payload[0] |= 1 << IMAGE_BIT
-	return Color(MARK + payload[0], MARK + payload[1], MARK + payload[2], MARK + payload[3])
+		words[0] |= 1 << IMAGE_BIT
+	for c in CHANNELS:
+		bytes[at + 3 * c] = words[c] & 0xFF
+		bytes[at + 3 * c + 1] = (words[c] >> 8) & 0xFF
+		bytes[at + 3 * c + 2] = (words[c] >> 16) & 0xFF
 
 
-## Lecture inverse, à l'identique du shader : chaîne vide si une composante sort de [2^23, 2^24).
-static func decode_title(code: Color) -> String:
-	var payload := _payload(code)
+## Lecture inverse, à l'identique du nuanceur : le titre du livre de rang `book` d'un tampon de
+## galerie (ou du seul titre de encode_title, book = 0). Les codes 26 à 31 finissent le titre.
+static func decode_title(bytes: PackedByteArray, book := 0) -> String:
+	var words := _words(bytes, book)
 	var text := ""
-	if payload.is_empty():
-		return text
 	for i in MAX_LENGTH:
-		var symbol := (payload[i / SYMBOLS_PER_CHANNEL] >> (SYMBOL_BITS * (i % SYMBOLS_PER_CHANNEL))) & 31
+		var symbol := (words[i / SYMBOLS_PER_CHANNEL] >> (SYMBOL_BITS * (i % SYMBOLS_PER_CHANNEL))) & 31
 		if symbol == 0 or symbol > ALPHABET.length():
-			break   # 26 à 31 : fin, comme dans le shader
+			break
 		text += ALPHABET[symbol - 1]
 	return text
 
 
-static func decode_image_flag(code: Color) -> bool:
-	var payload := _payload(code)
-	return not payload.is_empty() and (payload[0] >> IMAGE_BIT) & 1 == 1
+static func decode_image_flag(bytes: PackedByteArray, book := 0) -> bool:
+	return (_words(bytes, book)[0] >> IMAGE_BIT) & 1 == 1
 
 
-static func _payload(code: Color) -> PackedInt32Array:
-	var payload := PackedInt32Array()
-	for value in [code.r, code.g, code.b, code.a]:
-		if not (value >= MARK and value < 2 * MARK):
-			return PackedInt32Array()
-		payload.append(int(value) - MARK)
-	return payload
+static func _words(bytes: PackedByteArray, book: int) -> PackedInt32Array:
+	var words := PackedInt32Array([0, 0, 0, 0])
+	var at := book * BYTES_PER_BOOK
+	if at < 0 or at + BYTES_PER_BOOK > bytes.size():
+		return words
+	for c in CHANNELS:
+		words[c] = bytes[at + 3 * c] | bytes[at + 3 * c + 1] << 8 | bytes[at + 3 * c + 2] << 16
+	return words
 
 
-## Les codes des 640 livres d'une galerie, rangés à l'indice (mur·5 + étagère)·32 + livre,
-## comme BookText.gallery_image_books ; `image_books` (même ordre, facultatif) donne le drapeau.
-static func gallery_codes(hexagon: int, level: int, image_books: Array = []) -> PackedColorArray:
-	var codes := PackedColorArray()
-	codes.resize(WALLS * SHELVES * BOOKS)
-	var prefix := "dos|%d|%d|" % [hexagon, level]
+## Les octets de la texture des titres d'une galerie (TEXTURE_WIDTH × TEXTURE_HEIGHT texels
+## RGBA8), livre de rang (mur·5 + étagère)·32 + livre à l'octet 12 × rang, comme
+## BookText.gallery_image_books ; `image_books` (même ordre, facultatif) donne le drapeau.
+## Hexagone et niveau : entiers, ou décimaux en chaîne (même titre que title_at).
+## Sans état partagé : se calcule aussi bien sur un fil de WorkerThreadPool.
+static func gallery_title_bytes(hexagon: Variant, level: Variant, image_books: Array = []) -> PackedByteArray:
+	var bytes := PackedByteArray()
+	bytes.resize(WALLS * SHELVES * BOOKS * BYTES_PER_BOOK)
+	var prefix := "dos|%s|%s|" % [str(hexagon), str(level)]
 	var i := 0
 	for wall in WALLS:
 		for shelf in SHELVES:
 			for book in BOOKS:
 				var image := i < image_books.size() and bool(image_books[i])
-				codes[i] = _encode(_indices(prefix + "%d|%d|%d" % [wall, shelf, book]), image)
+				_encode(_indices(prefix + "%d|%d|%d" % [wall, shelf, book]), image, bytes, i * BYTES_PER_BOOK)
 				i += 1
-	return codes
+	return bytes
 
 
-# --- Matériau et atlas ----------------------------------------------------------------------
-
-## Le matériau partagé des livres : cuir de la couleur d'instance, titre doré sur le dos.
-static func material() -> ShaderMaterial:
-	if _material != null:
-		return _material
-	_material = ShaderMaterial.new()
-	_material.shader = load(SHADER_PATH)
-	_material.set_shader_parameter("glyph_atlas", ImageTexture.create_from_image(glyph_atlas()))
-	_material.set_shader_parameter("glyph_advance", glyph_advances())
-	_material.set_shader_parameter("atlas_cell_em", float(CELL_PX) / FONT_PX)
-	_material.set_shader_parameter("atlas_origin_em", Vector2(PEN_PX) / FONT_PX)
-	_material.set_shader_parameter("atlas_columns", ATLAS_COLUMNS)
-	_material.set_shader_parameter("tracking_em", TRACKING_EM)
-	_material.set_shader_parameter("title_margin", TITLE_MARGIN)
-	_material.set_shader_parameter("title_size_fraction", TITLE_SIZE_FRACTION)
-	_material.set_shader_parameter("title_center_em", TITLE_CENTER_EM)
-	return _material
-
+# --- Atlas ---------------------------------------------------------------------------------
 
 ## Chasse de chaque glyphe de GLYPHS, en em.
 static func glyph_advances() -> PackedFloat32Array:

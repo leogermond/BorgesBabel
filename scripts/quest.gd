@@ -19,6 +19,10 @@ const PINS_VERSION := 1
 const EXACT_DIGITS := 15
 const KIND_CATALOGUE := "catalogue"
 const KIND_SEARCH := "recherche"
+const KIND_REGISTER := "registre"
+const REGISTER_TITLE := "Registre des livres manquants"
+const REGISTER_AUTHOR := "anonyme"
+const REGISTER_CONTEXT := "Registre des ouvrages manquants aux étagères."
 
 static var _stolen: Dictionary = {}   # cache de is_stolen_book
 
@@ -299,14 +303,25 @@ static func load_catalogue(path := CATALOGUE_PATH) -> Array:
 ## lue une fois) : un livre volé à la Bibliothèque. Hexagone et niveau en chaînes décimales.
 static func is_stolen_book(hexagon: String, level: String, wall: int, shelf: int, book: int) -> bool:
 	if _stolen.is_empty():
-		var parsed: Variant = _read_json(CATALOGUE_PATH)
-		var books: Variant = parsed.get("stolen_books") if parsed is Dictionary else null
-		_stolen["loaded"] = true
-		if books is Array:
-			for raw: Variant in books:
-				if raw is Dictionary and is_valid_address(raw.merged({"page": 0})):
-					_stolen[_book_key(dec_normalize(raw.hexagon), dec_normalize(raw.level), int(raw.wall), int(raw.shelf), int(raw.book))] = true
+		_stolen["chargé"] = true
+		for b: Dictionary in stolen_books():
+			_stolen[_book_key(b.hexagon, b.level, b.wall, b.shelf, b.book)] = true
 	return _stolen.has(_book_key(hexagon, level, wall, shelf, book))
+
+
+## Les livres volés du catalogue, dans son ordre : {hexagon, level, wall, shelf, book}, forme
+## canonique ; les livres mal formés sont écartés.
+static func stolen_books(path := CATALOGUE_PATH) -> Array:
+	var parsed: Variant = _read_json(path)
+	var books: Variant = parsed.get("stolen_books") if parsed is Dictionary else null
+	var result := []
+	if books is Array:
+		for raw: Variant in books:
+			if raw is Dictionary and is_valid_address(raw.merged({"page": 0})):
+				var a := normalized_address(raw.merged({"page": 0}))
+				a.erase("page")
+				result.append(a)
+	return result
 
 
 static func _book_key(hexagon: String, level: String, wall: int, shelf: int, book: int) -> String:
@@ -350,9 +365,10 @@ static func _valid_entry(raw: Variant) -> Dictionary:
 # --- Épingles -----------------------------------------------------------------------------------
 # Une épingle : {id, kind, title, author, address}.
 #   catalogue : id « catalogue:<id de l'entrée> », pages lues dans le catalogue ;
-#   recherche : id « recherche:<condensat de l'adresse> », titre et adresse seuls (jamais la source).
+#   recherche : id « recherche:<condensat de l'adresse> », titre et adresse seuls (jamais la source) ;
+#   registre  : id « registre », le registre des livres manquants, tiré de stolen_books.
 # Ordre : les entrées du catalogue dans l'ordre du catalogue, puis les recherches, de la plus ancienne
-# à la plus récente.
+# à la plus récente, puis le registre.
 
 static func catalogue_pin(entry: Dictionary) -> Dictionary:
 	return {"id": "%s:%s" % [KIND_CATALOGUE, entry.id], "kind": KIND_CATALOGUE, "entry": entry.id,
@@ -366,22 +382,45 @@ static func search_pin(pin_title: String, target: Dictionary) -> Dictionary:
 		"title": pin_title.strip_edges(), "author": "", "address": a}
 
 
+static func register_pin() -> Dictionary:
+	return {"id": KIND_REGISTER, "kind": KIND_REGISTER, "entry": "",
+		"title": REGISTER_TITLE, "author": REGISTER_AUTHOR, "address": {}}
+
+
+## Les lignes du registre, une par livre de stolen_books dans l'ordre du catalogue :
+## {label : « Ouvrage manquant n — mur · étagère · livre », address : page 1 du livre}.
+static func register_items(path := CATALOGUE_PATH) -> Array:
+	var items := []
+	for book: Dictionary in stolen_books(path):
+		var a: Dictionary = book.merged({"page": 0})
+		items.append({
+			"label": "Ouvrage manquant %d — mur %d · étagère %d · livre %d" % [items.size() + 1, a.wall + 1, a.shelf + 1, a.book + 1],
+			"address": a,
+		})
+	return items
+
+
 static func default_pins(entries: Array) -> Array:
 	var pins := []
 	for entry: Dictionary in entries:
 		pins.append(catalogue_pin(entry))
+	pins.append(register_pin())
 	return pins
 
 
-## La quête d'une épingle ; null pour une entrée disparue du catalogue.
+## La quête d'une épingle ; null pour une entrée disparue du catalogue, et pour le registre
+## (ses lignes démarrent chacune une quête).
 static func from_pin(pin: Dictionary, entries: Array) -> Quest:
+	if pin.kind == KIND_REGISTER:
+		return null
 	if pin.kind == KIND_CATALOGUE:
 		var entry := catalogue_entry(entries, pin.entry)
 		return null if entry.is_empty() else from_entry(entry)
 	return from_address(pin.address, pin.title, pin.author)
 
 
-## Ajoute une épingle à la fin, ou remplace celle de même id à sa place.
+## Ajoute une épingle à sa place (une recherche après les autres, avant le registre), ou remplace
+## celle de même id.
 static func add_pin(pins: Array, pin: Dictionary) -> Array:
 	var result := pins.duplicate()
 	for i in result.size():
@@ -389,14 +428,14 @@ static func add_pin(pins: Array, pin: Dictionary) -> Array:
 			result[i] = pin
 			return result
 	result.append(pin)
-	return result
+	return _ordered(result, [])
 
 
 static func remove_pin(pins: Array, id: String) -> Array:
 	return pins.filter(func(p: Dictionary) -> bool: return p.id != id)
 
 
-## Les entrées du catalogue désépinglées.
+## Les épingles d'office (catalogue et registre) désépinglées.
 static func missing_catalogue(pins: Array, entries: Array) -> Array:
 	var present := {}
 	for p: Dictionary in pins:
@@ -404,45 +443,52 @@ static func missing_catalogue(pins: Array, entries: Array) -> Array:
 	return default_pins(entries).filter(func(p: Dictionary) -> bool: return not present.has(p.id))
 
 
-## Rétablit les entrées du catalogue désépinglées ; les recherches du joueur restent, après elles.
+## Rétablit les épingles d'office désépinglées ; les recherches du joueur restent.
 static func restore_catalogue(pins: Array, entries: Array) -> Array:
-	var searches := pins.filter(func(p: Dictionary) -> bool: return p.kind == KIND_SEARCH)
-	return default_pins(entries) + searches
+	return _ordered(default_pins(entries) + pins.filter(func(p: Dictionary) -> bool: return p.kind == KIND_SEARCH), entries)
 
 
-## Lit les épingles. Fichier absent, illisible ou d'un autre format → le catalogue entier ;
+## Lit les épingles. Fichier absent, illisible ou d'un autre format → les épingles d'office ;
 ## épingles abîmées ou entrées disparues du catalogue écartées une à une.
 static func load_pins(entries: Array, path := PINS_PATH) -> Array:
 	var parsed: Variant = _read_json(path)
 	if not parsed is Dictionary or parsed.get("version") != PINS_VERSION or not parsed.get("pins") is Array:
 		return default_pins(entries)
-	var catalogue_pins := {}
-	var searches := []
+	var pins := []
 	var seen := {}
 	for raw: Variant in parsed.pins:
 		var pin := _restore_pin(raw, entries)
-		if pin.is_empty() or seen.has(pin.id):
-			continue
-		seen[pin.id] = true
-		if pin.kind == KIND_CATALOGUE:
-			catalogue_pins[pin.id] = pin
-		else:
-			searches.append(pin)
-	var pins := []
-	for p: Dictionary in default_pins(entries):
-		if catalogue_pins.has(p.id):
-			pins.append(p)
-	return pins + searches
+		if not pin.is_empty() and not seen.has(pin.id):
+			seen[pin.id] = true
+			pins.append(pin)
+	return _ordered(pins, entries)
+
+
+## Range les épingles : catalogue (dans l'ordre de `entries`, ou dans l'ordre donné si vide),
+## recherches dans l'ordre donné, registre.
+static func _ordered(pins: Array, entries: Array) -> Array:
+	var catalogue_pins := pins.filter(func(p: Dictionary) -> bool: return p.kind == KIND_CATALOGUE)
+	if not entries.is_empty():
+		var rank := {}
+		for i in entries.size():
+			rank[entries[i].id] = i
+		catalogue_pins.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return rank.get(a.entry, 0) < rank.get(b.entry, 0))
+	var searches := pins.filter(func(p: Dictionary) -> bool: return p.kind == KIND_SEARCH)
+	var register := pins.filter(func(p: Dictionary) -> bool: return p.kind == KIND_REGISTER)
+	return catalogue_pins + searches + register.slice(0, 1)
 
 
 ## Écrit les épingles ; faux si le fichier ne s'ouvre pas en écriture.
 static func save_pins(pins: Array, path := PINS_PATH) -> bool:
 	var stored := []
 	for p: Dictionary in pins:
-		if p.kind == KIND_CATALOGUE:
-			stored.append({"kind": KIND_CATALOGUE, "entry": p.entry})
-		else:
-			stored.append({"kind": KIND_SEARCH, "title": p.title, "address": p.address})
+		match p.kind:
+			KIND_CATALOGUE:
+				stored.append({"kind": KIND_CATALOGUE, "entry": p.entry})
+			KIND_SEARCH:
+				stored.append({"kind": KIND_SEARCH, "title": p.title, "address": p.address})
+			KIND_REGISTER:
+				stored.append({"kind": KIND_REGISTER})
 	var file := FileAccess.open(path, FileAccess.WRITE)
 	if file == null:
 		return false
@@ -466,6 +512,8 @@ static func _restore_pin(raw: Variant, entries: Array) -> Dictionary:
 			if not is_valid_address(raw.address):
 				return {}
 			return search_pin(raw.title, raw.address)
+		KIND_REGISTER:
+			return register_pin()
 	return {}
 
 

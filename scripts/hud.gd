@@ -34,6 +34,8 @@ var catalogue_path := Quest.CATALOGUE_PATH
 var pins_path := Quest.PINS_PATH
 ## Message d'erreur de la dernière recherche (vide quand tout va bien).
 var last_error := ""
+## Le registre des livres manquants est déplié dans le panneau.
+var register_open := false
 
 var _address: Label
 var _crosshair: Label
@@ -147,8 +149,10 @@ func guidance() -> Dictionary:
 	return _guide
 
 
-## Démarre la quête d'une épingle ; faux si l'entrée a disparu du catalogue.
+## Démarre la quête d'une épingle ; faux pour le registre et pour une entrée disparue du catalogue.
 func start_pin(pin: Dictionary) -> bool:
+	if pin.kind == Quest.KIND_REGISTER:
+		return false   # le registre ne mène nulle part ; ses lignes, si
 	var found := Quest.from_pin(pin, catalogue)
 	if found == null:
 		last_error = "entrée introuvable : %s" % pin.title
@@ -475,7 +479,7 @@ func _rebuild_panel() -> void:
 	var first := true
 	for pin: Dictionary in pins:
 		var entry := Quest.catalogue_entry(catalogue, pin.entry) if pin.kind == Quest.KIND_CATALOGUE else {}
-		var pin_group: String = entry.get("group", "") if not entry.is_empty() else "Recherches"
+		var pin_group: String = entry.get("group", "") if not entry.is_empty() else ("Recherches" if pin.kind == Quest.KIND_SEARCH else "")
 		if first or pin_group != group:
 			first = false
 			group = pin_group
@@ -492,8 +496,20 @@ func _rebuild_panel() -> void:
 		row.add_child(start)
 		row.add_child(_button("désépingler", unpin.bind(pin.id)))
 		_panel_box.add_child(row)
-		var context: String = entry.get("context", "") if not entry.is_empty() else _search_context(pin.address)
+		var context: String = entry.get("context", "")
+		if pin.kind == Quest.KIND_SEARCH:
+			context = _search_context(pin.address)
+		elif pin.kind == Quest.KIND_REGISTER:
+			context = Quest.REGISTER_CONTEXT
 		_panel_box.add_child(_text(context, 13, Color(1, 1, 1, 0.65)))
+		if pin.kind == Quest.KIND_REGISTER and register_open:
+			for item: Dictionary in register_items():
+				var line := Button.new()
+				line.text = "    " + item.label
+				line.flat = true
+				line.alignment = HORIZONTAL_ALIGNMENT_LEFT
+				line.pressed.connect(_on_register_item_pressed.bind(item))
+				_panel_box.add_child(line)
 	if not Quest.missing_catalogue(pins, catalogue).is_empty():
 		_panel_box.add_child(_button("rétablir", restore_pins))
 
@@ -514,10 +530,28 @@ func _rebuild_panel() -> void:
 
 
 func _on_pin_pressed(pin: Dictionary) -> void:
-	if start_pin(pin):
+	if pin.kind == Quest.KIND_REGISTER:
+		register_open = not register_open
+		_rebuild_panel()
+	elif start_pin(pin):
 		close_panel()
 	else:
 		_rebuild_panel()
+
+
+## Les lignes du registre des livres manquants : {label, address}.
+func register_items() -> Array:
+	return Quest.register_items(catalogue_path)
+
+
+## Démarre la quête d'une ligne du registre : le livre manquant, à sa première page.
+func start_register_item(item: Dictionary) -> void:
+	start_quest(Quest.from_address(item.address, item.label))
+
+
+func _on_register_item_pressed(item: Dictionary) -> void:
+	start_register_item(item)
+	close_panel()
 
 
 static func _search_context(target: Dictionary) -> String:

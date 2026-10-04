@@ -177,13 +177,14 @@ func _test_pins() -> void:
 	var entries := QuestScript.load_catalogue()
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(PINS_TEST_PATH))
 	var pins := QuestScript.load_pins(entries, PINS_TEST_PATH)
-	_check(pins.size() == 8 and pins.all(func(p: Dictionary) -> bool: return p.kind == QuestScript.KIND_CATALOGUE), "sans fichier : le catalogue entier est épinglé")
+	_check(pins.size() == 9 and pins.slice(0, 8).all(func(p: Dictionary) -> bool: return p.kind == QuestScript.KIND_CATALOGUE) and pins[8].kind == QuestScript.KIND_REGISTER,
+		"sans fichier : le catalogue entier est épinglé, le registre à la fin")
 
 	var target := {"hexagon": "-123456789012345678901234567890", "level": "42", "wall": 3, "shelf": 4, "book": 31, "page": 409}
 	pins = QuestScript.remove_pin(pins, "catalogue:borges-el-zahir")
 	pins = QuestScript.add_pin(pins, QuestScript.search_pin("ma recherche", target))
 	pins = QuestScript.add_pin(pins, QuestScript.search_pin("ma recherche", target))
-	_check(pins.size() == 8, "désépingler une entrée, épingler une recherche (une seule fois)")
+	_check(pins.size() == 9 and pins[8].kind == QuestScript.KIND_REGISTER, "désépingler une entrée, épingler une recherche (une seule fois, avant le registre)")
 	_check(QuestScript.save_pins(pins, PINS_TEST_PATH), "épingles enregistrées")
 	var again := QuestScript.load_pins(entries, PINS_TEST_PATH)
 	_check(again.map(func(p: Dictionary) -> String: return p.id) == pins.map(func(p: Dictionary) -> String: return p.id), "épingles relues à l'identique")
@@ -191,14 +192,14 @@ func _test_pins() -> void:
 	var search_stored: Array = stored.pins.filter(func(p: Dictionary) -> bool: return p.kind == QuestScript.KIND_SEARCH)
 	_check(search_stored.size() == 1 and search_stored[0].keys().size() == 3, "une recherche s'enregistre en titre et adresse seuls")
 	var restored := QuestScript.restore_catalogue(again, entries)
-	_check(restored.size() == 9 and QuestScript.missing_catalogue(restored, entries).is_empty() and restored[2].entry == "borges-el-zahir",
+	_check(restored.size() == 10 and QuestScript.missing_catalogue(restored, entries).is_empty() and restored[2].entry == "borges-el-zahir",
 		"rétablir remet l'entrée désépinglée à sa place, la recherche reste")
 	var quest := QuestScript.from_pin(restored[8], entries)
 	_check(quest != null and quest.title == "ma recherche" and quest.address().hexagon == target.hexagon, "une épingle de recherche rend sa quête")
 
 	for broken in ["{pas du json", "[]", "{\"version\": 99, \"pins\": []}"]:
 		_write(PINS_TEST_PATH, broken)
-		_check(QuestScript.load_pins(entries, PINS_TEST_PATH).size() == 8, "fichier abîmé (%s) → le catalogue" % broken.left(14))
+		_check(QuestScript.load_pins(entries, PINS_TEST_PATH).size() == 9, "fichier abîmé (%s) → le catalogue" % broken.left(14))
 	_write(PINS_TEST_PATH, JSON.stringify({"version": 1, "pins": [
 		{"kind": "catalogue", "entry": "inconnue"}, {"kind": "recherche", "title": "x", "address": {"hexagon": "z"}},
 		{"kind": "catalogue", "entry": "claude-sur-l-humour"}, 7, {"kind": "recherche", "title": "y", "address": target}]}))
@@ -206,6 +207,25 @@ func _test_pins() -> void:
 	_check(partial.size() == 2 and partial[0].entry == "claude-sur-l-humour" and partial[1].title == "y", "épingles abîmées écartées une à une")
 	_write(PINS_TEST_PATH, JSON.stringify({"version": 1, "pins": []}))
 	_check(QuestScript.load_pins(entries, PINS_TEST_PATH).is_empty(), "tout désépinglé reste désépinglé")
+
+	# Registre des livres manquants : une ligne par livre de stolen_books, sans dire de quelle notice.
+	var register := QuestScript.register_pin()
+	_check(register.title == "Registre des livres manquants" and register.author == "anonyme" and QuestScript.from_pin(register, entries) == null,
+		"le registre, « anonyme », ne démarre aucune quête")
+	var books := QuestScript.stolen_books()
+	var items := QuestScript.register_items()
+	_check(books.size() == entries.size() and items.size() == books.size(), "le registre compte %d lignes, une par livre volé" % items.size())
+	var titles_seen := []
+	for i in items.size():
+		var a: Dictionary = items[i].address
+		var b: Dictionary = books[i]
+		_check(a.hexagon == b.hexagon and a.level == b.level and a.wall == b.wall and a.shelf == b.shelf and a.book == b.book and a.page == 0,
+			"ligne %d : le livre volé, page 1" % (i + 1))
+		_check(items[i].label == "Ouvrage manquant %d — mur %d · étagère %d · livre %d" % [i + 1, b.wall + 1, b.shelf + 1, b.book + 1], "ligne %d : %s" % [i + 1, items[i].label])
+		for entry: Dictionary in entries:
+			if items[i].label.contains(entry.title):
+				titles_seen.append(entry.title)
+	_check(titles_seen.is_empty(), "le registre ne nomme aucune œuvre")
 
 
 static func _write(path: String, text: String) -> void:
@@ -282,6 +302,11 @@ func _test_hud() -> void:
 	_check(leaks.is_empty(), "le panneau ne dévoile aucune touche (lu : %s)" % [leaks])
 	_check(texts.any(func(t: String) -> bool: return t.contains("📌 La biblioteca de Babel — Jorge Luis Borges")), "le panneau liste les épingles")
 	_check(texts.has(QuestScript.load_catalogue()[1].context), "le contexte s'affiche sous l'entrée")
+	_check(texts.has("📌 Registre des livres manquants — anonyme") and texts.has(QuestScript.REGISTER_CONTEXT), "le registre est épinglé, avec son contexte")
+	hud._on_pin_pressed(hud.pins[hud.pins.size() - 1])
+	texts = _texts(hud)
+	_check(hud.quest.title == "Essai" and hud.register_items().all(func(it: Dictionary) -> bool: return texts.has("    " + it.label)),
+		"un clic sur le registre déplie ses lignes sans démarrer de quête")
 	_check(not _key(hud, CarnetScript.CARNET_KEY, true) and not carnet.is_open(), "panneau ouvert : le carnet reste fermé")
 	_check(_key(hud, KEY_ESCAPE, true) and not hud.is_panel_open() and Input.mouse_mode == mouse_before, "Échap ferme le panneau et rend le mode de souris")
 
@@ -291,11 +316,17 @@ func _test_hud() -> void:
 	_check(stored.contains("babel tapé") and not stored.contains("la bibliotheque de babel"), "le fichier d'épingles garde le titre, jamais le texte")
 	_check(not hud.search_typed("   ") and hud.last_error == "texte vide", "texte vide refusé")
 	hud.unpin(hud.pins[0].id)
-	_check(hud.pins.size() == 8, "désépingler depuis le Hud")
+	_check(hud.pins.size() == 9, "désépingler depuis le Hud")
 	hud.restore_pins()
-	_check(hud.pins.size() == 9 and hud.pins[0].entry == "borges-biblioteca-de-babel", "rétablir depuis le Hud")
+	_check(hud.pins.size() == 10 and hud.pins[9].kind == QuestScript.KIND_REGISTER and hud.pins[0].entry == "borges-biblioteca-de-babel", "rétablir depuis le Hud")
 	_check(hud.start_pin(hud.pins[5]) and hud.quest.title == "Mode d'emploi de la Bibliothèque", "un clic sur une épingle démarre sa quête")
 
+	_check(not hud.start_pin(hud.pins[9]) and hud.quest.title == "Mode d'emploi de la Bibliothèque", "le registre lui-même ne démarre rien")
+	for item: Dictionary in hud.register_items():
+		hud.start_register_item(item)
+		var t := hud.quest.address()
+		_check(hud.quest.title == item.label and t.hexagon == item.address.hexagon and t.book == item.address.book and t.page == 0 \
+			and QuestScript.is_stolen_book(t.hexagon, t.level, t.wall, t.shelf, t.book), "%s : quête vers ce livre" % item.label)
 	_check(_key(hud, HudScript.CLEAR_KEY, true) and hud.quest == null and not hud._widget.visible, "la touche d'effacement efface la quête")
 	_check(not _key(hud, HudScript.CLEAR_KEY, true), "sans quête, la touche d'effacement reste au jeu")
 	hud.queue_free()

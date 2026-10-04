@@ -24,6 +24,17 @@ extends Node3D
 ## (deux par galerie, à chaque niveau), par la formule même de Godot pour une
 ## OmniLight3D sans ombre. Une galerie lointaine reçoit donc exactement la lumière
 ## d'une galerie proche ; une vraie lampe naît et meurt à poids nul.
+##
+## Les titres dorés (BookSpine) : le MultiMesh commun n'a pas de donnée par instance ; chaque
+## galerie LIT ou FULL donne à son matériau des livres une petite texture RGBA8 (96 × 20 texels,
+## 12 octets par livre) que le nuanceur lit au texel près selon INSTANCE_ID, sous Forward+ comme
+## sous Compatibility. Les titres d'une galerie (SHA-256 de 640 adresses, ~4 ms) se calculent sur
+## un fil du moteur, après la requête des livres d'images au service (pump_titles, une galerie par
+## image) ; ceux des galeries qui deviendront LIT au prochain pas sont préparés d'avance
+## (prefetch_titles) et gardés en mémoire : un pas ne fait que poser des textures prêtes. Des
+## titres arrivés en retard entrent en fondu (TITLE_APPEAR). La dorure est éclairée comme le cuir
+## (part réelle et part du nuanceur) ; son reflet, que les vraies lampes ne portent pas, vient du
+## nuanceur seul, pour toutes les lampes du réseau.
 
 const GalleryScript := preload("res://scripts/gallery.gd")
 const BookSpineScript := preload("res://scripts/book_spine.gd")
@@ -469,7 +480,7 @@ var _parts: Dictionary = {}                 # nom → enfant présent (voir _kee
 var _titles_key := ""                       # adresse dont la texture des titres porte les titres
 var _titles_texture: ImageTexture           # titres des 640 livres (BookSpine.gallery_title_bytes)
 var _titles_tween: Tween
-var _speaker: AudioStreamPlayer3D           # haut-parleur d'ambiance du vestibule (set_speaker)
+var _speaker: AmbientSpeakerScript          # haut-parleur d'ambiance du vestibule (set_speaker)
 
 
 static func create(p_hexagon: int, p_level: int, p_detail: Detail = Detail.FULL) -> GalleryScript:
@@ -526,11 +537,6 @@ func set_speaker(wanted: bool) -> void:
 	elif not wanted and _speaker != null:
 		_speaker.retire()
 		_speaker = null
-
-
-## Le haut-parleur du vestibule, ou null.
-func speaker() -> AudioStreamPlayer3D:
-	return _speaker
 
 
 # --- Titres des dos --------------------------------------------------------------------------
@@ -625,11 +631,6 @@ static func pump_titles() -> void:
 ## Vrai quand aucun titre ne reste à calculer.
 static func titles_idle() -> bool:
 	return _title_queue.is_empty() and _title_jobs.is_empty()
-
-
-## Les titres de `key` sont-ils en mémoire (sans compter un calcul en cours) ?
-static func titles_cached(p_hexagon: int, p_level: int) -> bool:
-	return _title_cache.has(_title_key(p_hexagon, p_level))
 
 
 static func _title_key(p_hexagon: Variant, p_level: Variant) -> String:

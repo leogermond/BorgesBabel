@@ -51,6 +51,11 @@ direct au GPU et la souris reste libre ; le Godot Windows capture la souris et r
 - La brume, exponentielle, se fond entièrement dans sa couleur entre 70 et 90 m. Une galerie qui
   naît ou disparaît à un pas est hors de vue, ou au-delà de 90 m : en franchissant un vestibule
   ou un niveau, rien ne change d'éclat à l'image.
+- Chaque livre porte au dos un titre court en lettres dorées (Lora), tiré de son adresse : le même
+  que montre la fenêtre de lecture ; les livres d'images ont un double filet doré en tête et en
+  pied. La dorure se fond dans le cuir entre 24 et 32 m.
+- Une musique d'ambiance, la même partout et synchronisée, sort d'un haut-parleur au milieu de
+  chaque vestibule du niveau du bibliothécaire, et s'éteint avec la distance.
 
 ## Les livres
 
@@ -154,6 +159,8 @@ Chaque test affiche ses vérifications et sort avec le code 0 quand toutes passe
 - `scripts/main.gd` : tirage de la galerie, entretien des galeries voisines (degrés de détail, part réelle des lampes), entrées, environnement.
 - `scripts/gallery.gd` : construction d'une galerie (géométrie, étagères, livres en MultiMesh, lampes), nuanceur de lumière commun, réserve d'éléments réutilisés, et repérage du livre visé.
 - `scripts/far_view.gd` : anneaux du puits au loin et trompe-l'œil aux quatre bouts.
+- `scripts/book_spine.gd` : titres des dos (tirage, capitales, codage de la texture des titres d'une galerie, atlas des glyphes).
+- `scripts/ambient_speaker.gd` : haut-parleurs de la musique d'ambiance, horloge commune.
 - `scripts/player.gd` : déplacement à la première personne et rayon de visée.
 - `scripts/book_text.gd` : texte des pages.
 - `scripts/reader.gd` : fenêtre de lecture.

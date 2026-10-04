@@ -11,7 +11,10 @@ godot --path .            # joue la scène principale
 godot -e --path .         # ouvre le projet dans l'éditeur
 ```
 
-Dans VS Code, Ctrl+Maj+B lance le jeu (tâche « Lancer le jeu », `.vscode/tasks.json`).
+Dans VS Code, Ctrl+Maj+B lance le jeu avec le Godot Windows natif
+(`C:\Users\germond\AppData\Local\Programs\Godot\Godot_v4.7.2-stable_win64.exe`, tâche
+« Lancer le jeu » de `.vscode/tasks.json`). Sous WSLg, Godot Linux rend en OpenGL sans accès
+direct au GPU et la souris reste libre ; le Godot Windows capture la souris et rend en Vulkan.
 
 ## Commandes
 

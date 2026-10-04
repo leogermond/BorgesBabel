@@ -3,11 +3,22 @@
   "tasks": [
     {
       "label": "Lancer le jeu",
+      "detail": "Godot Windows natif : GPU direct et souris capturée (WSLg ne capture pas la souris)",
+      "type": "shell",
+      "command": "\"$GODOT_WIN\" --path \"$(wslpath -w '${workspaceFolder}')\"",
+      "options": {
+        "env": { "GODOT_WIN": "/mnt/c/Users/germond/AppData/Local/Programs/Godot/Godot_v4.7.2-stable_win64.exe" }
+      },
+      "group": { "kind": "build", "isDefault": true },
+      "presentation": { "reveal": "silent", "panel": "dedicated", "clear": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "Lancer le jeu (Godot Linux, WSLg)",
       "type": "process",
       "command": "godot",
       "args": ["--path", "${workspaceFolder}"],
-      "group": { "kind": "build", "isDefault": true },
-      "presentation": { "reveal": "silent", "panel": "dedicated", "clear": true },
+      "group": "build",
       "problemMatcher": []
     }
   ]

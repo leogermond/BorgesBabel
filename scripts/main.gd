@@ -81,7 +81,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 
 	if event is InputEventMouseMotion and _mouse_captured:
-		_look_from_motion(event)
+		player.look(event.relative)
 	elif event.is_action_pressed("toggle_mouse"):
 		if _mouse_captured:
 			_release_mouse()
@@ -106,31 +106,14 @@ func _close_book() -> void:
 	_capture_mouse()
 
 
-# Mouse capture. Some display servers (WSLg, some Wayland compositors) ignore
-# MOUSE_MODE_CAPTURED and let the pointer leave the window. The game therefore
-# hides and confines the cursor, then warps it back to the window centre after
-# each motion and turns the camera by the offset from that centre.
 func _capture_mouse() -> void:
 	_mouse_captured = true
-	Input.mouse_mode = Input.MOUSE_MODE_CONFINED_HIDDEN
-	_recentre_mouse()
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 
 func _release_mouse() -> void:
 	_mouse_captured = false
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-
-
-func _recentre_mouse() -> void:
-	get_viewport().warp_mouse(get_viewport().get_visible_rect().size * 0.5)
-
-
-func _look_from_motion(event: InputEventMouseMotion) -> void:
-	var offset: Vector2 = event.position - get_viewport().get_visible_rect().size * 0.5
-	if offset.length_squared() < 0.25:
-		return
-	player.look(offset)
-	_recentre_mouse()
 
 
 func _notification(what: int) -> void:

@@ -126,14 +126,7 @@ static func gallery_image_books(hexagon: int, level: int) -> Array:
 
 ## Le titre inscrit sur le dos du livre : quelques lettres tirées d'un condensat SHA-256 de son adresse.
 static func title(hexagon: int, level: int, wall: int, shelf: int, book: int) -> String:
-	var rng := RandomNumberGenerator.new()
-	var words := PackedStringArray(["titre", str(hexagon), str(level), str(wall), str(shelf), str(book)])
-	rng.seed = "|".join(words).sha256_buffer().decode_u64(0)
-	var letters := ALPHABET.substr(0, 22) + " "
-	var text := ""
-	for _i in rng.randi_range(6, 24):
-		text += letters[rng.randi() % letters.length()]
-	return text.strip_edges()
+	return BookSpine.display_title(BookSpine.title(hexagon, level, wall, shelf, book))
 
 
 # --- Recherche inverse ----------------------------------------------------------------------

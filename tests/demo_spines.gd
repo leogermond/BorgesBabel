@@ -71,7 +71,7 @@ func _shelf(hexagon: int, level: int) -> MultiMeshInstance3D:
 		var leather := LEATHER[rng.randi() % LEATHER.size()].darkened(rng.randf_range(0.0, 0.35))
 		var title := BookSpineScript.title(hexagon, level, 0, 0, book)
 		var code := BookSpineScript.encode_title(title, book == IMAGE_BOOK)
-		print("  livre %2d : « %s »%s" % [book + 1, title, "  (livre d'images)" if book == IMAGE_BOOK else ""])
+		print("  livre %2d : « %s »%s" % [book + 1, BookSpineScript.display_title(title), "  (livre d'images)" if book == IMAGE_BOOK else ""])
 		# Le dos (face −Z de la boîte) regarde la caméra ; le livre 1 est à gauche du lecteur.
 		var row := [0.13, 0.0, 0.0, SLOT * (BOOKS * 0.5 - book - 0.5),
 			0.0, height, 0.0, height * 0.5,

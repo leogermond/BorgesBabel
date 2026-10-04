@@ -457,7 +457,7 @@ def _parse_b25(text: str) -> tuple[bool, bytes]:
     """« -3k0 » → (négatif, chiffres de la valeur absolue, poids faible en premier, sans zéro de tête)."""
     if not isinstance(text, str):
         raise BabelError(f"coordonnée en base 25 attendue (chaîne) : {_clip(text)}")
-    body = text.strip().lower()
+    body = text.lower()
     negative = body.startswith("-")
     if body[:1] in ("-", "+"):
         body = body[1:]
@@ -465,10 +465,11 @@ def _parse_b25(text: str) -> tuple[bool, bytes]:
         raw = body.encode("ascii")
     except UnicodeEncodeError:
         raw = b"\xff"
-    digits = raw.translate(_FROM_INT_STR)
-    if not digits or max(digits) > 24:
+    # Chaque caractère doit être un chiffre « 0-9a-o » : translate laisserait passer tel quel un
+    # octet de contrôle (tabulation, 0x00 …) dont la valeur est déjà < 25.
+    if not raw or raw.translate(None, _DIGIT_CHARS):
         raise BabelError(f"coordonnée en base 25 attendue (signe facultatif puis chiffres 0-9, a-o) : {_clip(text)}")
-    magnitude = _trim(digits[::-1])
+    magnitude = _trim(raw.translate(_FROM_INT_STR)[::-1])
     return negative and bool(magnitude), magnitude
 
 
@@ -1481,10 +1482,21 @@ def _print_found(found: Found, args: argparse.Namespace) -> None:
 
 def _protect_negative_address(argv: list[str]) -> list[str]:
     """`page -12:3:0:0:0:0` : argparse lirait l'adresse (hexagone négatif) comme une option ;
-    elle passe en dernier, derrière un `--`, après les options qui la suivaient (`--page 5`).
-    `page -- -12:…` reste accepté."""
-    if len(argv) >= 2 and argv[0] == "page" and len(argv[1]) > 1 and argv[1][0] == "-" and argv[1][1].isdigit():
-        return [argv[0], *argv[2:], "--", argv[1]]
+    elle passe en dernier, derrière un `--`, quelle que soit sa place parmi les options
+    (`page -12:… --page 5` comme `page --page 5 -12:…`). `page -- -12:…` reste accepté."""
+    if not argv or argv[0] != "page" or "--" in argv:
+        return argv
+    rest = list(argv[1:])
+    i = 0
+    while i < len(rest):
+        token = rest[i]
+        if token == "--page":
+            i += 2              # la valeur de --page n'est jamais l'adresse
+            continue
+        if len(token) > 1 and token[0] == "-" and token[1].isdigit():
+            address = rest.pop(i)
+            return [argv[0], *rest, "--", address]
+        i += 1
     return argv
 
 

@@ -134,6 +134,20 @@ def test_b25_wire_form():
             b.Address(bad, 0, 0, 0, 0)
 
 
+@pytest.mark.parametrize("bad", ["1\t2", "1\x002", "\x01", "-\x05", "12\n", " 12", "1 2", "+\x18", "1\x7f"])
+def test_b25_rejects_control_and_foreign_characters(bad):
+    """Un octet de contrôle vaut déjà moins de 25 : il ne doit pas passer pour un chiffre."""
+    with pytest.raises(b.BabelError):
+        b.Address(bad, 0, 0, 0, 0)
+    with pytest.raises(b.BabelError):
+        b.Address(0, bad, 0, 0, 0)
+    response, = _serve([json.dumps({"op": "page", "address": {"hexagon": bad, "level": "0", "wall": 0,
+                                                               "shelf": 0, "book": 0}})])
+    assert response["code"] == "bad_request"
+    response, = _serve([json.dumps({"op": "is_image_book", "gallery": {"hexagon": "0", "level": bad}})])
+    assert response["code"] == "bad_request"
+
+
 @pytest.mark.parametrize("size", [5, 1400, 1600, 5000])
 def test_decimal_slow_path_round_trip(size):
     rng = random.Random(size)
@@ -726,6 +740,10 @@ def test_cli_page_negative_hexagon(capsys):
     assert b.main(["page", "b25:" + b.int_to_b25(-12345) + ":-3:0:4:17", "--page", "205"]) == 0
     assert capsys.readouterr().out.splitlines() == expected
     assert b.main(["page", "-12345:-3:0:4:17", "--page", "205"]) == 0
+    assert capsys.readouterr().out.splitlines() == expected
+    assert b.main(["page", "--page", "205", "-12345:-3:0:4:17"]) == 0       # adresse après les options
+    assert capsys.readouterr().out.splitlines() == expected
+    assert b.main(["page", "--page", "205", "-12345:-3:0:4:17:3"]) == 0     # --page l'emporte
     assert capsys.readouterr().out.splitlines() == expected
 
 

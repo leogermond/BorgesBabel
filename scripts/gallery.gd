@@ -79,8 +79,8 @@ const REAL_LIGHT_NEAR := 3.0
 const REAL_LIGHT_FAR := 7.0
 
 # La brume : exponentielle, puis fondue au noir de brume entre FAR_FADE_BEGIN et
-# FAR_FADE_END. Les galeries et les anneaux naissent et disparaissent à plus de 95 m
-# de l'œil : là, la brume a tout recouvert, et rien ne change à l'image.
+# FAR_FADE_END. Les galeries et les anneaux naissent et disparaissent hors de vue :
+# derrière un mur, ou au-delà de 90 m, où la brume a tout recouvert.
 const FOG_COLOR := Color(0.05, 0.035, 0.022)
 const FOG_DENSITY := 0.04      # reste de lumière : 38 % à 24 m, 15 % à 48 m, 6 % à 70 m
 const FAR_FADE_BEGIN := 70.0

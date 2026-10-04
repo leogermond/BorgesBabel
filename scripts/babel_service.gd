@@ -1,11 +1,13 @@
 extends Node
 ## Autoload : arrête le service Python de BookText quand le jeu se ferme.
 
+const BookTextScript := preload("res://scripts/book_text.gd")
+
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_PREDELETE:
-		BookText.shutdown()
+		BookTextScript.shutdown()
 
 
 func _exit_tree() -> void:
-	BookText.shutdown()
+	BookTextScript.shutdown()

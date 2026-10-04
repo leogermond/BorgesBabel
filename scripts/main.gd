@@ -25,6 +25,12 @@ extends Node3D
 ## naissent ou disparaissent à un pas sont hors de vue, ou à plus de
 ## Gallery.FAR_FADE_END de l'œil, là où la brume a tout recouvert.
 
+const GalleryScript := preload("res://scripts/gallery.gd")
+const FarViewScript := preload("res://scripts/far_view.gd")
+const HudScript := preload("res://scripts/hud.gd")
+const PlayerScript := preload("res://scripts/player.gd")
+const ReaderScript := preload("res://scripts/reader.gd")
+
 const REACH_ALONG_HALL := 8    # galeries de chaque côté le long du vestibule : 8 × 12 m = 96 m
 const REACH_VERTICAL := 30     # niveaux au-dessus et au-dessous, par le puits : 30 × 3,4 m = 102 m
 const ROOMS_VERTICAL := 4      # niveaux du puits construits en galeries entières ; au-delà, l'anneau
@@ -32,20 +38,20 @@ const LIT_ALONG_HALL := 3      # galeries éclairées par de vraies lampes le lo
 const LIT_VERTICAL := 2        # niveaux éclairés par de vraies lampes dans le puits
 const DIAGONAL_REACH := 8      # diagonales vues à travers les puits voisins (voir detail_at)
 
-const FOG_COLOR := Gallery.FOG_COLOR
-const FOG_DENSITY := Gallery.FOG_DENSITY
+const FOG_COLOR := GalleryScript.FOG_COLOR
+const FOG_DENSITY := GalleryScript.FOG_DENSITY
 
 ## Adresse de la galerie placée à l'origine du monde.
 var origin_hexagon: int
 var origin_level: int
 
-var player: Player
-var hud: Hud
-var reader: Reader
-var far_view: FarView
+var player: PlayerScript
+var hud: HudScript
+var reader: ReaderScript
+var far_view: FarViewScript
 static var _cells: Dictionary = {}   # cache de gallery_cells()
 var _galleries: Dictionary = {}   # case Vector2i(dz, dy) relative à l'origine → Gallery
-var _lit: Array[Gallery] = []     # galeries à vraies lampes (LIT et FULL)
+var _lit: Array[GalleryScript] = []     # galeries à vraies lampes (LIT et FULL)
 static var _lit_cells: Array[Vector2i] = []
 var _highlight: MeshInstance3D
 var _target: Dictionary = {}
@@ -56,7 +62,7 @@ func _ready() -> void:
 	process_physics_priority = 10   # après le bibliothécaire
 	_setup_input()
 	_setup_environment()
-	far_view = FarView.create(REACH_ALONG_HALL, ROOMS_VERTICAL + 1, REACH_VERTICAL, FOG_COLOR, FOG_DENSITY)
+	far_view = FarViewScript.create(REACH_ALONG_HALL, ROOMS_VERTICAL + 1, REACH_VERTICAL, FOG_COLOR, FOG_DENSITY)
 	add_child(far_view)
 
 	var rng := RandomNumberGenerator.new()
@@ -65,7 +71,7 @@ func _ready() -> void:
 	origin_level = rng.randi() - (1 << 31)
 	_update_galleries()
 
-	player = Player.new()
+	player = PlayerScript.new()
 	player.name = "Player"
 	player.position = Vector3(0.0, 0.05, 3.2)
 	player.rotation.y = rng.randf_range(-PI, PI)
@@ -82,18 +88,18 @@ func _ready() -> void:
 	_highlight.visible = false
 	add_child(_highlight)
 
-	hud = Hud.new()
+	hud = HudScript.new()
 	add_child(hud)
 	hud.set_address(origin_hexagon, origin_level)
 	hud.set_target({})
-	reader = Reader.new()
+	reader = ReaderScript.new()
 	add_child(reader)
 
 	_capture_mouse()
 
 
 func _exit_tree() -> void:
-	Gallery.release_pool()
+	GalleryScript.release_pool()
 
 
 func _process(_delta: float) -> void:
@@ -102,12 +108,12 @@ func _process(_delta: float) -> void:
 
 func _physics_process(_delta: float) -> void:
 	_show_target(player.target)
-	var half := Gallery.PITCH * 0.5
+	var half := GalleryScript.PITCH * 0.5
 	if player.position.z > half:
 		_shift(1)
 	elif player.position.z < -half:
 		_shift(-1)
-	var half_level := Gallery.LEVEL_PITCH * 0.5
+	var half_level := GalleryScript.LEVEL_PITCH * 0.5
 	if player.position.y > half_level:
 		_shift_level(1)
 	elif player.position.y < -half_level:
@@ -173,7 +179,7 @@ func _show_target(target: Dictionary) -> void:
 		hud.set_target(target)
 	_highlight.visible = not target.is_empty()
 	if _highlight.visible:
-		var gallery: Gallery = target.gallery
+		var gallery: GalleryScript = target.gallery
 		var book := gallery.book_transform(target.wall, target.shelf, target.book)
 		_highlight.global_transform = gallery.global_transform * book.scaled_local(Vector3(1.12, 1.04, 1.04))
 
@@ -181,7 +187,7 @@ func _show_target(target: Dictionary) -> void:
 ## Fait de la galerie voisine (+1 ou −1 le long du vestibule) la nouvelle origine.
 func _shift(step: int) -> void:
 	origin_hexagon += step
-	player.position.z -= step * Gallery.PITCH
+	player.position.z -= step * GalleryScript.PITCH
 	_update_galleries(Vector2i(step, 0))
 	hud.set_address(origin_hexagon, origin_level)
 
@@ -189,7 +195,7 @@ func _shift(step: int) -> void:
 ## Fait du niveau voisin (+1 au-dessus, −1 au-dessous) la nouvelle origine.
 func _shift_level(step: int) -> void:
 	origin_level += step
-	player.position.y -= step * Gallery.LEVEL_PITCH
+	player.position.y -= step * GalleryScript.LEVEL_PITCH
 	_update_galleries(Vector2i(0, step))
 	hud.set_address(origin_hexagon, origin_level)
 
@@ -206,14 +212,14 @@ static func detail_at(dz: int, dy: int) -> int:
 	var along := absi(dz)
 	var across := absi(dy)
 	if dy == 0 and along <= 1:
-		return Gallery.Detail.FULL
+		return GalleryScript.Detail.FULL
 	if (along <= 2 and across <= 1) or (dy == 0 and along <= LIT_ALONG_HALL) \
 			or (dz == 0 and across <= LIT_VERTICAL):
-		return Gallery.Detail.LIT
+		return GalleryScript.Detail.LIT
 	if (across <= 1 and along <= REACH_ALONG_HALL) or (dz == 0 and across <= ROOMS_VERTICAL):
-		return Gallery.Detail.DISTANT
+		return GalleryScript.Detail.DISTANT
 	if along >= 1 and along <= DIAGONAL_REACH and across <= along + 1 and across >= along - 1:
-		return Gallery.Detail.DISTANT
+		return GalleryScript.Detail.DISTANT
 	return -1
 
 
@@ -237,7 +243,7 @@ static func lit_cells() -> Array[Vector2i]:
 	if _lit_cells.is_empty():
 		var cells := gallery_cells()
 		for cell: Vector2i in cells:
-			if cells[cell] >= Gallery.Detail.LIT:
+			if cells[cell] >= GalleryScript.Detail.LIT:
 				_lit_cells.append(cell)
 	return _lit_cells
 
@@ -253,27 +259,27 @@ func _update_galleries(moved := Vector2i.ZERO) -> void:
 	var spares: Array = [[], [], []]   # par degré de détail
 	for old_cell: Vector2i in _galleries:
 		var cell := old_cell - moved
-		var gallery: Gallery = _galleries[old_cell]
+		var gallery: GalleryScript = _galleries[old_cell]
 		if cells.has(cell):
 			placed[cell] = gallery
 		else:
 			spares[gallery.detail].append(gallery)
 	for cell: Vector2i in cells:
 		var detail: int = cells[cell]
-		var gallery: Gallery = placed.get(cell)
+		var gallery: GalleryScript = placed.get(cell)
 		if gallery == null:
 			gallery = _take_spare(spares, detail)
 			if gallery == null:
-				gallery = Gallery.create(origin_hexagon + cell.x, origin_level + cell.y, detail as Gallery.Detail)
+				gallery = GalleryScript.create(origin_hexagon + cell.x, origin_level + cell.y, detail as GalleryScript.Detail)
 				add_child(gallery)
 			else:
-				gallery.readdress(origin_hexagon + cell.x, origin_level + cell.y, detail as Gallery.Detail)
+				gallery.readdress(origin_hexagon + cell.x, origin_level + cell.y, detail as GalleryScript.Detail)
 			placed[cell] = gallery
 		elif gallery.detail != detail:
-			gallery.set_detail(detail as Gallery.Detail)
-		gallery.position = Vector3(0.0, cell.y * Gallery.LEVEL_PITCH, cell.x * Gallery.PITCH)
+			gallery.set_detail(detail as GalleryScript.Detail)
+		gallery.position = Vector3(0.0, cell.y * GalleryScript.LEVEL_PITCH, cell.x * GalleryScript.PITCH)
 	for pool: Array in spares:
-		for spare: Gallery in pool:
+		for spare: GalleryScript in pool:
 			spare.queue_free()
 	_galleries = placed
 	_lit.clear()
@@ -284,15 +290,15 @@ func _update_galleries(moved := Vector2i.ZERO) -> void:
 
 ## Part réelle de chaque vraie lampe, selon sa distance à l'œil (voir Gallery.real_weight).
 func _update_lamps() -> void:
-	var eye := Vector3(0.0, Player.EYE_HEIGHT, 3.2)
+	var eye := Vector3(0.0, PlayerScript.EYE_HEIGHT, 3.2)
 	if player != null:
 		eye = player.camera.global_position
-	for gallery: Gallery in _lit:
+	for gallery: GalleryScript in _lit:
 		gallery.update_lights(eye)
 
 
 ## Une galerie libérée, de préférence au même degré de détail, ou null.
-static func _take_spare(spares: Array, detail: int) -> Gallery:
+static func _take_spare(spares: Array, detail: int) -> GalleryScript:
 	if not spares[detail].is_empty():
 		return spares[detail].pop_back()
 	for pool: Array in spares:
@@ -306,8 +312,8 @@ func _setup_environment() -> void:
 	env.background_mode = Environment.BG_COLOR
 	env.background_color = FOG_COLOR
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = Gallery.AMBIENT_COLOR
-	env.ambient_light_energy = Gallery.AMBIENT_ENERGY
+	env.ambient_light_color = GalleryScript.AMBIENT_COLOR
+	env.ambient_light_energy = GalleryScript.AMBIENT_ENERGY
 	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
 	env.fog_enabled = true
 	env.fog_mode = Environment.FOG_MODE_EXPONENTIAL

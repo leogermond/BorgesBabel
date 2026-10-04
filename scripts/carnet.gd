@@ -9,6 +9,8 @@ extends CanvasLayer
 ## l'invocation à la dernière page lue. Le Hud ouvre et ferme le carnet (CARNET_KEY) et lui
 ## passe toutes les touches tant qu'il est ouvert.
 
+const BookSpineScript := preload("res://scripts/book_spine.gd")
+
 signal invocation(axis: String)
 signal toggled(open: bool)
 
@@ -191,7 +193,7 @@ static func normalize(text: String) -> String:
 
 
 func _render() -> void:
-	_word_label.text = BookSpine.display_title(word) if not word.is_empty() else ""
+	_word_label.text = BookSpineScript.display_title(word) if not word.is_empty() else ""
 	_blink = 0.0
 	_caret.modulate.a = 1.0
 

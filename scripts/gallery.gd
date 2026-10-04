@@ -25,6 +25,8 @@ extends Node3D
 ## OmniLight3D sans ombre. Une galerie lointaine reçoit donc exactement la lumière
 ## d'une galerie proche ; une vraie lampe naît et meurt à poids nul.
 
+const GalleryScript := preload("res://scripts/gallery.gd")
+
 enum Detail { DISTANT, LIT, FULL }
 
 const SQRT3 := 1.7320508075688772
@@ -265,8 +267,8 @@ var _face_material: ShaderMaterial          # façades peintes : même graine
 var _parts: Dictionary = {}                 # nom → enfant présent (voir _keep)
 
 
-static func create(p_hexagon: int, p_level: int, p_detail: Detail = Detail.FULL) -> Gallery:
-	var gallery := Gallery.new()
+static func create(p_hexagon: int, p_level: int, p_detail: Detail = Detail.FULL) -> GalleryScript:
+	var gallery := GalleryScript.new()
 	gallery.hexagon = p_hexagon
 	gallery.level = p_level
 	gallery.name = _node_name(p_hexagon, p_level)

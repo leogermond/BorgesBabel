@@ -12,6 +12,9 @@ extends RefCounted
 ##
 ## Repères du monde : l'hexagone h + 1 est à 12 m vers +Z, le niveau l + 1 à 3,4 m au-dessus.
 
+const QuestScript := preload("res://scripts/quest.gd")
+const BookTextScript := preload("res://scripts/book_text.gd")
+
 const CATALOGUE_PATH := "res://data/quetes/catalogue.json"
 const PINS_PATH := "user://quetes_epinglees.json"
 const PINS_VERSION := 1
@@ -36,14 +39,14 @@ var page_index := 0
 
 
 ## Une quête sur une seule adresse ; null si l'adresse est mal formée.
-static func from_address(target: Dictionary, quest_title := "", quest_author := "") -> Quest:
+static func from_address(target: Dictionary, quest_title := "", quest_author := "") -> QuestScript:
 	return from_pages([target], quest_title, quest_author)
 
 
-static func from_pages(targets: Array, quest_title := "", quest_author := "", id := "") -> Quest:
+static func from_pages(targets: Array, quest_title := "", quest_author := "", id := "") -> QuestScript:
 	if targets.is_empty():
 		return null
-	var quest := Quest.new()
+	var quest := QuestScript.new()
 	for target: Variant in targets:
 		if not target is Dictionary or not is_valid_address(target):
 			return null
@@ -55,7 +58,7 @@ static func from_pages(targets: Array, quest_title := "", quest_author := "", id
 
 
 ## La quête d'une entrée du catalogue : ses pages dans l'ordre.
-static func from_entry(entry: Dictionary) -> Quest:
+static func from_entry(entry: Dictionary) -> QuestScript:
 	var targets := []
 	for page: Dictionary in entry.pages:
 		targets.append(page.address)
@@ -379,7 +382,7 @@ static func catalogue_pin(entry: Dictionary) -> Dictionary:
 
 static func search_pin(pin_title: String, target: Dictionary) -> Dictionary:
 	var a := normalized_address(target)
-	var key := BookText.full_form(a).sha256_text().left(16)
+	var key := BookTextScript.full_form(a).sha256_text().left(16)
 	return {"id": "%s:%s" % [KIND_SEARCH, key], "kind": KIND_SEARCH, "entry": "",
 		"title": pin_title.strip_edges(), "author": "", "address": a}
 
@@ -412,7 +415,7 @@ static func default_pins(entries: Array) -> Array:
 
 ## La quête d'une épingle ; null pour une entrée disparue du catalogue, et pour le registre
 ## (ses lignes démarrent chacune une quête).
-static func from_pin(pin: Dictionary, entries: Array) -> Quest:
+static func from_pin(pin: Dictionary, entries: Array) -> QuestScript:
 	if pin.kind == KIND_REGISTER:
 		return null
 	if pin.kind == KIND_CATALOGUE:

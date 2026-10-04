@@ -19,6 +19,9 @@ extends Node3D
 ##
 ## Repère : celui du monde (le nœud reste à l'origine) ; galerie d'origine au centre.
 
+const FarViewScript := preload("res://scripts/far_view.gd")
+const GalleryScript := preload("res://scripts/gallery.gd")
+
 const IMPOSTOR_SHADER := """
 shader_type spatial;
 render_mode unshaded, cull_disabled, shadows_disabled, fog_disabled;
@@ -87,28 +90,28 @@ var ring_levels: Array[int] = []
 
 ## `hall_reach` : galeries construites de chaque côté ; `first_ring`..`last_ring` :
 ## niveaux du puits réduits à leur anneau, au-dessus et au-dessous.
-static func create(hall_reach: int, first_ring: int, last_ring: int, fog_color: Color, fog_density: float) -> FarView:
-	var view := FarView.new()
+static func create(hall_reach: int, first_ring: int, last_ring: int, fog_color: Color, fog_density: float) -> FarViewScript:
+	var view := FarViewScript.new()
 	view.name = "FarView"
 	view._build_rings(first_ring, last_ring)
 	var shader := Shader.new()
 	shader.code = IMPOSTOR_SHADER
 
 	# Bouts du vestibule : au milieu du vestibule qui suivrait la dernière galerie.
-	var hall_end := hall_reach * Gallery.PITCH + Gallery.APOTHEM + Gallery.HALL_LENGTH * 0.5
-	var w := Gallery.HALL_WIDTH * 0.5
+	var hall_end := hall_reach * GalleryScript.PITCH + GalleryScript.APOTHEM + GalleryScript.HALL_LENGTH * 0.5
+	var w := GalleryScript.HALL_WIDTH * 0.5
 	var hall_planes := [
 		Vector3(1.0, 0.0, w), Vector3(-1.0, 0.0, w),
-		Vector3(0.0, 1.0, Gallery.HEIGHT), Vector3(0.0, -1.0, 0.0),
+		Vector3(0.0, 1.0, GalleryScript.HEIGHT), Vector3(0.0, -1.0, 0.0),
 	]
 	var hall_tints := [1.0, 1.0, 0.7, 0.85]   # murs, plafond, sol
-	var hall_size := Vector2(Gallery.HALL_WIDTH + 2.0 * Gallery.WALL_THICK, Gallery.HEIGHT + 0.6)
+	var hall_size := Vector2(GalleryScript.HALL_WIDTH + 2.0 * GalleryScript.WALL_THICK, GalleryScript.HEIGHT + 0.6)
 	for dir: float in [1.0, -1.0]:
 		var axis := Vector3(0.0, 0.0, dir)
 		var material := _material(shader, Vector3(0.0, 0.0, hall_end * dir), Vector3.RIGHT, Vector3.UP,
-			hall_planes, hall_tints, Vector3.BACK, Gallery.PITCH, _hall_profile(), fog_color, fog_density)
+			hall_planes, hall_tints, Vector3.BACK, GalleryScript.PITCH, _hall_profile(), fog_color, fog_density)
 		var spot := Transform3D(Basis(Vector3.UP, PI if dir > 0.0 else 0.0),
-			Vector3(0.0, Gallery.HEIGHT * 0.5, hall_end * dir))
+			Vector3(0.0, GalleryScript.HEIGHT * 0.5, hall_end * dir))
 		view._add_impostor("HallEnd" + ("Plus" if dir > 0.0 else "Minus"), hall_size, spot, material, axis, hall_end)
 
 	# Haut et bas du puits : au milieu de la dalle qui suivrait le dernier anneau.
@@ -116,16 +119,16 @@ static func create(hall_reach: int, first_ring: int, last_ring: int, fog_color: 
 	var shaft_tints := []
 	for side in 6:
 		var angle := side * PI / 3.0
-		shaft_planes.append(Vector3(sin(angle), cos(angle), Gallery.SHAFT_APOTHEM))
+		shaft_planes.append(Vector3(sin(angle), cos(angle), GalleryScript.SHAFT_APOTHEM))
 		shaft_tints.append(1.0)
-	var top := (last_ring + 1) * Gallery.LEVEL_PITCH - Gallery.SLAB * 0.5
-	var bottom := last_ring * Gallery.LEVEL_PITCH + Gallery.SLAB + 0.2
+	var top := (last_ring + 1) * GalleryScript.LEVEL_PITCH - GalleryScript.SLAB * 0.5
+	var bottom := last_ring * GalleryScript.LEVEL_PITCH + GalleryScript.SLAB + 0.2
 	var shaft_size := Vector2(4.0, 4.0)
 	for dir: float in [1.0, -1.0]:
 		var reach: float = top if dir > 0.0 else bottom
 		var axis := Vector3(0.0, dir, 0.0)
 		var material := _material(shader, Vector3(0.0, reach * dir, 0.0), Vector3.RIGHT, Vector3.BACK,
-			shaft_planes, shaft_tints, Vector3.UP, Gallery.LEVEL_PITCH, _shaft_profile(), fog_color, fog_density)
+			shaft_planes, shaft_tints, Vector3.UP, GalleryScript.LEVEL_PITCH, _shaft_profile(), fog_color, fog_density)
 		var spot := Transform3D(Basis(Vector3.RIGHT, PI * 0.5 * dir), Vector3(0.0, reach * dir, 0.0))
 		view._add_impostor("Shaft" + ("Top" if dir > 0.0 else "Bottom"), shaft_size, spot, material, axis, reach)
 	return view
@@ -137,10 +140,10 @@ func _build_rings(first_ring: int, last_ring: int) -> void:
 		ring_levels.append(-level)
 	var multimesh := MultiMesh.new()
 	multimesh.transform_format = MultiMesh.TRANSFORM_3D
-	multimesh.mesh = Gallery.ring_mesh()
+	multimesh.mesh = GalleryScript.ring_mesh()
 	multimesh.instance_count = ring_levels.size()
 	for i in ring_levels.size():
-		multimesh.set_instance_transform(i, Transform3D(Basis(), Vector3.UP * ring_levels[i] * Gallery.LEVEL_PITCH))
+		multimesh.set_instance_transform(i, Transform3D(Basis(), Vector3.UP * ring_levels[i] * GalleryScript.LEVEL_PITCH))
 	var rings := MultiMeshInstance3D.new()
 	rings.name = "ShaftRings"
 	rings.multimesh = multimesh
@@ -169,8 +172,8 @@ static func _material(shader: Shader, axis_point: Vector3, cross_u: Vector3, cro
 	material.set_shader_parameter("profile_mean", _mean(profile.gradient))
 	material.set_shader_parameter("fog_color", fog_color)
 	material.set_shader_parameter("fog_density", fog_density)
-	material.set_shader_parameter("fade_begin", Gallery.FAR_FADE_BEGIN)
-	material.set_shader_parameter("fade_end", Gallery.FAR_FADE_END)
+	material.set_shader_parameter("fade_begin", GalleryScript.FAR_FADE_BEGIN)
+	material.set_shader_parameter("fade_end", GalleryScript.FAR_FADE_END)
 	return material
 
 

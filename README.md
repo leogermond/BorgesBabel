@@ -72,7 +72,7 @@ python3 python/babel.py page -12:-3:0:4:17:205       # un hexagone négatif s'é
 python3 python/babel.py page "$(python3 python/babel.py search-text citation.txt)"
 python3 python/babel.py search-text citation.txt     # adresse complète sur la sortie, forme courte sur l'erreur
 echo "la bibliotheque de babel" | python3 python/babel.py search-text -
-python3 python/babel.py search-image gravure.png     # PNG 8 bits seulement : convertir d'abord un JPG en PNG
+python3 python/babel.py search-image gravure.png     # PNG 8 bits sans gamma (gAMA) particulier : convertir d'abord un JPG en PNG
 python3 python/babel.py search-text citation.txt --json
 ```
 

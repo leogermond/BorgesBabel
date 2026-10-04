@@ -1,6 +1,7 @@
 extends SceneTree
 ## Vérifie les dos de livres : titres (déterminisme, alphabet, longueurs, répartition), codage
-## pour le shader (aller-retour), atlas de Lora, compilation du shader, MultiMesh de démonstration.
+## pour le shader (aller-retour), capitales d'affichage, atlas de Lora et mise en page sur le dos,
+## compilation du shader, MultiMesh de démonstration.
 ## godot --headless --path . -s tests/test_book_spine.gd
 ## Le shader se compile ici par l'analyseur du moteur sans écran ; aucune image n'est rendue.
 
@@ -16,7 +17,9 @@ var _failures := 0
 func _initialize() -> void:
 	_check_titles()
 	_check_encoding()
+	_check_capitals()
 	_check_atlas()
+	_check_layout()
 	_check_shader()
 	await _check_multimesh()
 	print("test_book_spine : %s" % ("OK" if _failures == 0 else "%d échec(s)" % _failures))
@@ -31,7 +34,18 @@ func _check_titles() -> void:
 		"title et title_at s'accordent (la page est ignorée)")
 	# Valeurs figées : le titre ne dépend que de SHA-256, identique sur toute machine.
 	print("    titres de référence : « %s », « %s »" % [BookSpineScript.title(0, 0, 0, 0, 0), BookSpineScript.title(1, 1, 1, 1, 1)])
-	_check(BookSpineScript.title(0, 0, 0, 0, 0) == _expected_title("dos|0|0|0|0|0"), "titre recalculé indépendamment depuis le condensat")
+	var oracle_rng := RandomNumberGenerator.new()
+	oracle_rng.seed = 1899   # naissance de Borges
+	var mismatches := 0
+	for n in 2000:
+		var parts := [oracle_rng.randi() << 32 | oracle_rng.randi(), oracle_rng.randi_range(-99999, 99999),
+			oracle_rng.randi_range(0, 3), oracle_rng.randi_range(0, 4), oracle_rng.randi_range(0, 31)]
+		if n == 0:
+			parts = [0, 0, 0, 0, 0]
+		var key := "dos|%d|%d|%d|%d|%d" % parts
+		if BookSpineScript.title(parts[0], parts[1], parts[2], parts[3], parts[4]) != _expected_title(key):
+			mismatches += 1
+	_check(mismatches == 0, "titres recalculés indépendamment depuis le condensat, 2000 adresses (écarts : %d)" % mismatches)
 
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 1941
@@ -113,27 +127,110 @@ func _check_atlas() -> void:
 	var atlas := BookSpineScript.glyph_atlas()
 	var elapsed := (Time.get_ticks_usec() - t0) / 1000.0
 	var cell := BookSpineScript.CELL_PX
-	_check(atlas != null and atlas.get_size() == Vector2i(5 * cell, 5 * cell), "atlas de 5 × 5 cases (%s, rendu en %.1f ms)" % [atlas.get_size(), elapsed])
+	_check(atlas != null and atlas.get_size() == Vector2i(7 * cell, 7 * cell), "atlas de 7 × 7 cases (%s, rendu en %.1f ms)" % [atlas.get_size(), elapsed])
 	_check(atlas.has_mipmaps(), "atlas avec mipmaps")
 	var inked := 0
 	var empty := []
-	for k in 25:
-		var rect := Rect2i(Vector2i(k % 5, k / 5) * cell, Vector2i(cell, cell))
-		var region := atlas.get_region(rect)
-		region.convert(Image.FORMAT_RGBA8)
-		var used := region.get_used_rect()
+	_check(BookSpineScript.GLYPHS.length() == 47 and BookSpineScript.GLYPHS.substr(25) == BookSpineScript.ALPHABET.substr(0, 22).to_upper(),
+		"47 glyphes : les 25 symboles puis les 22 capitales, dans le même ordre")
+	for k in 47:
+		var used := _ink_rect(atlas, k)
 		if used.size.x > 0 and used.size.y > 0:
 			inked += 1
 			# Aucune encre sur le bord de la case : rien ne déborde chez la voisine.
 			if used.position.x == 0 or used.position.y == 0 or used.end.x == cell or used.end.y == cell:
-				empty.append("bord:" + BookSpineScript.ALPHABET[k])
+				empty.append("bord:" + BookSpineScript.GLYPHS[k])
 		else:
-			empty.append(BookSpineScript.ALPHABET[k])
-	_check(inked == 24 and empty == [" "], "24 glyphes encrés, l'espace seul vide (vides ou au bord : %s)" % [empty])
+			empty.append(BookSpineScript.GLYPHS[k])
+	_check(inked == 46 and empty == [" "], "46 glyphes encrés, l'espace seul vide (vides ou au bord : %s)" % [empty])
 	var advances := BookSpineScript.glyph_advances()
 	var positive := Array(advances).all(func(a: float) -> bool: return a > 0.1 and a < 1.2)
-	_check(advances.size() == 25 and positive, "25 chasses entre 0,1 et 1,2 em (m : %.2f, i : %.2f, espace : %.2f)" % [advances[11], advances[8], advances[22]])
-	atlas.save_png("res://.foreman/scratch/book_spine_atlas.png")
+	_check(advances.size() == 47 and positive, "47 chasses entre 0,1 et 1,2 em (m : %.2f, M : %.2f, i : %.2f, espace : %.2f)" % [advances[11], advances[36], advances[8], advances[22]])
+	var out := OS.get_cache_dir().path_join("book_spine_atlas.png")
+	atlas.save_png(out)
+	print("    atlas enregistré : %s" % out)
+
+
+## Capitales : première lettre, et première lettre après chaque point.
+func _check_capitals() -> void:
+	var cases := {
+		"ab. cd": "Ab. Cd", "a..b": "A..B", "ab., ,c d.": "Ab., ,C d.", ",.a b": ",.A b",
+		" ,x": " ,X", "zz.zz.": "Zz.Zz.", "abc": "Abc", "a,b.c": "A,b.C", "...": "...",
+	}
+	for title in cases:
+		var shown := BookSpineScript.display_title(title)
+		_check(shown == cases[title], "capitales : « %s » → « %s » (lu : « %s »)" % [title, cases[title], shown])
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 1986   # mort de Borges
+	var bad := 0
+	var same_text := 0
+	for n in 2000:
+		var parts := [rng.randi() << 32 | rng.randi(), rng.randi_range(-99999, 99999), rng.randi_range(0, 3), rng.randi_range(0, 4), rng.randi_range(0, 31)]
+		var raw := BookSpineScript.title(parts[0], parts[1], parts[2], parts[3], parts[4])
+		var shown := BookSpineScript.display_title(raw)
+		var spelled := ""
+		for g in BookSpineScript.title_glyphs(raw):
+			spelled += BookSpineScript.GLYPHS[g]
+		if shown.to_lower() != raw or spelled != shown or shown[0] != shown[0].to_upper():
+			bad += 1
+		if BookTextScript.title(parts[0], parts[1], parts[2], parts[3], parts[4]) == shown:
+			same_text += 1
+	_check(bad == 0, "2000 titres : capitale initiale, même texte en minuscules, glyphes du shader identiques (écarts : %d)" % bad)
+	_check(same_text == 2000, "BookText.title == display_title(BookSpine.title) sur 2000 adresses (%d)" % same_text)
+	_check(BookSpineScript.encode_title("ab.cd") == BookSpineScript.encode_title("Ab.Cd"),
+		"le codage ignore la casse : les capitales ne se décident qu'à l'affichage")
+
+
+## Mise en page : le titre, capitales comprises, reste centré et dans le dos du livre.
+func _check_layout() -> void:
+	var atlas := BookSpineScript.glyph_atlas()
+	var advances := BookSpineScript.glyph_advances()
+	var font_px := float(BookSpineScript.FONT_PX)
+	var pen := Vector2(BookSpineScript.PEN_PX)
+	var ink := []   # par glyphe : gauche, droite (depuis le point de chasse), haut, bas (depuis la ligne de base), en em
+	for k in 47:
+		var used := _ink_rect(atlas, k)
+		ink.append(Vector4((used.position.x - pen.x) / font_px, (used.end.x - pen.x) / font_px,
+			(pen.y - used.position.y) / font_px, (pen.y - used.end.y) / font_px) if used.size.x > 0 else Vector4.ZERO)
+	var titles := ["m.m.m.m.m.m.m.mm", "mmmmmmmmmmmmmmmm", "j.j.j.j.j.j.j.jj", "i,i", ".......j", "abcdef"]
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 2026
+	for n in 3000:
+		titles.append(BookSpineScript.title(rng.randi(), rng.randi(), rng.randi_range(0, 3), rng.randi_range(0, 4), rng.randi_range(0, 31)))
+	var worst_along := 0.0
+	var worst_across := 0.0
+	var worst_offset := 0.0
+	var outside := 0
+	for title in titles:
+		for height in [0.28, 0.36]:
+			var thickness := 0.13
+			var layout := BookSpineScript.title_layout(title, thickness, height)
+			var em := layout.x
+			var x := 0.0
+			var lo := INF
+			var hi := -INF
+			var top := -INF
+			var bottom := INF
+			for g in BookSpineScript.title_glyphs(title):
+				var box: Vector4 = ink[g]
+				if box != Vector4.ZERO:
+					lo = minf(lo, x + box.x)
+					hi = maxf(hi, x + box.y)
+					top = maxf(top, box.z)
+					bottom = minf(bottom, box.w)
+				x += advances[g] + BookSpineScript.TRACKING_EM
+			# Mètres depuis le centre du dos : le long (pied → tête) et en travers.
+			var along := maxf(absf((lo - 0.5 * layout.y) * em), absf((hi - 0.5 * layout.y) * em))
+			var across := maxf((top - BookSpineScript.TITLE_CENTER_EM) * em, (BookSpineScript.TITLE_CENTER_EM - bottom) * em)
+			var offset := absf(0.5 * (lo + hi) - 0.5 * layout.y) * em
+			worst_along = maxf(worst_along, along / (0.5 * height))
+			worst_across = maxf(worst_across, across / (0.5 * thickness))
+			worst_offset = maxf(worst_offset, offset)
+			# Encre à plus de 25 mm des extrémités (les filets s'arrêtent à 24,5 mm), à 1 cm des arêtes.
+			if along > 0.5 * height - 0.025 or across > 0.5 * thickness - 0.01:
+				outside += 1
+	_check(outside == 0, "encre dans le dos sur %d titres × 2 hauteurs : au plus %.0f %% de la demi-hauteur, %.0f %% de la demi-épaisseur" % [titles.size(), 100.0 * worst_along, 100.0 * worst_across])
+	_check(worst_offset < 0.004, "titre centré le long du dos (écart maximal %.1f mm)" % (1000.0 * worst_offset))
 
 
 func _check_shader() -> void:
@@ -145,7 +242,12 @@ func _check_shader() -> void:
 	var material := BookSpineScript.material()
 	_check(material == BookSpineScript.material(), "matériau partagé")
 	_check(material.get_shader_parameter("glyph_atlas") is Texture2D, "atlas branché sur le matériau")
-	_check((material.get_shader_parameter("glyph_advance") as PackedFloat32Array).size() == 25, "chasses branchées sur le matériau")
+	_check((material.get_shader_parameter("glyph_advance") as PackedFloat32Array).size() == 47, "47 chasses branchées sur le matériau")
+	_check(material.get_shader_parameter("atlas_columns") == 7 and is_equal_approx(material.get_shader_parameter("tracking_em"), BookSpineScript.TRACKING_EM),
+		"mise en page du shader réglée depuis BookSpine")
+	var code := BookSpineScript.encode_title("abc")
+	code.r += 26 << 15   # quatrième symbole : code 26, hors alphabet
+	_check(BookSpineScript.decode_title(code) == "abc", "codes 26 à 31 : fin du titre, comme dans le shader")
 
 
 func _check_multimesh() -> void:
@@ -201,14 +303,15 @@ func _check_multimesh() -> void:
 	root.add_child(instance)
 	await process_frame
 	_check(instance.is_inside_tree() and multimesh.instance_count == 32, "MultiMesh de 32 livres titrés construit et ajouté à la scène")
-	var stored := multimesh.buffer
-	var read := Color(stored[31 * 20 + 16], stored[31 * 20 + 17], stored[31 * 20 + 18], stored[31 * 20 + 19])
-	_check(stored.size() == 640 and BookSpineScript.decode_title(read) == BookSpineScript.title(INT_MAX, -3, 0, 0, 31),
-		"titre relu intact dans le tampon du MultiMesh (« %s »)" % BookSpineScript.decode_title(read))
+	# Le moteur sans écran ne fait que renvoyer le tampon : ce contrôle prouve que 32 × 20 flottants
+	# sont acceptés, pas la disposition (12 + 4 + 4), constatée seulement sous rendu réel (opengl3).
+	_check(multimesh.buffer.size() == 32 * 20, "tampon de 32 × 20 flottants accepté (disposition non vérifiable sans écran)")
 	instance.queue_free()
 
 
-## Titre recalculé à part : mêmes règles que BookSpine._title_from_key, écrites autrement.
+## Titre recalculé à part, d'après la règle documentée de BookSpine._indices écrite autrement :
+## octets du condensat prolongé, longueur 6 + octet % 11 si octet < 242, extrémités parmi les
+## 24 symboles sans l'espace si octet < 240, intérieur parmi les 25 si octet < 250.
 func _expected_title(key: String) -> String:
 	var bytes := PackedByteArray()
 	var digest := key.sha256_buffer()
@@ -216,22 +319,29 @@ func _expected_title(key: String) -> String:
 		bytes.append_array(digest)
 		digest = digest.hex_encode().sha256_buffer()
 	var at := 0
-	var picks := []
-	for count in [11]:
-		while bytes[at] >= 256 - 256 % count:
-			at += 1
-		picks.append(bytes[at] % count)
+	while bytes[at] >= 242:
 		at += 1
-	var length: int = 6 + picks[0]
+	var length: int = 6 + bytes[at] % 11
+	at += 1
 	var text := ""
 	var no_space := "abcdefghijlmnoprstuvxz,."
 	for i in length:
-		var pool := no_space if i == 0 or i == length - 1 else BookSpineScript.ALPHABET
-		while bytes[at] >= 256 - 256 % pool.length():
+		var edge := i == 0 or i == length - 1
+		var pool := no_space if edge else BookSpineScript.ALPHABET
+		while bytes[at] >= (240 if edge else 250):
 			at += 1
 		text += pool[bytes[at] % pool.length()]
 		at += 1
 	return text
+
+
+## Rectangle encré de la case du glyphe k dans l'atlas (pixels, relatif à la case).
+func _ink_rect(atlas: Image, k: int) -> Rect2i:
+	var cell := BookSpineScript.CELL_PX
+	var columns := BookSpineScript.ATLAS_COLUMNS
+	var region := atlas.get_region(Rect2i(Vector2i(k % columns, k / columns) * cell, Vector2i(cell, cell)))
+	region.convert(Image.FORMAT_RGBA8)
+	return region.get_used_rect()
 
 
 func _chi_square(counts: Dictionary, total: int, categories: int) -> float:

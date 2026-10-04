@@ -6,8 +6,12 @@
 //
 // Le titre arrive par INSTANCE_CUSTOM (MultiMesh.use_custom_data), codé par BookSpine.encode_title :
 // chaque composante vaut 2^23 + 20 bits utiles, soit 4 symboles de 5 bits (0 : fin du titre,
-// 1 à 25 : rang dans l'alphabet + 1) ; le bit 20 de x marque un livre d'images. Une composante
-// hors de [2^23, 2^24) (donnée absente, ou demi-flottant du moteur Compatibility) efface le titre.
+// 1 à 25 : rang dans l'alphabet + 1, 26 à 31 : fin aussi) ; le bit 20 de x marque un livre
+// d'images. Une composante hors de [2^23, 2^24) (donnée absente, ou demi-flottant du moteur
+// Compatibility) efface le titre.
+//
+// Majuscules : la première lettre du titre, et la première lettre après chaque point (espaces,
+// virgules et autres points sautés), se lisent dans la case des capitales (rang + 25).
 //
 // Le titre se lit de bas en haut, tête penchée à gauche : la ligne de base monte le long du dos,
 // le haut des lettres regarde vers +X local (la gauche du lecteur face au dos). Il est centré
@@ -16,12 +20,15 @@ shader_type spatial;
 
 const float MARK = 8388608.0;           // 2^23 : repère des composantes valides
 const int MAX_SYMBOLS = 16;
+const int SYMBOLS = 25;                 // codes valides : 1 à 25
+const int LETTERS = 22;                 // rangs 0 à 21 : les lettres ; 22 espace, 23 virgule, 24 point
+const int PERIOD = 24;
 
 uniform sampler2D glyph_atlas : hint_default_transparent, filter_linear_mipmap, repeat_disable;
-uniform float glyph_advance[25];         // chasse de chaque symbole, en em
+uniform float glyph_advance[47];         // chasse de chaque glyphe (25 symboles, puis 22 capitales), en em
 uniform float atlas_cell_em = 1.5;       // côté d'une case de l'atlas, en em
 uniform vec2 atlas_origin_em = vec2(0.25, 1.09375);   // point de chasse dans la case, depuis le coin haut-gauche
-uniform int atlas_columns = 5;
+uniform int atlas_columns = 7;
 
 uniform vec3 gold : source_color = vec3(0.86, 0.66, 0.30);
 // Métal à 0,75 et non 1 : la galerie n'a ni ciel ni sonde de reflets, l'or pur n'y refléterait
@@ -46,6 +53,20 @@ uint symbol_code(uvec4 codes, int i) {
 }
 
 
+// Le glyphe à dessiner pour le rang `symbol`, et la règle des capitales mise à jour.
+int glyph_for(int symbol, inout bool capital) {
+	if (symbol < LETTERS) {
+		int glyph = capital ? symbol + SYMBOLS : symbol;
+		capital = false;
+		return glyph;
+	}
+	if (symbol == PERIOD) {
+		capital = true;
+	}
+	return symbol;
+}
+
+
 void vertex() {
 	v_local = VERTEX;
 	v_spine = step(0.5, -NORMAL.z);
@@ -54,14 +75,13 @@ void vertex() {
 	bool valid = all(greaterThanEqual(custom, vec4(MARK))) && all(lessThan(custom, vec4(2.0 * MARK)));
 	v_codes = valid ? uvec4(custom - vec4(MARK)) : uvec4(0u);
 	float width = 0.0;
-	int count = 0;
+	bool capital = true;
 	for (int i = 0; i < MAX_SYMBOLS; i++) {
 		uint code = symbol_code(v_codes, i);
-		if (code == 0u) {
+		if (code == 0u || code > uint(SYMBOLS)) {
 			break;
 		}
-		width += glyph_advance[int(code) - 1] + tracking_em;
-		count++;
+		width += glyph_advance[glyph_for(int(code) - 1, capital)] + tracking_em;
 	}
 	width = max(width - tracking_em, 0.0);
 	float room = max(v_size.y - 2.0 * title_margin, 0.0);
@@ -98,12 +118,13 @@ void fragment() {
 		}
 		// Chaque lettre se lit dans sa case de l'atlas ; les cases voisines couvrent les débords.
 		float pen = 0.0;
+		bool capital = true;
 		for (int i = 0; i < MAX_SYMBOLS; i++) {
 			uint code = symbol_code(v_codes, i);
-			if (code == 0u) {
+			if (code == 0u || code > uint(SYMBOLS)) {
 				break;
 			}
-			int glyph = int(code) - 1;
+			int glyph = glyph_for(int(code) - 1, capital);
 			vec2 in_cell = atlas_origin_em + vec2(t.x - pen, -t.y);
 			if (all(greaterThan(in_cell, vec2(0.0))) && all(lessThan(in_cell, vec2(atlas_cell_em)))) {
 				vec2 cell = vec2(float(glyph % atlas_columns), float(glyph / atlas_columns));

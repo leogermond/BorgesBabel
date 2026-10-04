@@ -10,11 +10,21 @@ extends RefCounted
 ## shader, à partir d'un atlas des 25 glyphes de Lora rendu une fois sur le processeur. Une galerie
 ## n'écrit que 4 flottants par livre dans la donnée personnalisée de son MultiMesh (encode_title).
 ##
+## Affiché, le titre prend une capitale à sa première lettre et à la première lettre après chaque
+## point (display_title) ; le shader applique la même règle en lisant les symboles. Le titre codé,
+## lui, reste en 25 symboles minuscules.
+##
 ## Branchement dans gallery.gd :
 ##   _book_mesh.material = BookSpine.material()          # au lieu de _material("book")
 ##   multimesh.use_custom_data = true                     # tampon : 20 flottants par livre
 ##   var codes := BookSpine.gallery_codes(hexagon, level, image_flags)   # 640 Color, ordre (mur·5 + étagère)·32 + livre
 ##   buffer[o + 16] = codes[i].r ; buffer[o + 17] = codes[i].g ; buffer[o + 18] = codes[i].b ; buffer[o + 19] = codes[i].a
+## Avec use_colors et use_custom_data, une instance occupe 20 flottants : 12 de transformation,
+## 4 de couleur, 4 de titre (disposition constatée sous opengl3 ; le moteur sans écran ne fait
+## que renvoyer le tampon). Dans gallery.gd, trois endroits supposent 16 flottants par livre :
+##   _new_books        `var o := i * 16`  (≈ ligne 218)
+##   _book_template    `_book_buffer.resize(... * 16)`  (≈ ligne 243)
+##   _book_template    `var o := (...) * 16` et `for k in 16` (≈ lignes 253 et 256)
 ## Le titre exige des flottants 32 bits par instance : Forward+ et Mobile. Le moteur Compatibility
 ## (OpenGL) range la donnée personnalisée en demi-flottants ; le shader le reconnaît et montre
 ## alors le cuir nu, sans titre.
@@ -22,6 +32,10 @@ extends RefCounted
 ## Les 25 symboles de Borges, dans l'ordre de BookText.ALPHABET.
 const ALPHABET := "abcdefghijlmnoprstuvxz ,."
 const SPACE := 22                        # rang de l'espace dans ALPHABET
+const PERIOD := 24                       # rang du point
+const LETTERS := 22                      # rangs 0 à 21 : les lettres
+## Les glyphes de l'atlas : les 25 symboles, puis les capitales des 22 lettres (rang + 25).
+const GLYPHS := ALPHABET + "ABCDEFGHIJLMNOPRSTUVXZ"
 const MIN_LENGTH := 6
 const MAX_LENGTH := 16
 const SYMBOL_BITS := 5
@@ -39,8 +53,13 @@ const SHADER_PATH := "res://shaders/book_spine.gdshader"
 const FONT_WEIGHT := 600                 # Lora variable : 400 à 700 ; demi-gras pour la dorure
 const FONT_PX := 64                      # corps du rendu de l'atlas : 1 em = 64 pixels
 const CELL_PX := 96                      # case carrée par glyphe
-const ATLAS_COLUMNS := 5                 # 5 × 5 cases : 480 × 480 pixels
+const ATLAS_COLUMNS := 7                 # 7 × 7 cases (47 occupées) : 672 × 672 pixels
 const PEN_PX := Vector2i(16, 70)         # point de chasse (origine de la ligne de base) dans la case
+## Mise en page du titre, transmise au shader par material() et reprise par title_layout().
+const TRACKING_EM := 0.06                # espace ajouté entre deux lettres
+const TITLE_MARGIN := 0.035              # réserve en tête et en pied du dos, en mètres
+const TITLE_SIZE_FRACTION := 0.42        # corps maximal (1 em) rapporté à l'épaisseur du dos
+const TITLE_CENTER_EM := 0.25            # milieu de l'œil des minuscules, au-dessus de la ligne de base
 
 static var _material: ShaderMaterial
 static var _atlas: Image
@@ -102,15 +121,59 @@ static func _spell(indices: PackedByteArray) -> String:
 	return text.get_string_from_ascii().strip_edges()
 
 
+## Le titre tel qu'il s'affiche : capitale à la première lettre, et à la première lettre qui
+## suit chaque point (espaces, virgules et points intermédiaires sautés).
+static func display_title(text: String) -> String:
+	var shown := ""
+	var capital := true
+	for c in text:
+		var index := ALPHABET.find(c.to_lower())
+		shown += GLYPHS[_glyph(index, capital)] if index >= 0 else c
+		if index >= 0:
+			capital = (capital and index >= LETTERS) or index == PERIOD
+	return shown
+
+
+## Rang dans GLYPHS du symbole de rang `index`, selon que la règle demande une capitale.
+static func _glyph(index: int, capital: bool) -> int:
+	return index + ALPHABET.length() if capital and index < LETTERS else index
+
+
+## Les glyphes d'un titre (rangs dans GLYPHS), à l'identique du shader.
+static func title_glyphs(text: String) -> PackedInt32Array:
+	var glyphs := PackedInt32Array()
+	var capital := true
+	for c in text:
+		var index := ALPHABET.find(c.to_lower())
+		if index < 0:
+			continue
+		glyphs.append(_glyph(index, capital))
+		capital = (capital and index >= LETTERS) or index == PERIOD
+	return glyphs
+
+
+## Mise en page du titre sur un dos de `thickness` × `height` mètres, à l'identique du vertex
+## shader : x, le corps (mètres par em) ; y, la longueur du titre (em).
+static func title_layout(text: String, thickness: float, height: float) -> Vector2:
+	var advances := glyph_advances()
+	var width := 0.0
+	for glyph in title_glyphs(text):
+		width += advances[glyph] + TRACKING_EM
+	width = maxf(width - TRACKING_EM, 0.0)
+	var room := maxf(height - 2.0 * TITLE_MARGIN, 0.0)
+	return Vector2(minf(thickness * TITLE_SIZE_FRACTION, room / maxf(width, 0.001)), width)
+
+
 # --- Codage pour le shader ------------------------------------------------------------------
 
 ## Les 4 flottants d'INSTANCE_CUSTOM pour ce titre : 4 symboles de 5 bits par composante
 ## (0 : fin, 1 à 25 : rang + 1), le drapeau d'image au bit 20 de r, MARK ajouté partout.
-## Les symboles hors alphabet sont omis ; au-delà de 16 symboles, le titre est tronqué.
+## La casse est ignorée (un titre affiché donne le même code), les symboles hors alphabet sont
+## omis ; au-delà de 16 symboles, le titre est tronqué.
 static func encode_title(text: String, image_book := false) -> Color:
 	var indices := PackedByteArray()
 	for c in text:
-		var index := ALPHABET.find(c)
+		var index := ALPHABET.find(c.to_lower())
 		if index >= 0:
 			indices.append(index)
 	return _encode(indices, image_book)
@@ -133,9 +196,9 @@ static func decode_title(code: Color) -> String:
 		return text
 	for i in MAX_LENGTH:
 		var symbol := (payload[i / SYMBOLS_PER_CHANNEL] >> (SYMBOL_BITS * (i % SYMBOLS_PER_CHANNEL))) & 31
-		if symbol == 0:
-			break
-		text += ALPHABET[symbol - 1] if symbol <= ALPHABET.length() else "?"
+		if symbol == 0 or symbol > ALPHABET.length():
+			break   # 26 à 31 : fin, comme dans le shader
+		text += ALPHABET[symbol - 1]
 	return text
 
 
@@ -182,17 +245,21 @@ static func material() -> ShaderMaterial:
 	_material.set_shader_parameter("atlas_cell_em", float(CELL_PX) / FONT_PX)
 	_material.set_shader_parameter("atlas_origin_em", Vector2(PEN_PX) / FONT_PX)
 	_material.set_shader_parameter("atlas_columns", ATLAS_COLUMNS)
+	_material.set_shader_parameter("tracking_em", TRACKING_EM)
+	_material.set_shader_parameter("title_margin", TITLE_MARGIN)
+	_material.set_shader_parameter("title_size_fraction", TITLE_SIZE_FRACTION)
+	_material.set_shader_parameter("title_center_em", TITLE_CENTER_EM)
 	return _material
 
 
-## Chasse de chaque symbole de ALPHABET, en em.
+## Chasse de chaque glyphe de GLYPHS, en em.
 static func glyph_advances() -> PackedFloat32Array:
 	glyph_atlas()
 	return _advances
 
 
-## L'atlas des 25 symboles, blanc sur fond transparent (la couverture est dans l'alpha) :
-## le symbole de rang k occupe la case (k % 5, k / 5), son point de chasse en PEN_PX.
+## L'atlas des 47 glyphes de GLYPHS, blanc sur fond transparent (la couverture est dans l'alpha) :
+## le glyphe de rang k occupe la case (k % 7, k / 7), son point de chasse en PEN_PX.
 ## Rendu par FreeType via le TextServer, donc sans carte graphique, une fois par exécution.
 static func glyph_atlas() -> Image:
 	if _atlas != null:
@@ -215,14 +282,14 @@ static func glyph_atlas() -> Image:
 	atlas.fill(Color(1.0, 1.0, 1.0, 0.0))
 	# Tous les glyphes d'abord : le cache du TextServer grandit à chaque rendu.
 	var glyphs := PackedInt32Array()
-	_advances.resize(ALPHABET.length())
-	for k in ALPHABET.length():
-		var glyph := server.font_get_glyph_index(rid, FONT_PX, ALPHABET.unicode_at(k), 0)
+	_advances.resize(GLYPHS.length())
+	for k in GLYPHS.length():
+		var glyph := server.font_get_glyph_index(rid, FONT_PX, GLYPHS.unicode_at(k), 0)
 		server.font_render_glyph(rid, size, glyph)
 		_advances[k] = server.font_get_glyph_advance(rid, FONT_PX, glyph).x / FONT_PX
 		glyphs.append(glyph)
 	var caches := {}
-	for k in ALPHABET.length():
+	for k in GLYPHS.length():
 		var glyph := glyphs[k]
 		var texture := server.font_get_glyph_texture_idx(rid, size, glyph)
 		if texture < 0:
@@ -235,7 +302,7 @@ static func glyph_atlas() -> Image:
 		var cell := Vector2i(k % ATLAS_COLUMNS, k / ATLAS_COLUMNS) * CELL_PX
 		var at := cell + PEN_PX + Vector2i(server.font_get_glyph_offset(rid, size, glyph))
 		assert(Rect2i(cell, Vector2i(CELL_PX, CELL_PX)).encloses(Rect2i(at, source.size)),
-			"glyphe hors de sa case : %s" % ALPHABET[k])
+			"glyphe hors de sa case : %s" % GLYPHS[k])
 		atlas.blit_rect(caches[texture], source, at)
 	atlas.generate_mipmaps()
 	_atlas = atlas

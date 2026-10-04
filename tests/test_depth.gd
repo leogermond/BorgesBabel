@@ -2,8 +2,9 @@ extends SceneTree
 ## Vérifie la profondeur du monde : galeries construites sur plus de 50 m dans les
 ## quatre directions, trompe-l'œil au-delà, lumières et collisionneurs bornés,
 ## continuité de la lumière vue au passage d'un vestibule ou d'un niveau (voir
-## _check_continuity), coût d'un pas de vestibule et d'un changement de niveau, et
-## aucune fuite après une longue marche.
+## _check_continuity), titres dorés des dos (texture de chaque galerie relue et comparée au
+## titre du lecteur, livres d'images, dorure continue à chaque pas), coût d'un pas de vestibule
+## et d'un changement de niveau, et aucune fuite après une longue marche.
 ## godot --headless --path . -s tests/test_depth.gd
 
 const MIN_DEPTH := 50.0          # mètres de vraie géométrie devant le bibliothécaire
@@ -12,6 +13,11 @@ const FULL_GALLERIES := 3        # galeries à collisionneurs : l'origine et ses
 const SHIFT_BUDGET_USEC := 8000  # un pas (vestibule ou niveau) : moins d'une demi-image à 60 i/s
 const CROSSINGS := 16
 const LEVEL_SHIFTS := 6
+const BookSpineScript := preload("res://scripts/book_spine.gd")
+const BookTextScript := preload("res://scripts/book_text.gd")
+const AmbientSpeakerScript := preload("res://scripts/ambient_speaker.gd")
+const TITLE_SAMPLES := 24          # titres relus par galerie LIT ou FULL
+const SETTLE_LIMIT_MSEC := 60000   # attente au plus des titres préparés
 
 var _failures := 0
 
@@ -32,7 +38,8 @@ func _initialize() -> void:
 		"collisionneurs dans les %d galeries proches seulement (%d galeries complètes, %d corps)" % [FULL_GALLERIES, start.full, start.bodies])
 	_check(start.stray_bodies == 0, "aucun collisionneur hors d'une galerie complète (lu : %d)" % start.stray_bodies)
 
-	_check_continuity(main, player)
+	await _check_titles(main)
+	await _check_continuity(main, player)
 
 	var origin_hexagon: int = main.origin_hexagon
 
@@ -68,6 +75,8 @@ func _initialize() -> void:
 	_check_layout(main, "après %d changements de niveau" % LEVEL_SHIFTS)
 	_check_depth(main, player)
 
+	# Les haut-parleurs du niveau quitté finissent leur fondu de sortie avant le recensement.
+	await create_timer(AmbientSpeakerScript.FADE_OUT + 0.3).timeout
 	await _steps(2)
 	var end := _census(main)
 	_check(end == start, "mêmes comptes après la marche (%s)" % ["identiques" if end == start else str(end)])
@@ -80,6 +89,12 @@ func _initialize() -> void:
 		and reused.get_node("Books").material_override.get_shader_parameter("seed") \
 			== fresh.get_node("Books").material_override.get_shader_parameter("seed")
 	_check(same, "galerie reprise : mêmes livres (hauteurs, graine du nuanceur) qu'une galerie neuve à son adresse")
+	await _titles_settled(main)
+	fresh.load_titles_now()
+	var reused_titles: ImageTexture = reused.get_node("Books").material_override.get_shader_parameter("titles")
+	_check(reused.titles_ready() and reused_titles != null
+			and reused_titles.get_image().get_data() == fresh.titles_texture().get_image().get_data(),
+		"galerie reprise : mêmes titres (texture du matériau) qu'une galerie neuve à son adresse")
 	fresh.free()
 
 	# Le MultiMesh commun, avec la hauteur que le nuanceur donne à chaque livre (la boîte
@@ -222,15 +237,22 @@ func _check_continuity(main: Node, player: CharacterBody3D) -> void:
 	var all_ok := true
 	var nearest_changes: Array[float] = []
 	var exposed_changes := 0
+	var gold_jumps := 0
+	var gold_pending := 0
 	var fade_end: float = gallery_script.get_script_constant_map().get("FAR_FADE_END", INF)
 	for crossing: Array in crossings:
 		var step: Vector2i = crossing[1]
+		# Titres du pas suivant préparés (un pas prend au moins 4 s à pied ; ici quelques images).
+		player.position = Vector3(0.0, 0.05, 3.2)
+		player.velocity = Vector3.ZERO
+		await _titles_settled(main)
 		player.position = crossing[2]
 		player.velocity = Vector3.ZERO
 		_refresh_lamps(main)
 		var eye: Vector3 = player.camera.global_position
 		var before := _seen_all(main, points, h0, l0, eye, shaded)
 		var built_before := _built(main)
+		var gilt_before := _gilt(main)
 		if step.x != 0:
 			main._shift(step.x)
 		else:
@@ -238,6 +260,12 @@ func _check_continuity(main: Node, player: CharacterBody3D) -> void:
 		# Galeries et anneaux nés ou disparus : point le plus proche de l'œil, et points
 		# de leurs surfaces en vue en deçà du fondu dans la brume.
 		var built_after := _built(main)
+		var gilt_after := _gilt(main)
+		var gold := _gold_jumps(eye, gilt_before, gilt_after)
+		gold_jumps += gold.jumps
+		gold_pending += gold.pending
+		print("    %s : dorure, %d galeries gagnent ou perdent leurs titres (la plus proche à %.1f m), %d points de dos en vue en deçà de %.0f m, %d galeries sans titres prêts"
+			% [crossing[0], gold.cells, gold.nearest, gold.jumps, Gallery.TITLE_FADE_END, gold.pending])
 		var changed := {}
 		for key: Vector2i in built_before:
 			if not built_after.has(key) or built_after[key] != built_before[key]:
@@ -297,8 +325,146 @@ func _check_continuity(main: Node, player: CharacterBody3D) -> void:
 	_check(main.origin_hexagon == h0 and main.origin_level == l0, "retour à l'origine après les passages")
 	_check(exposed_changes == 0, "galeries et anneaux naissent et disparaissent hors de vue ou au-delà du fondu dans la brume (%d points en vue)"
 		% exposed_changes)
+	# Témoin : le même relevé voit bien la dorure de la galerie d'origine, et celle d'une voisine du
+	# niveau au-dessus par le puits, si elles perdaient leurs titres.
+	player.position = Vector3(0.0, 0.05, 3.2)
+	var witness_eye: Vector3 = player.camera.global_position
+	var witness: int = _gold_jumps(witness_eye, {Vector2i(0, 0): 1.0}, {}).jumps
+	var witness_up: int = _gold_jumps(Vector3(-1.2, 3.3, 0.0), {Vector2i(0, 1): 1.0}, {}).jumps
+	_check(witness > 0 and witness_up > 0, "témoin : le relevé de la dorure voit les dos de la galerie d'origine (%d points) et du niveau au-dessus par le puits (%d)"
+		% [witness, witness_up])
+	_check(gold_pending == 0, "après chaque pas, toute galerie LIT ou FULL a déjà ses titres (préparés d'avance : %d en attente)" % gold_pending)
+	_check(gold_jumps == 0, "dorure continue au passage d'un vestibule et d'un niveau : aucun dos en vue à moins de %.0f m ne gagne ni ne perd ses titres (%d points)"
+		% [Gallery.TITLE_FADE_END, gold_jumps])
 	if shaded:
 		_check_real_lamps(main, player)
+
+
+## Attend que tous les titres soient calculés et posés, fondus d'arrivée compris.
+func _titles_settled(main: Node) -> void:
+	var t0 := Time.get_ticks_msec()
+	while Time.get_ticks_msec() - t0 < SETTLE_LIMIT_MSEC:
+		var waiting := not Gallery.titles_idle()
+		for gallery in _galleries(main):
+			if gallery.detail >= Gallery.Detail.LIT and (not gallery.titles_ready() or gallery.titles_alpha() < 1.0):
+				waiting = true
+		if not waiting:
+			return
+		await process_frame
+
+
+## Titres dans le monde : la texture branchée sur le matériau des livres de chaque galerie LIT ou
+## FULL, relue sur le processeur, donne pour chaque livre tiré le titre que le lecteur affiche
+## (BookText.title = display_title(BookSpine.title)) ; les drapeaux des livres d'images (filets
+## dorés du nuanceur) sont ceux du service ; les galeries DISTANT, à façades peintes, n'ont rien.
+func _check_titles(main: Node) -> void:
+	var t0 := Time.get_ticks_msec()
+	await _titles_settled(main)
+	print("  titres : posés %d ms après l'attente du départ" % (Time.get_ticks_msec() - t0))
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 1899
+	var galleries := 0
+	var unready := 0
+	var sampled := 0
+	var mismatches := 0
+	for gallery in _galleries(main):
+		if gallery.detail < Gallery.Detail.LIT:
+			continue
+		galleries += 1
+		var texture: ImageTexture = gallery.get_node("Books").material_override.get_shader_parameter("titles")
+		if not gallery.titles_ready() or gallery.titles_alpha() != 1.0 or texture == null or texture != gallery.titles_texture():
+			unready += 1
+			continue
+		var bytes := texture.get_image().get_data()
+		for k in TITLE_SAMPLES:
+			var i: int = [0, 639][k] if k < 2 else rng.randi_range(0, 639)
+			var wall := i / 160
+			var shelf := (i / 32) % 5
+			var book := i % 32
+			var shown := BookSpineScript.display_title(BookSpineScript.decode_title(bytes, i))
+			sampled += 1
+			if shown.is_empty() or shown != BookTextScript.title(gallery.hexagon, gallery.level, wall, shelf, book):
+				mismatches += 1
+				if mismatches <= 3:
+					print("      %s livre %d : « %s », attendu « %s »" % [gallery.name, i, shown,
+						BookTextScript.title(gallery.hexagon, gallery.level, wall, shelf, book)])
+	_check(galleries == 19 and unready == 0, "%d galeries LIT ou FULL, chacune avec la texture de ses titres, opacité 1 (en défaut : %d)" % [galleries, unready])
+	_check(sampled > 0 and mismatches == 0, "titres relus dans la texture = titre du lecteur, %d livres tirés (écarts : %d)" % [sampled, mismatches])
+	var origin: Gallery = main.get_node("Gallery_%d_%d" % [main.origin_hexagon, main.origin_level])
+	var flags: Array = BookTextScript.gallery_image_books(origin.hexagon, origin.level)
+	var texture: ImageTexture = origin.titles_texture()
+	var flagged := 0
+	var wrong := 0
+	if texture != null:
+		var bytes := texture.get_image().get_data()
+		for i in 640:
+			var flag := BookSpineScript.decode_image_flag(bytes, i)
+			flagged += int(flag)
+			if flag != (i < flags.size() and bool(flags[i])):
+				wrong += 1
+	_check(texture != null and flags.size() == 640 and wrong == 0 and flagged > 0,
+		"livres d'images de la galerie d'origine : %d drapeaux (filets dorés) dans la texture, comme le service (écarts : %d)" % [flagged, wrong])
+	var distant_titled := 0
+	for gallery in _galleries(main):
+		if gallery.detail == Gallery.Detail.DISTANT and gallery.has_node("Books"):
+			distant_titled += 1
+	_check(distant_titled == 0, "galeries lointaines sans livres un à un ni titres (façades peintes)")
+
+
+## Opacité des titres de chaque galerie construite, par case relative à l'origine de départ :
+## celle du nuanceur pour une galerie LIT ou FULL dont les titres sont posés, 0 sinon.
+func _gilt(main: Node) -> Dictionary:
+	var gilt := {}
+	for gallery in _galleries(main):
+		var cell := Vector2i(gallery.hexagon - _continuity_origin_hexagon, gallery.level - _continuity_origin_level)
+		gilt[cell] = gallery.titles_alpha() if gallery.detail >= Gallery.Detail.LIT and gallery.titles_ready() else 0.0
+		if gallery.detail >= Gallery.Detail.LIT and not gallery.titles_ready():
+			gilt[cell] = -1.0   # en attente : compté à part
+	return gilt
+
+
+## Poids de la dorure en un point de dos = opacité des titres de sa galerie × title_weight(distance à
+## l'œil) : l'œil restant au même point absolu, il ne change qu'aux galeries qui gagnent ou perdent
+## leurs titres. Compte les points de dos tournés vers l'œil, en vue, où il change de plus de 1e-3.
+func _gold_jumps(eye: Vector3, before: Dictionary, after: Dictionary) -> Dictionary:
+	var result := {"jumps": 0, "cells": 0, "nearest": INF, "pending": 0}
+	var cells := before.duplicate()
+	cells.merge(after)
+	for cell: Vector2i in cells:
+		var a: float = maxf(before.get(cell, 0.0), 0.0)
+		var b: float = after.get(cell, 0.0)
+		if b < 0.0:
+			result.pending += 1
+			b = 0.0
+		if absf(a - b) <= 1e-3:
+			continue
+		result.cells += 1
+		var origin := Vector3(0.0, cell.y * Gallery.LEVEL_PITCH, cell.x * Gallery.PITCH)
+		for spot: Array in _spine_grid():
+			var p: Vector3 = origin + spot[0]
+			var d := p.distance_to(eye)
+			result.nearest = minf(result.nearest, d)
+			var w: float = Gallery.title_weight(d)
+			if absf(a - b) * w <= 1e-3 or (eye - p).dot(spot[1]) <= 0.0:
+				continue
+			if _in_sight(eye, p):
+				result.jumps += 1
+	return result
+
+
+var _spines: Array = []
+
+
+## Points des dos des quatre murs de livres (repère de la galerie) et leur normale, vers la salle.
+func _spine_grid() -> Array:
+	if _spines.is_empty():
+		for side: int in Gallery.BOOK_SIDES:
+			var basis := Basis(Vector3.UP, side * PI / 3.0)
+			for i in range(-6, 7):
+				for j in range(Gallery.SHELVES):
+					_spines.append([basis * Vector3(i * 0.38, Gallery.BOARD_BASE + 0.15 + j * Gallery.BOARD_PITCH, Gallery.BOOK_FRONT),
+						basis * Vector3.FORWARD])
+	return _spines
 
 
 ## Points fixes : [case absolue (galerie, niveau) relative à l'origine de départ, point
@@ -582,6 +748,13 @@ func _check_shaders(main: Node) -> void:
 	_check(foreign == 0 and compiled == 2 * seen_shaders.size() and seen_shaders.size() == 3,
 		"un seul nuanceur de lumière pour toutes les surfaces (%d variantes × 2 rendus compilées, %d surfaces étrangères)"
 			% [seen_shaders.size(), foreign])
+	# Variante BOOKS : titres dorés lus dans la texture de la galerie, sous la même lumière.
+	var titled := 0
+	for shader: Shader in seen_shaders:
+		if (shader.code.contains("#define BOOKS") and shader.code.contains("texelFetch(titles")
+				and shader.code.contains("gold_sheen(") and not shader.code.contains("INSTANCE_CUSTOM")):
+			titled += 1
+	_check(titled == 1, "une variante (BOOKS) dessine les titres, lus au texel près dans la texture de la galerie")
 	# Valeurs calculées à part (Python) : lowbias32 de 0, 1, 2, 12345, 2³² − 1.
 	var reference := [0, 1753845952, 3507691905, 2435775735, 1734902346]
 	var got := []

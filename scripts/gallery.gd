@@ -682,11 +682,10 @@ func _want_titles() -> void:
 func _apply_titles(key: String, bytes: PackedByteArray, fade: bool) -> void:
 	var image := Image.create_from_data(BookSpineScript.TEXTURE_WIDTH, BookSpineScript.TEXTURE_HEIGHT,
 		false, Image.FORMAT_RGBA8, bytes)
-	if _titles_texture == null:
-		_titles_texture = ImageTexture.create_from_image(image)
-		_book_material.set_shader_parameter("titles", _titles_texture)
-	else:
-		_titles_texture.update(image)
+	# Une texture neuve (7,5 Ko) plutôt que update() : la texture branchée sur le matériau reste
+	# lisible telle quelle (le rendu factice des tests ne garde que l'image de création).
+	_titles_texture = ImageTexture.create_from_image(image)
+	_book_material.set_shader_parameter("titles", _titles_texture)
 	_titles_key = key
 	if fade and is_inside_tree():
 		_set_titles_alpha(0.0)

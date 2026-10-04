@@ -43,6 +43,7 @@ var _hint: Label
 var _widget: VBoxContainer
 var _quest_title: Label
 var _quest_glyph: Label
+var _arrow: QuestArrow
 var _quest_hall: Label
 var _quest_level: Label
 var _quest_book: Label
@@ -55,6 +56,8 @@ var _hexagon := 0
 var _level := 0
 var _guide: Dictionary = {}
 var _mouse_before := Input.MOUSE_MODE_VISIBLE
+## Dernier mode de souris demandé par le panneau (le mode effectif reste VISIBLE sans fenêtre).
+var mouse_mode_requested := -1
 var _player_was_frozen := false
 
 
@@ -220,6 +223,14 @@ func _input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 
 
+## Panneau ou carnet ouvert : ce que leurs contrôles n'ont pas pris s'arrête ici (le Hud, enfant du
+## monde, reçoit l'entrée non traitée avant lui) ; E n'ouvre pas de livre sous le panneau.
+func _unhandled_input(event: InputEvent) -> void:
+	if is_panel_open() or (carnet != null and carnet.is_open()):
+		if event is InputEventKey or event is InputEventMouseButton or event is InputEventMouseMotion:
+			get_viewport().set_input_as_handled()
+
+
 ## Traite une touche ; vrai quand elle est consommée.
 func handle_key(event: InputEvent) -> bool:
 	if not event is InputEventKey:
@@ -302,7 +313,15 @@ func _build_widget(root: Control) -> void:
 	root.add_child(_widget)
 	_quest_title = _widget_label(14)
 	_quest_title.modulate = Color(1.0, 0.9, 0.7)
-	_quest_glyph = _widget_label(26)
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_END
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_widget.add_child(row)
+	_quest_glyph = _label(18)
+	_quest_glyph.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	row.add_child(_quest_glyph)
+	_arrow = QuestArrow.new()
+	row.add_child(_arrow)
 	_quest_hall = _widget_label(14)
 	_quest_level = _widget_label(14)
 	_quest_book = _widget_label(14)
@@ -330,44 +349,104 @@ func _refresh_widget() -> void:
 	_quest_hall.text = _guide.hall_text
 	_quest_level.text = _guide.level_text
 	_quest_book.text = _guide.book_text
-	_quest_glyph.text = direction_glyph(_guide, quest.address(), get_viewport().get_camera_3d() if is_inside_tree() else null)
+	_update_arrow(get_viewport().get_camera_3d() if is_inside_tree() else null)
 
 
 func _process(_delta: float) -> void:
 	if quest != null and not _guide.is_empty():
-		_quest_glyph.text = direction_glyph(_guide, quest.address(), get_viewport().get_camera_3d())
+		_update_arrow(get_viewport().get_camera_3d())
 
 
-## Le glyphe de direction : flèche horizontale relative au regard (le long du vestibule, vers le
-## puits, ou vers le livre dans la galerie visée), suivie de ▲ ou ▼ quand l'étage diffère.
-static func direction_glyph(guide: Dictionary, target: Dictionary, camera: Camera3D) -> String:
-	var vertical := "▲" if guide.vert > 0 else ("▼" if guide.vert < 0 else "")
+func _update_arrow(camera: Camera3D) -> void:
+	var state := direction(_guide, quest.address(), camera)
+	_arrow.set_state(state.mode, state.heading)
+	_quest_glyph.text = "ici" if state.mode == QuestArrow.HERE else ""
+
+
+## L'état de la flèche de l'encart : {mode, heading, glyph}.
+##   mode « haut » / « bas » : la cible est à un autre étage, la flèche se dresse vers le haut ou le bas ;
+##   mode « plat » : même étage, la flèche couchée montre le vestibule (+Z ou −Z) ;
+##   mode « ici » : galerie atteinte, la flèche couchée montre le livre.
+## heading : angle de la flèche couchée par rapport au regard, en radians (0 devant, positif à droite) ;
+## glyph : la même direction en un caractère (huit flèches, ▲ ou ▼), ou « +Z » / « −Z » sans caméra.
+static func direction(guide: Dictionary, target: Dictionary, camera: Camera3D) -> Dictionary:
+	if guide.vert != 0:
+		var up: bool = guide.vert > 0
+		return {"mode": QuestArrow.UP if up else QuestArrow.DOWN, "heading": 0.0, "glyph": "▲" if up else "▼"}
 	var from := camera.global_position if camera != null else Vector3.ZERO
-	var direction := Vector3.ZERO
-	if guide.hall != 0:
-		direction = Vector3(0.0, 0.0, guide.hall)
-	elif guide.vert != 0:
-		direction = -Vector3(from.x, 0.0, from.z)   # vers le puits, au centre de la galerie
-		if direction.length() < Gallery.SHAFT_APOTHEM:
-			direction = Vector3.ZERO
-	else:
+	var mode := QuestArrow.FLAT
+	var toward := Vector3(0.0, 0.0, guide.hall)
+	if guide.hall == 0:
+		mode = QuestArrow.HERE
 		var side := Basis(Vector3.UP, Gallery.BOOK_SIDES[target.wall] * PI / 3.0)
 		var book := side * Vector3(Gallery.SHELF_WIDTH * 0.5 - (target.book + 0.5) * Gallery.BOOK_SLOT, 0.0, Gallery.BOOK_FRONT)
-		direction = Vector3(book.x - from.x, 0.0, book.z - from.z)
-	if direction == Vector3.ZERO:
-		return vertical if not vertical.is_empty() else "·"
+		toward = Vector3(book.x - from.x, 0.0, book.z - from.z)
 	if camera == null:
-		var axis := ("+Z" if direction.z > 0.0 else "−Z") if guide.hall != 0 else "·"
-		return (axis + " " + vertical).strip_edges()
+		return {"mode": mode, "heading": 0.0, "glyph": "+Z" if toward.z > 0.0 else "−Z"}
 	var forward := -camera.global_basis.z
 	var right := camera.global_basis.x
-	var ahead := direction.x * forward.x + direction.z * forward.z
-	var aside := direction.x * right.x + direction.z * right.z
-	var octant := int(roundf(atan2(aside, ahead) / (PI / 4.0)))
-	return (ARROWS[posmod(octant, 8)] + " " + vertical).strip_edges()
+	var heading := atan2(toward.x * right.x + toward.z * right.z, toward.x * forward.x + toward.z * forward.z)
+	return {"mode": mode, "heading": heading, "glyph": ARROWS[posmod(int(roundf(heading / (PI / 4.0))), 8)]}
+
+
+## Flèche dessinée de l'encart : couchée (aplatie comme posée au sol, tournée selon le regard) ou
+## dressée vers le haut ou le bas.
+class QuestArrow:
+	extends Control
+
+	const FLAT := "plat"
+	const UP := "haut"
+	const DOWN := "bas"
+	const HERE := "ici"
+	## Aplatissement de la flèche couchée : la hauteur à l'écran d'un sol vu en biais.
+	const FLAT_SQUASH := 0.45
+	const COLOR := Color(1.0, 0.85, 0.45)
+
+	var mode := FLAT
+	var heading := 0.0
+
+	func _init() -> void:
+		custom_minimum_size = Vector2(56, 56)
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	func set_state(new_mode: String, new_heading: float) -> void:
+		if new_mode != mode or not is_equal_approx(new_heading, heading):
+			mode = new_mode
+			heading = new_heading
+			queue_redraw()
+
+	## Vecteur unitaire écran de la pointe : vers le haut ou le bas pour une flèche dressée ;
+	## pour une flèche couchée, la direction tournée de heading puis aplatie.
+	func tip_direction() -> Vector2:
+		match mode:
+			UP:
+				return Vector2.UP
+			DOWN:
+				return Vector2.DOWN
+		return Vector2.UP.rotated(heading) * Vector2(1.0, FLAT_SQUASH)
+
+	func _draw() -> void:
+		var center := size * 0.5
+		var radius := minf(size.x, size.y) * 0.42
+		var squash := Vector2.ONE if mode == UP or mode == DOWN else Vector2(1.0, FLAT_SQUASH)
+		var turn := 0.0 if mode == UP else (PI if mode == DOWN else heading)
+		var shape := PackedVector2Array([
+			Vector2(0.0, -1.0), Vector2(0.55, -0.15), Vector2(0.2, -0.15), Vector2(0.2, 0.9),
+			Vector2(-0.2, 0.9), Vector2(-0.2, -0.15), Vector2(-0.55, -0.15)])
+		var points := PackedVector2Array()
+		for point in shape:
+			points.append(center + point.rotated(turn) * radius * squash)
+		draw_colored_polygon(points, COLOR)
+		points.append(points[0])
+		draw_polyline(points, Color(0, 0, 0, 0.7), 1.5, true)
 
 
 # --- Panneau de quête ---------------------------------------------------------------------------
+
+func _set_mouse_mode(mode: Input.MouseMode) -> void:
+	mouse_mode_requested = mode
+	Input.mouse_mode = mode
+
 
 func is_panel_open() -> bool:
 	return _panel != null and _panel.visible
@@ -377,7 +456,7 @@ func open_panel() -> void:
 	if is_panel_open():
 		return
 	_mouse_before = Input.mouse_mode
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	_set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
 	_hold_player(true)
 	last_error = ""
 	_panel.visible = true
@@ -391,7 +470,7 @@ func close_panel() -> void:
 	_panel.visible = false
 	if _file_dialog.visible:
 		_file_dialog.hide()
-	Input.mouse_mode = _mouse_before
+	_set_mouse_mode(_mouse_before)
 	_hold_player(false)
 	quest_panel_toggled.emit(false)
 

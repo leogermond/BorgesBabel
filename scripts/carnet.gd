@@ -41,6 +41,8 @@ var _fading: Label
 var _caret: Label
 var _blink := 0.0
 var _mouse_before := Input.MOUSE_MODE_VISIBLE
+## Dernier mode de souris demandé par le carnet (le mode effectif reste VISIBLE sans fenêtre).
+var mouse_mode_requested := -1
 static var _base: Dictionary = {}
 
 
@@ -117,7 +119,7 @@ func open() -> void:
 	word = ""
 	_render()
 	_mouse_before = Input.mouse_mode
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	_set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
 	visible = true
 	toggled.emit(true)
 
@@ -127,8 +129,13 @@ func close() -> void:
 		return
 	visible = false
 	word = ""
-	Input.mouse_mode = _mouse_before
+	_set_mouse_mode(_mouse_before)
 	toggled.emit(false)
+
+
+func _set_mouse_mode(mode: Input.MouseMode) -> void:
+	mouse_mode_requested = mode
+	Input.mouse_mode = mode
 
 
 ## Traite une touche quand le carnet est ouvert : il les consomme toutes (vrai).

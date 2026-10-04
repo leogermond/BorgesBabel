@@ -12,6 +12,9 @@ const ARITH_CASES_PATH := "user://test_quete_arith.json"
 const ENTRY_KEYS := ["id", "title", "author", "year", "language", "context", "group", "licence", "protected", "page_count", "pages", "notice_address", "notice_hash"]
 
 var _failures := 0
+## Événements parvenus au « jeu » (un nœud placé avant le Hud, servi après lui comme main.gd).
+var _game_events: Array = []
+var _game: Node
 var _jumps: Array = []
 
 
@@ -21,6 +24,8 @@ func _initialize() -> void:
 	_test_catalogue()
 	_test_pins()
 	await _test_hud()
+	_test_direction_glyph()
+	await _test_main_panel()
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(PINS_TEST_PATH))
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(ARITH_CASES_PATH))
 	print("test_quest : %s" % ("OK" if _failures == 0 else "%d échec(s)" % _failures))
@@ -38,6 +43,7 @@ func _test_arithmetic() -> void:
 	_check(QuestScript.dec_sub("-7", "-7") == "0", "-7 − (-7) = 0")
 	_check(QuestScript.dec_add("999999999999999999999", "1") == "1000000000000000000000", "retenue sur 21 chiffres")
 	_check(not QuestScript.dec_valid("12a") and not QuestScript.dec_valid("-") and not QuestScript.dec_valid(""), "chaînes non décimales refusées")
+	_check(not QuestScript.dec_valid("١٢٣") and not QuestScript.dec_valid("１２") and not QuestScript.dec_valid("-٣"), "chiffres non ASCII refusés (sans erreur de décodage)")
 
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 2234
@@ -238,6 +244,13 @@ static func _write(path: String, text: String) -> void:
 
 func _test_hud() -> void:
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(PINS_TEST_PATH))
+	var game_script := GDScript.new()
+	game_script.source_code = "extends Node\nsignal got(event)\nfunc _unhandled_input(event: InputEvent) -> void:\n\tgot.emit(event)\n"
+	game_script.reload()
+	_game = Node.new()
+	_game.set_script(game_script)
+	_game.connect("got", func(event: InputEvent) -> void: _game_events.append(event))
+	root.add_child(_game)
 	var hud: Hud = HudScript.new()
 	hud.pins_path = PINS_TEST_PATH
 	root.add_child(hud)
@@ -259,14 +272,22 @@ func _test_hud() -> void:
 	_check(hud._quest_title.text == "Essai — Moi" and hud._quest_book.text.ends_with("page 4"), "encart : titre, auteur, cote et page")
 	hud.set_address(8, -2)
 	_check(hud._quest_hall.text == "couloir : ici", "l'encart suit set_address")
+	_check(hud._arrow.mode == "ici" and hud._quest_glyph.text == "ici", "encart : galerie atteinte, « ici »")
+	hud.set_address(8, 0)
+	_check(hud._arrow.mode == "bas" and hud._quest_glyph.text.is_empty(), "encart : cible deux niveaux plus bas, flèche vers le bas")
+	hud.set_address(7, -2)
+	_check(hud._arrow.mode == "plat", "encart : même étage, flèche couchée")
+	hud.set_address(8, -2)
 
 	# Carnet : touche cachée, mot écrit dans l'alphabet, invocation à l'espace.
 	var carnet := hud.carnet
+	# Sans fenêtre, le mode effectif reste VISIBLE : on vérifie le mode retenu et le mode demandé.
 	var mouse_start := Input.mouse_mode
 	_check(_key(hud, CarnetScript.CARNET_KEY, true) and carnet.is_open(), "la touche du carnet l'ouvre")
-	_check(Input.mouse_mode == Input.MOUSE_MODE_VISIBLE, "le carnet libère la souris")
+	_check(carnet._mouse_before == mouse_start and carnet.mouse_mode_requested == Input.MOUSE_MODE_VISIBLE, "le carnet retient le mode de souris et demande la souris libre")
+	carnet._mouse_before = Input.MOUSE_MODE_CAPTURED   # comme si le bibliothécaire marchait, souris capturée
 	_check(_type(hud, "aleph ") and _jumps == ["couloir"] and not carnet.is_open(), "« aleph␠ » émet « couloir » une fois et ferme le carnet")
-	_check(Input.mouse_mode == mouse_start, "le carnet fermé rend le mode de souris")
+	_check(carnet.mouse_mode_requested == Input.MOUSE_MODE_CAPTURED, "le carnet fermé redemande le mode retenu (capturé)")
 	_jumps.clear()
 	_key(hud, CarnetScript.CARNET_KEY, true)
 	_type(hud, "Tlön")
@@ -286,7 +307,8 @@ func _test_hud() -> void:
 	_jumps.clear()
 	_key(hud, CarnetScript.CARNET_KEY, true)
 	_check(_key(hud, KEY_E, true, "e") and _key(hud, KEY_E, false, "e") and carnet.word == "e", "E tapé dans le carnet est consommé (aucun livre ne s'ouvre)")
-	_check(_key(hud, KEY_ESCAPE, true) and not carnet.is_open() and Input.mouse_mode == mouse_start and _jumps.is_empty(), "Échap ferme le carnet sans invocation")
+	_check(_mouse(hud), "carnet ouvert : un clic est consommé")
+	_check(_key(hud, KEY_ESCAPE, true) and not carnet.is_open() and carnet.mouse_mode_requested == mouse_start and _jumps.is_empty(), "Échap ferme le carnet sans invocation et rend le mode retenu")
 	_check(not _key(hud, KEY_E, true, "e"), "carnet fermé : E reste au jeu")
 	_key(hud, CarnetScript.CARNET_KEY, true)
 	_check(_key(hud, CarnetScript.CARNET_KEY, true) and not carnet.is_open(), "la même touche referme le carnet")
@@ -296,6 +318,9 @@ func _test_hud() -> void:
 	# Panneau : touche de quête, puis Échap ; aucune touche nommée à l'écran.
 	var mouse_before := Input.mouse_mode
 	_check(_key(hud, HudScript.QUEST_KEY, true) and hud.is_panel_open(), "la touche de quête ouvre le panneau")
+	_check(hud._mouse_before == mouse_before and hud.mouse_mode_requested == Input.MOUSE_MODE_VISIBLE, "le panneau retient le mode de souris et demande la souris libre")
+	_check(_key(hud, KEY_E, true, "e") and _key(hud, KEY_W, true, "w") and _key(hud, KEY_SPACE, true, " "), "panneau ouvert : E, W, espace consommés")
+	_check(_mouse(hud), "panneau ouvert : un clic est consommé")
 	texts = _texts(hud)
 	var leaks := texts.filter(func(t: String) -> bool:
 		return t.contains("²") or t.contains(HudScript.QUEST_KEY_NAME) or t.contains(HudScript.CLEAR_KEY_NAME))
@@ -307,8 +332,10 @@ func _test_hud() -> void:
 	texts = _texts(hud)
 	_check(hud.quest.title == "Essai" and hud.register_items().all(func(it: Dictionary) -> bool: return texts.has("    " + it.label)),
 		"un clic sur le registre déplie ses lignes sans démarrer de quête")
-	_check(not _key(hud, CarnetScript.CARNET_KEY, true) and not carnet.is_open(), "panneau ouvert : le carnet reste fermé")
-	_check(_key(hud, KEY_ESCAPE, true) and not hud.is_panel_open() and Input.mouse_mode == mouse_before, "Échap ferme le panneau et rend le mode de souris")
+	_check(_key(hud, CarnetScript.CARNET_KEY, true) and not carnet.is_open(), "panneau ouvert : la touche du carnet est consommée, le carnet reste fermé")
+	hud._mouse_before = Input.MOUSE_MODE_CAPTURED   # comme si le bibliothécaire marchait, souris capturée
+	_check(_key(hud, KEY_ESCAPE, true) and not hud.is_panel_open() and hud.mouse_mode_requested == Input.MOUSE_MODE_CAPTURED, "Échap ferme le panneau et redemande le mode retenu (capturé)")
+	_check(not _key(hud, KEY_E, true, "e") and not _mouse(hud), "panneau fermé : E et le clic parviennent au jeu")
 
 	_check(hud.search_typed("la bibliotheque de babel") and hud.quest.title == "texte saisi", "un texte tapé démarre une quête")
 	_check(hud.pin_current("babel tapé"), "la recherche s'épingle")
@@ -330,6 +357,8 @@ func _test_hud() -> void:
 	_check(_key(hud, HudScript.CLEAR_KEY, true) and hud.quest == null and not hud._widget.visible, "la touche d'effacement efface la quête")
 	_check(not _key(hud, HudScript.CLEAR_KEY, true), "sans quête, la touche d'effacement reste au jeu")
 	hud.queue_free()
+	_game.queue_free()
+	_game = null
 	await process_frame
 
 
@@ -358,13 +387,111 @@ func _type(hud: Hud, text: String) -> bool:
 	return consumed
 
 
-static func _key(hud: Hud, code: int, pressed: bool, unicode := "") -> bool:
+## Envoie une touche par la fenêtre (push_input : _input, interface, _unhandled_input) ; vrai si
+## elle n'arrive pas au jeu (nœud _game), ou, sans lui, si un nœud l'a consommée.
+func _key(_hud: Hud, code: int, pressed: bool, unicode := "") -> bool:
 	var event := InputEventKey.new()
 	event.physical_keycode = code as Key
 	event.keycode = code as Key
 	event.unicode = unicode.unicode_at(0) if not unicode.is_empty() else 0
 	event.pressed = pressed
-	return hud.handle_key(event)
+	return _push(event)
+
+
+## Pousse un événement ; vrai s'il n'arrive pas au jeu (sans nœud _game : s'il est consommé).
+func _push(event: InputEvent) -> bool:
+	_game_events.clear()
+	root.push_input(event)
+	if _game != null:
+		return _game_events.is_empty()
+	return root.is_input_handled()
+
+
+## Un clic gauche (enfoncé puis relâché) au bord de la fenêtre ; vrai si l'enfoncement est consommé.
+func _mouse(_hud: Hud) -> bool:
+	var event := InputEventMouseButton.new()
+	event.button_index = MOUSE_BUTTON_LEFT
+	event.position = Vector2(4, 4)
+	event.global_position = event.position
+	event.pressed = true
+	var handled := _push(event)
+	var release := event.duplicate() as InputEventMouseButton
+	release.pressed = false
+	_push(release)
+	return handled
+
+
+# --- Flèche de direction -----------------------------------------------------------------------
+
+func _test_direction_glyph() -> void:
+	var camera := Camera3D.new()   # regarde vers −Z, la droite vers +X
+	root.add_child(camera)
+	var target := {"wall": 0, "shelf": 0, "book": 16}
+	var flat := HudScript.direction({"hall": 1, "vert": 0}, target, camera)
+	_check(flat.mode == "plat" and flat.glyph == "↓" and is_equal_approx(absf(flat.heading), PI), "même étage, +Z derrière : flèche couchée vers l'arrière (↓)")
+	_check(HudScript.direction({"hall": -1, "vert": 0}, target, camera).glyph == "↑", "même étage, −Z devant : ↑")
+	var up := HudScript.direction({"hall": 1, "vert": 1}, target, camera)
+	var down := HudScript.direction({"hall": 0, "vert": -1}, target, camera)
+	_check(up.mode == "haut" and up.glyph == "▲", "cible au-dessus : flèche dressée vers le haut, sans flèche couchée")
+	_check(down.mode == "bas" and down.glyph == "▼", "cible au-dessous : flèche dressée vers le bas")
+	camera.rotation.y = PI / 2.0   # regarde vers −X : +Z est à gauche
+	_check(HudScript.direction({"hall": 1, "vert": 0}, target, camera).glyph == "←", "+Z à gauche après un quart de tour : ←")
+	camera.rotation.y = 0.0
+	# Mur 0 = côté 1, à 60° de +Z vers +X : derrière à droite pour qui regarde vers −Z.
+	var here := HudScript.direction({"hall": 0, "vert": 0}, target, camera)
+	_check(here.mode == "ici" and here.glyph == "↘", "galerie atteinte : « ici », flèche couchée vers le livre (↘)")
+	_check(HudScript.direction({"hall": 1, "vert": 0}, target, null).glyph == "+Z", "sans caméra : +Z")
+
+	# La flèche dessinée suit les trois états.
+	var arrow := HudScript.QuestArrow.new()
+	root.add_child(arrow)
+	arrow.set_state(flat.mode, flat.heading)
+	var tip := arrow.tip_direction()
+	_check(absf(tip.y) < 0.5 and tip.y > 0.0, "flèche couchée : pointe aplatie (%.2f, %.2f)" % [tip.x, tip.y])
+	arrow.set_state(up.mode, up.heading)
+	_check(arrow.tip_direction() == Vector2.UP, "flèche dressée vers le haut")
+	arrow.set_state(down.mode, down.heading)
+	_check(arrow.tip_direction() == Vector2.DOWN, "flèche dressée vers le bas")
+	arrow.queue_free()
+	camera.queue_free()
+
+
+# --- Monde réel : le panneau ouvert garde E pour lui --------------------------------------------
+
+func _test_main_panel() -> void:
+	var main: Node3D = load("res://main.tscn").instantiate()
+	root.add_child(main)
+	for _i in 30:
+		await physics_frame
+	var player: Player = main.player
+	player.rotation.y = PI / 3.0 + PI
+	player.camera.rotation.x = -0.2
+	player.position = Basis(Vector3.UP, PI / 3.0) * Vector3(0.0, 0.0, 3.4)
+	for _i in 3:
+		await physics_frame
+	_check(not main._target.is_empty(), "monde : un livre est visé")
+	_key(null, KEY_E, true, "e")
+	_key(null, KEY_E, false, "e")
+	_check(main.reader.visible, "monde, contrôle : E ouvre le livre visé")
+	_key(null, KEY_E, true, "e")
+	_key(null, KEY_E, false, "e")
+	_check(not main.reader.visible, "monde : E referme le livre")
+	_key(null, HudScript.QUEST_KEY, true)
+	_check(main.hud.is_panel_open() and player.frozen, "monde : le panneau s'ouvre, le bibliothécaire s'arrête")
+	_key(null, KEY_E, true, "e")
+	_key(null, KEY_E, false, "e")
+	_mouse(null)
+	_check(not main.reader.visible, "monde : E et le clic, panneau ouvert, n'ouvrent pas le livre visé")
+	_key(null, KEY_ESCAPE, true)
+	_check(not main.hud.is_panel_open() and not player.frozen and main._mouse_captured, "monde : Échap ferme le panneau, le bibliothécaire repart")
+	_key(null, CarnetScript.CARNET_KEY, true)
+	_key(null, KEY_E, true, "e")
+	_key(null, KEY_E, false, "e")
+	_check(main.hud.carnet.is_open() and not main.reader.visible, "monde : E dans le carnet n'ouvre pas le livre visé")
+	_key(null, KEY_ESCAPE, true)
+	_check(not main.hud.carnet.is_open(), "monde : Échap ferme le carnet")
+	main.queue_free()
+	await process_frame
 
 
 static func _texts(node: Node) -> Array:

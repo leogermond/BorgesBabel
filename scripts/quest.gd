@@ -144,12 +144,14 @@ func guidance(hexagon: int, level: int) -> Dictionary:
 # un : quelques millisecondes pour 2234 chiffres, à chaque changement d'origine.
 
 static func dec_valid(text: String) -> bool:
-	var bytes := text.to_ascii_buffer()
-	var start := 1 if not bytes.is_empty() and (bytes[0] == 43 or bytes[0] == 45) else 0
-	if bytes.size() <= start or bytes.size() != text.length():
+	# Les caractères se lisent un à un (unicode_at) : aucune conversion par le moteur, donc aucune
+	# erreur de décodage pour un texte non ASCII.
+	var start := 1 if text.begins_with("+") or text.begins_with("-") else 0
+	if text.length() <= start:
 		return false
-	for i in range(start, bytes.size()):
-		if bytes[i] < 48 or bytes[i] > 57:
+	for i in range(start, text.length()):
+		var c := text.unicode_at(i)
+		if c < 48 or c > 57:
 			return false
 	return true
 

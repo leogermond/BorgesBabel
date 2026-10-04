@@ -90,7 +90,7 @@ ENTRIES = [
         "author": BORGES,
         "year": 1947,
         "language": "es",
-        "context": "Reprise dans le recueil El Aleph (1949). En arabe, zāhir, « l'apparent », est l'un des quatre-vingt-dix-neuf noms de Dieu. Chez Borges, le Zahir est une pièce de vingt centavos reçue en monnaie dans un bar de Buenos Aires : une fois vue, elle ne peut plus être oubliée et finit par occuper toute la pensée. Le récit énumère d'autres Zahirs à travers l'histoire, dont un tigre au Gujarat et un astrolabe que Nadir Shah fit jeter à la mer.",
+        "context": "Reprise dans le recueil El Aleph (1949). En arabe, zāhir, « l'apparent », est l'un des quatre-vingt-dix-neuf noms de Dieu. Chez Borges, le Zahir est une pièce de vingt centavos reçue en monnaie dans un almacén de Buenos Aires : une fois vue, elle ne peut plus être oubliée et finit par occuper toute la pensée. Le récit énumère d'autres Zahirs à travers l'histoire, dont un tigre au Gujarat et un astrolabe que Nadir Shah fit jeter à la mer.",
         "group": "Borges",
         "licence": BORGES_NOTICE_LICENCE,
         "protected": True,

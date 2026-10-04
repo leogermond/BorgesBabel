@@ -16,6 +16,8 @@ extends RefCounted
 ## entre guillemets) ; à défaut `py -3`, `python`, puis `python3` sous Windows, `python3` ailleurs.
 ## Sans Python, les pages affichent le message d'erreur et le journal le reprend.
 
+const BookSpineScript := preload("res://scripts/book_spine.gd")
+
 ## 22 lettres (l'alphabet latin privé de k, q, w, y), l'espace, la virgule, le point.
 const ALPHABET := "abcdefghijlmnoprstuvxz ,."
 const PAGES := 410
@@ -126,7 +128,7 @@ static func gallery_image_books(hexagon: int, level: int) -> Array:
 
 ## Le titre inscrit sur le dos du livre : quelques lettres tirées d'un condensat SHA-256 de son adresse.
 static func title(hexagon: int, level: int, wall: int, shelf: int, book: int) -> String:
-	return BookSpine.display_title(BookSpine.title(hexagon, level, wall, shelf, book))
+	return BookSpineScript.display_title(BookSpineScript.title(hexagon, level, wall, shelf, book))
 
 
 # --- Recherche inverse ----------------------------------------------------------------------

@@ -3,6 +3,8 @@ extends CanvasLayer
 ## Fenêtre de lecture : une page de 40 lignes de 80 caractères, la cote du livre,
 ## et la navigation page par page. Seule la page affichée est calculée.
 
+const BookTextScript := preload("res://scripts/book_text.gd")
+
 var book: Dictionary = {}
 var page := 0
 
@@ -71,7 +73,7 @@ func open(target: Dictionary) -> void:
 	book = target
 	page = 0
 	_heading.text = "« %s »   —   hexagone %d, niveau %d · mur %d · étagère %d · livre %d" % [
-		BookText.title(book.hexagon, book.level, book.wall, book.shelf, book.book),
+		BookTextScript.title(book.hexagon, book.level, book.wall, book.shelf, book.book),
 		book.hexagon, book.level, book.wall + 1, book.shelf + 1, book.book + 1]
 	_render()
 	visible = true
@@ -84,16 +86,16 @@ func close() -> void:
 
 ## Avance (+1) ou recule (−1) d'une page, dans les limites du livre.
 func turn(step: int) -> void:
-	var next := clampi(page + step, 0, BookText.PAGES - 1)
+	var next := clampi(page + step, 0, BookTextScript.PAGES - 1)
 	if next != page:
 		page = next
 		_render()
 
 
 func _render() -> void:
-	var lines := BookText.page_lines(book.hexagon, book.level, book.wall, book.shelf, book.book, page)
+	var lines := BookTextScript.page_lines(book.hexagon, book.level, book.wall, book.shelf, book.book, page)
 	_text.text = "\n".join(lines)
-	_folio.text = "page %d / %d" % [page + 1, BookText.PAGES]
+	_folio.text = "page %d / %d" % [page + 1, BookTextScript.PAGES]
 
 
 static func _label(color: Color, size: int) -> Label:

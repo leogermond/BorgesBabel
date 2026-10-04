@@ -7,8 +7,14 @@ extends CanvasLayer
 ## Le carnet (Carnet, touche cachée Carnet.CARNET_KEY) est un enfant du Hud : le Hud lui passe
 ## toutes les touches tant qu'il est ouvert et relaie son signal invocation(axe).
 
+const BookTextScript := preload("res://scripts/book_text.gd")
+const GalleryScript := preload("res://scripts/gallery.gd")
+const PlayerScript := preload("res://scripts/player.gd")
+const QuestScript := preload("res://scripts/quest.gd")
+const CarnetScript := preload("res://scripts/carnet.gd")
+
 ## La quête a changé (null quand elle s'efface).
-signal quest_changed(quest: Quest)
+signal quest_changed(quest: QuestScript)
 ## Invocation écrite dans le carnet : axe « couloir », « puits » ou « galerie ».
 signal invocation(axis: String)
 ## Le panneau de quête s'ouvre (vrai) ou se ferme (faux).
@@ -24,14 +30,14 @@ const PIN_GLYPH := "📌"
 const WIDGET_WIDTH := 460.0
 
 ## Quête en cours, ou null.
-var quest: Quest
+var quest: QuestScript
 ## Le carnet, créé au premier _ready.
-var carnet: Carnet
+var carnet: CarnetScript
 var catalogue: Array = []
 var pins: Array = []
 ## Chemins lus au premier _ready ; les tests les détournent avant d'ajouter le Hud à l'arbre.
-var catalogue_path := Quest.CATALOGUE_PATH
-var pins_path := Quest.PINS_PATH
+var catalogue_path := QuestScript.CATALOGUE_PATH
+var pins_path := QuestScript.PINS_PATH
 ## Message d'erreur de la dernière recherche (vide quand tout va bien).
 var last_error := ""
 ## Le registre des livres manquants est déplié dans le panneau.
@@ -62,8 +68,8 @@ var _player_was_frozen := false
 
 
 func _ready() -> void:
-	catalogue = Quest.load_catalogue(catalogue_path)
-	pins = Quest.load_pins(catalogue, pins_path)
+	catalogue = QuestScript.load_catalogue(catalogue_path)
+	pins = QuestScript.load_pins(catalogue, pins_path)
 
 	var root := Control.new()
 	root.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -92,7 +98,7 @@ func _ready() -> void:
 
 	_build_widget(root)
 	_build_panel()
-	carnet = Carnet.new()
+	carnet = CarnetScript.new()
 	carnet.invocation.connect(invocation.emit)
 	carnet.toggled.connect(_hold_player)
 	add_child(carnet)
@@ -118,7 +124,7 @@ func set_target(target: Dictionary) -> void:
 
 # --- Quête --------------------------------------------------------------------------------------
 
-func start_quest(new_quest: Quest) -> void:
+func start_quest(new_quest: QuestScript) -> void:
 	quest = new_quest
 	last_error = ""
 	_refresh_widget()
@@ -154,9 +160,9 @@ func guidance() -> Dictionary:
 
 ## Démarre la quête d'une épingle ; faux pour le registre et pour une entrée disparue du catalogue.
 func start_pin(pin: Dictionary) -> bool:
-	if pin.kind == Quest.KIND_REGISTER:
+	if pin.kind == QuestScript.KIND_REGISTER:
 		return false   # le registre ne mène nulle part ; ses lignes, si
-	var found := Quest.from_pin(pin, catalogue)
+	var found := QuestScript.from_pin(pin, catalogue)
 	if found == null:
 		last_error = "entrée introuvable : %s" % pin.title
 		return false
@@ -169,12 +175,12 @@ func search_typed(text: String) -> bool:
 	if text.strip_edges().is_empty():
 		last_error = "texte vide"
 		return false
-	return _start_search(BookText.search_text(text), "texte saisi")
+	return _start_search(BookTextScript.search_text(text), "texte saisi")
 
 
 ## Cherche un fichier de texte (.txt) ou d'image ; faux en cas d'échec (last_error).
 func search_file(path: String) -> bool:
-	var found := BookText.search_text_file(path) if path.get_extension().to_lower() == "txt" else BookText.search_image_file(path)
+	var found := BookTextScript.search_text_file(path) if path.get_extension().to_lower() == "txt" else BookTextScript.search_image_file(path)
 	return _start_search(found, path.get_file())
 
 
@@ -183,34 +189,34 @@ func pin_current(pin_title: String) -> bool:
 	if quest == null or not quest.entry_id.is_empty():
 		return false
 	var pin_name := pin_title.strip_edges() if not pin_title.strip_edges().is_empty() else quest.title
-	pins = Quest.add_pin(pins, Quest.search_pin(pin_name, quest.address()))
+	pins = QuestScript.add_pin(pins, QuestScript.search_pin(pin_name, quest.address()))
 	_save_pins()
 	return true
 
 
 func unpin(id: String) -> void:
-	pins = Quest.remove_pin(pins, id)
+	pins = QuestScript.remove_pin(pins, id)
 	_save_pins()
 
 
 ## Rétablit les entrées du catalogue désépinglées.
 func restore_pins() -> void:
-	pins = Quest.restore_catalogue(pins, catalogue)
+	pins = QuestScript.restore_catalogue(pins, catalogue)
 	_save_pins()
 
 
 func _start_search(found: Dictionary, default_title: String) -> bool:
 	if found.is_empty():
-		last_error = BookText.last_error if not BookText.last_error.is_empty() else "recherche sans résultat"
+		last_error = BookTextScript.last_error if not BookTextScript.last_error.is_empty() else "recherche sans résultat"
 		if is_panel_open():
 			_rebuild_panel()
 		return false
-	start_quest(Quest.from_address(found, default_title))
+	start_quest(QuestScript.from_address(found, default_title))
 	return true
 
 
 func _save_pins() -> void:
-	if not Quest.save_pins(pins, pins_path):
+	if not QuestScript.save_pins(pins, pins_path):
 		push_warning("épingles non enregistrées : %s" % pins_path)
 	if is_panel_open():
 		_rebuild_panel()
@@ -252,7 +258,7 @@ func handle_key(event: InputEvent) -> bool:
 		return false
 	if key.ctrl_pressed or key.alt_pressed or key.meta_pressed:
 		return false
-	if key.physical_keycode == Carnet.CARNET_KEY:
+	if key.physical_keycode == CarnetScript.CARNET_KEY:
 		carnet.open()
 		return true
 	if key.physical_keycode == QUEST_KEY:
@@ -291,12 +297,12 @@ func _reader_open() -> bool:
 	return reader is CanvasLayer and reader.visible
 
 
-func _player() -> Player:
+func _player() -> PlayerScript:
 	var parent := get_parent()
 	if parent == null:
 		return null
 	var player: Variant = parent.get("player")
-	return player if player is Player else null
+	return player if player is PlayerScript else null
 
 
 # --- Encart de quête ----------------------------------------------------------------------------
@@ -378,8 +384,8 @@ static func direction(guide: Dictionary, target: Dictionary, camera: Camera3D) -
 	var toward := Vector3(0.0, 0.0, guide.hall)
 	if guide.hall == 0:
 		mode = QuestArrow.HERE
-		var side := Basis(Vector3.UP, Gallery.BOOK_SIDES[target.wall] * PI / 3.0)
-		var book := side * Vector3(Gallery.SHELF_WIDTH * 0.5 - (target.book + 0.5) * Gallery.BOOK_SLOT, 0.0, Gallery.BOOK_FRONT)
+		var side := Basis(Vector3.UP, GalleryScript.BOOK_SIDES[target.wall] * PI / 3.0)
+		var book := side * Vector3(GalleryScript.SHELF_WIDTH * 0.5 - (target.book + 0.5) * GalleryScript.BOOK_SLOT, 0.0, GalleryScript.BOOK_FRONT)
 		toward = Vector3(book.x - from.x, 0.0, book.z - from.z)
 	if camera == null:
 		return {"mode": mode, "heading": 0.0, "glyph": "+Z" if toward.z > 0.0 else "−Z"}
@@ -557,8 +563,8 @@ func _rebuild_panel() -> void:
 	var group := ""
 	var first := true
 	for pin: Dictionary in pins:
-		var entry := Quest.catalogue_entry(catalogue, pin.entry) if pin.kind == Quest.KIND_CATALOGUE else {}
-		var pin_group: String = entry.get("group", "") if not entry.is_empty() else ("Recherches" if pin.kind == Quest.KIND_SEARCH else "")
+		var entry := QuestScript.catalogue_entry(catalogue, pin.entry) if pin.kind == QuestScript.KIND_CATALOGUE else {}
+		var pin_group: String = entry.get("group", "") if not entry.is_empty() else ("Recherches" if pin.kind == QuestScript.KIND_SEARCH else "")
 		if first or pin_group != group:
 			first = false
 			group = pin_group
@@ -576,12 +582,12 @@ func _rebuild_panel() -> void:
 		row.add_child(_button("désépingler", unpin.bind(pin.id)))
 		_panel_box.add_child(row)
 		var context: String = entry.get("context", "")
-		if pin.kind == Quest.KIND_SEARCH:
+		if pin.kind == QuestScript.KIND_SEARCH:
 			context = _search_context(pin.address)
-		elif pin.kind == Quest.KIND_REGISTER:
-			context = Quest.REGISTER_CONTEXT
+		elif pin.kind == QuestScript.KIND_REGISTER:
+			context = QuestScript.REGISTER_CONTEXT
 		_panel_box.add_child(_text(context, 13, Color(1, 1, 1, 0.65)))
-		if pin.kind == Quest.KIND_REGISTER and register_open:
+		if pin.kind == QuestScript.KIND_REGISTER and register_open:
 			for item: Dictionary in register_items():
 				var line := Button.new()
 				line.text = "    " + item.label
@@ -589,7 +595,7 @@ func _rebuild_panel() -> void:
 				line.alignment = HORIZONTAL_ALIGNMENT_LEFT
 				line.pressed.connect(_on_register_item_pressed.bind(item))
 				_panel_box.add_child(line)
-	if not Quest.missing_catalogue(pins, catalogue).is_empty():
+	if not QuestScript.missing_catalogue(pins, catalogue).is_empty():
 		_panel_box.add_child(_button("rétablir", restore_pins))
 
 	_panel_box.add_child(HSeparator.new())
@@ -609,7 +615,7 @@ func _rebuild_panel() -> void:
 
 
 func _on_pin_pressed(pin: Dictionary) -> void:
-	if pin.kind == Quest.KIND_REGISTER:
+	if pin.kind == QuestScript.KIND_REGISTER:
 		register_open = not register_open
 		_rebuild_panel()
 	elif start_pin(pin):
@@ -620,12 +626,12 @@ func _on_pin_pressed(pin: Dictionary) -> void:
 
 ## Les lignes du registre des livres manquants : {label, address}.
 func register_items() -> Array:
-	return Quest.register_items(catalogue_path)
+	return QuestScript.register_items(catalogue_path)
 
 
 ## Démarre la quête d'une ligne du registre : le livre manquant, à sa première page.
 func start_register_item(item: Dictionary) -> void:
-	start_quest(Quest.from_address(item.address, item.label))
+	start_quest(QuestScript.from_address(item.address, item.label))
 
 
 func _on_register_item_pressed(item: Dictionary) -> void:
@@ -635,7 +641,7 @@ func _on_register_item_pressed(item: Dictionary) -> void:
 
 static func _search_context(target: Dictionary) -> String:
 	return "hexagone de %d chiffres · mur %d · étagère %d · livre %d · page %d" % [
-		Quest.dec_digits(target.hexagon), target.wall + 1, target.shelf + 1, target.book + 1, target.page + 1]
+		QuestScript.dec_digits(target.hexagon), target.wall + 1, target.shelf + 1, target.book + 1, target.page + 1]
 
 
 static func _heading(text: String) -> Label:

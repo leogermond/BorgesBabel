@@ -44,6 +44,8 @@ extends AudioStreamPlayer3D
 ## quitte la règle appelle retire() (pas de queue_free direct, sinon le volume coupe net s'il restait audible).
 ## Hors de la portée de l'oreille, create() démarre à plein volume ; à moins de MAX_DISTANCE du joueur, fondu d'entrée de 0,5 s.
 
+const AmbientSpeakerScript := preload("res://scripts/ambient_speaker.gd")
+
 const BUS := &"Ambiance"
 const DEFAULT_PATH := "res://audio/ambiance.ogg"
 const CUSTOM_PATH := "res://audio/ambiance_custom.ogg"
@@ -71,8 +73,8 @@ var _since_check := 0.0
 
 
 ## Un haut-parleur prêt à entrer dans l'arbre : il démarre dans _ready à la position de l'horloge globale.
-static func create(fade_in: float = FADE_IN) -> AmbientSpeaker:
-	var speaker := AmbientSpeaker.new()
+static func create(fade_in: float = FADE_IN) -> AmbientSpeakerScript:
+	var speaker := AmbientSpeakerScript.new()
 	speaker._fade_in = fade_in
 	speaker.stream = load_stream()
 	speaker.bus = ensure_bus_name()

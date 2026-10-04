@@ -3,6 +3,8 @@ extends CharacterBody3D
 ## Bibliothécaire à la première personne : marche, gravité, regard à la souris,
 ## et repérage du livre visé par un rayon partant de la caméra.
 
+const GalleryScript := preload("res://scripts/gallery.gd")
+
 const SPEED := 3.0
 const MOUSE_SENSITIVITY := 0.0025
 const REACH := 2.5
@@ -62,5 +64,5 @@ func _find_target() -> Dictionary:
 	var hit := get_world_3d().direct_space_state.intersect_ray(query)
 	if hit.is_empty() or not hit.collider.has_meta("book_wall"):
 		return {}
-	var gallery := hit.collider.get_parent() as Gallery
+	var gallery := hit.collider.get_parent() as GalleryScript
 	return gallery.locate_book(hit.collider, hit.position)

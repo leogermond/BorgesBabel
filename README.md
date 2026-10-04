@@ -124,7 +124,13 @@ godot --headless --path . --import
 godot --headless --path . -s tests/test_book_text.gd   # texte : déterminisme, 40 × 80, alphabet, diversité
 godot --headless --path . -s tests/test_world.gd       # monde : apparition, livre visé, lecture, vestibule, balustrade
 godot --headless --path . -s tests/test_depth.gd       # profondeur, continuité de la lumière, coût d'un pas
+tools/check_no_class_cache.sh                          # lancement sans réimport : cache de classes périmé ou vide, aucune erreur de script
 ```
+
+Les scripts de `scripts/` se référencent par `preload` (`const QuestScript := preload("res://scripts/quest.gd")`)
+et non par leur `class_name` : le jeu se lance ainsi après un `pull` sans `--import`, avant que
+`.godot/global_script_class_cache.cfg` connaisse les nouvelles classes. `tools/check_no_class_cache.sh`
+le vérifie sur une copie du projet (cache périmé puis cache vide, scène principale ~120 images).
 
 `test_depth` relève, en 1 871 points fixes de la Bibliothèque (le long du vestibule, des diagonales
 et du puits), la lumière des lampes renvoyée vers l'œil, fois le reste de brume, juste avant et

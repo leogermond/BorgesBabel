@@ -9,6 +9,7 @@ const Speaker := preload("res://scripts/ambient_speaker.gd")
 const MAX_BYTES := 10 * 1024 * 1024
 
 var _failures := 0
+var _world_done := false
 
 
 func _initialize() -> void:
@@ -86,7 +87,7 @@ func _initialize() -> void:
 			var s := Speaker.create(0.0)
 			var clock_before := Speaker.music_position()
 			root.add_child(s)
-			await process_frame
+			await _started(s)   # le départ se fait à la première image libre (STARTS_PER_FRAME)
 			var clock_after := Speaker.music_position()
 			speakers.append(s)
 			arrivals.append(s.start_position)
@@ -117,20 +118,157 @@ func _initialize() -> void:
 
 		# Recyclage : retirer tous les haut-parleurs puis en créer un nouveau ne redémarre pas le morceau.
 		var before := Speaker.music_position()
+		var before_usec := Time.get_ticks_usec()
 		for s in speakers:
 			s.free()
 		await create_timer(0.12).timeout
 		var late := Speaker.create(0.0)
 		root.add_child(late)
-		await process_frame
-		var expected := fposmod(before + 0.12, length)
+		await _started(late)
+		var expected := fposmod(before + (Time.get_ticks_usec() - before_usec) / 1.0e6, length)
 		_check(absf(Speaker._circular_diff(late.start_position, expected)) < 0.1,
 			"après libération de tous les haut-parleurs, le suivant reprend à %.2f s (attendu %.2f s)" % [late.start_position, expected])
 		late.retire(0.0)
+		await _check_clock_guard()
+		await _check_world()
+		_check(_world_done, "contrôles du monde menés à terme")
 
 	speaker.free()
 	print("test_ambient : %s" % ("OK" if _failures == 0 else "%d échec(s)" % _failures))
 	quit(1 if _failures else 0)
+
+
+## Garde de l'horloge : après une pause de l'arbre, ou une image de plus de 0,5 s, tous les lecteurs se recalent
+## ensemble sur la référence, et l'horloge globale avec eux.
+func _check_clock_guard() -> void:
+	var group: Array = []
+	for i in 3:
+		var s := Speaker.create(0.0)
+		root.add_child(s)
+		await _started(s)
+		group.append(s)
+	await create_timer(0.3).timeout
+	for what: String in ["pause de l'arbre (0,8 s)", "image de 0,7 s"]:
+		var count := Speaker.resync_count
+		var reference_before: float = group[0].get_playback_position()
+		if what.begins_with("pause"):
+			paused = true
+			await create_timer(0.8, true).timeout
+			paused = false
+		else:
+			await process_frame
+			OS.delay_msec(700)
+		for _i in 10:
+			await process_frame
+		var reference: AudioStreamPlayer3D = Speaker._reference
+		var spread := 0.0
+		for s: AudioStreamPlayer3D in group:
+			spread = maxf(spread, absf(Speaker._circular_diff(s.get_playback_position(), group[0].get_playback_position())))
+		var clock_error := absf(Speaker._circular_diff(Speaker.music_position(), reference.get_playback_position())) if reference != null else INF
+		print("    %s : recalages %d → %d, lecture %.2f → %.2f s, écart entre lecteurs %.1f ms, horloge − référence %.1f ms"
+			% [what, count, Speaker.resync_count, reference_before, group[0].get_playback_position(), spread * 1000.0, clock_error * 1000.0])
+		_check(Speaker.resync_count > count, "%s : resync_all a recalé les haut-parleurs" % what)
+		_check(spread < 0.15 and clock_error < 0.1,
+			"%s : lecteurs ensemble (%.1f ms) et horloge globale sur la référence (%.1f ms)" % [what, spread * 1000.0, clock_error * 1000.0])
+	for s: Node in group:
+		s.free()
+
+
+## Dans le monde : six haut-parleurs symétriques sur le niveau du joueur, qui suivent les décalages d'origine sans
+## redémarrer la musique ; ceux qui naissent à portée d'oreille entrent en fondu.
+func _check_world() -> void:
+	var main: Node3D = load("res://main.tscn").instantiate()
+	root.add_child(main)
+	for _i in 20:
+		await physics_frame
+	var player: CharacterBody3D = main.player
+	_check_layout(main, "au départ")
+	for step: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+		var level := step.y != 0
+		player.velocity = Vector3.ZERO
+		# Vestibule : le seuil (6 m) à peine franchi ; niveau : debout au niveau voisin, comme le fait test_depth.
+		player.position = Vector3(0.0, 0.05, step.x * 6.05) if not level else Vector3(0.0, 0.05 + step.y * 3.4, 3.2)
+		var eye: Vector3 = player.camera.global_position
+		var before := {}
+		for s: Node3D in _live(main):
+			before[s] = s.global_position - eye
+		var origin := Vector2i(main.origin_hexagon, main.origin_level)
+		main._physics_process(0.0)   # la galerie (ou le niveau) voisine devient l'origine
+		_check(Vector2i(main.origin_hexagon, main.origin_level) - origin == step, "décalage d'origine %s" % step)
+		var eye_after: Vector3 = player.camera.global_position
+		var kept := 0
+		var moved := 0
+		for s: Variant in before.keys():
+			if is_instance_valid(s) and not s._retiring:
+				kept += 1
+				if not (s.global_position - eye_after).is_equal_approx(before[s]):
+					moved += 1
+		var label := ("niveau %+d" if level else "vestibule %+d") % (step.y if level else step.x)
+		var fresh: Array = _live(main).filter(func(s: Node3D) -> bool: return not before.has(s))
+		for _i in 8:
+			await process_frame   # départs étalés : un par image
+		var within := 0
+		var faded := 0
+		var restarted := 0
+		var off_clock := 0
+		for s: Node3D in fresh:
+			if not s.started:
+				continue
+			if eye_after.distance_to(s.global_position) < Speaker.MAX_DISTANCE:
+				within += 1
+				if s._fade_tween != null and s._fade_tween.is_valid():
+					faded += 1
+		for s: AudioStreamPlayer3D in _live(main):
+			if not s.playing:
+				off_clock += 1
+			elif absf(Speaker._circular_diff(s.get_playback_position(), Speaker.music_position())) > 0.15:
+				off_clock += 1
+			if s.get_playback_position() < 0.05 and Speaker.music_position() > 1.0:
+				restarted += 1
+		_check(kept == (0 if level else 5) and moved == 0,
+			"%s : %d haut-parleurs gardés (attendu %d), aucun déplacé par rapport à l'œil (%d)" % [label, kept, 0 if level else 5, moved])
+		_check(restarted == 0 and off_clock == 0,
+			"%s : tous jouent à l'horloge globale, aucun ne reprend le morceau au début (hors horloge : %d, au début : %d)" % [label, off_clock, restarted])
+		if level:
+			_check(fresh.size() == 6 and within >= 4 and faded == within,
+				"%s : %d haut-parleurs naissent sur le nouveau niveau, %d à portée d'oreille, %d en fondu d'entrée" % [label, fresh.size(), within, faded])
+		else:
+			var nearest := INF
+			for s: Node3D in fresh:
+				nearest = minf(nearest, eye_after.distance_to(s.global_position))
+			_check(fresh.size() == 1 and nearest > Speaker.MAX_DISTANCE,
+				"%s : un haut-parleur naît, à %.1f m de l'œil (hors de portée : %.0f m)" % [label, nearest, Speaker.MAX_DISTANCE])
+		_check_layout(main, "après " + label)
+	_world_done = true
+	main.queue_free()
+	await process_frame
+
+
+## Les haut-parleurs du monde qui ne sont pas en fondu de sortie.
+func _live(main: Node) -> Array:
+	return Speaker.speakers().filter(func(s: Node) -> bool: return not s._retiring and main.is_ancestor_of(s))
+
+
+## Six haut-parleurs, au milieu des vestibules du niveau du joueur, à z = −30, −18, −6, 6, 18, 30 de l'origine.
+func _check_layout(main: Node3D, when: String) -> void:
+	var zs: Array = []
+	var off_level := 0
+	for s: Node3D in _live(main):
+		var local := main.to_local(s.global_position)
+		zs.append(snappedf(local.z, 0.01))
+		if absf(local.y - Speaker.HEIGHT) > 0.01 or absf(local.x) > 0.01:
+			off_level += 1
+	zs.sort()
+	_check(zs == [-30.0, -18.0, -6.0, 6.0, 18.0, 30.0] and off_level == 0,
+		"%s : haut-parleurs à z = %s, sur le niveau du joueur (hors place : %d)" % [when, zs, off_level])
+
+
+## Attend que le haut-parleur ait lancé sa lecture (quelques images au plus).
+func _started(s: Node) -> void:
+	for _i in 10:
+		if s.started:
+			return
+		await process_frame
 
 
 ## Lit l'en-tête Vorbis (canaux, fréquence) et la dernière position granulaire (durée) d'un fichier Ogg.

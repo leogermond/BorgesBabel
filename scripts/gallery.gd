@@ -12,10 +12,18 @@ extends Node3D
 ## Trois degrés de détail, selon la distance au bibliothécaire :
 ## - FULL : tout, avec les collisionneurs (galerie où il marche, et ses voisines) ;
 ## - LIT : livres un à un et vraies lampes, sans collisionneur ;
-## - DISTANT : un seul maillage partagé, lumière des lampes cuite dans les sommets,
-##   façades de livres peintes, globes lumineux ; aucune lumière, aucun collisionneur.
-## Les maillages des murs, des étagères et des lampes sont communs à toutes les
-## galeries : seuls les livres dépendent de l'adresse.
+## - DISTANT : façades de livres peintes, globes lumineux ; ni lampe réelle ni collisionneur.
+## Les maillages des murs, des étagères, des lampes et des livres sont communs à toutes
+## les galeries : seule la graine des livres (tirée de l'adresse) change d'une galerie à
+## l'autre, et le nuanceur en tire la hauteur et le cuir de chaque livre.
+##
+## La lumière : chaque lampe de la Bibliothèque éclaire par deux voies dont la somme
+## reste constante. Une vraie OmniLight3D porte la part `real_weight(d)` de son énergie,
+## d étant la distance de la lampe à l'œil ; le nuanceur commun à toutes les surfaces
+## ajoute, pixel par pixel, la part 1 − real_weight(d) de chacune des lampes du réseau
+## (deux par galerie, à chaque niveau), par la formule même de Godot pour une
+## OmniLight3D sans ombre. Une galerie lointaine reçoit donc exactement la lumière
+## d'une galerie proche ; une vraie lampe naît et meurt à poids nul.
 
 enum Detail { DISTANT, LIT, FULL }
 
@@ -39,6 +47,7 @@ const WALLS := 4
 const SHELVES := 5
 const BOOKS_PER_SHELF := 32
 const BOOK_SIDES: Array[int] = [1, 2, 4, 5]
+const BOOKCASES: Array[String] = ["Bookcase0", "Bookcase1", "Bookcase2", "Bookcase3"]
 const SHELF_WIDTH := 4.8
 const BOOK_SLOT := SHELF_WIDTH / BOOKS_PER_SHELF
 const CASE_DEPTH := 0.3
@@ -49,6 +58,9 @@ const CASE_TOP := BOARD_BASE + SHELVES * BOARD_PITCH
 const BOOK_THICK := 0.13
 const BOOK_DEPTH := 0.22
 const BOOK_FRONT := APOTHEM - CASE_DEPTH + 0.03   # dos des livres, côté salle
+const BOOK_MIN_HEIGHT := 0.28
+const BOOK_MAX_HEIGHT := 0.36
+const BOOK_MAX_DARKEN := 0.35                # cuir assombri de 0 à 35 %
 
 # La lumière de la Bibliothèque : deux lampes par galerie, et la pénombre ambiante.
 const LAMP_X := 3.2
@@ -59,9 +71,20 @@ const LAMP_ENERGY := 1.6
 const LAMP_RANGE := 8.0
 const AMBIENT_COLOR := Color(0.55, 0.42, 0.3)
 const AMBIENT_ENERGY := 0.35
-# Les couleurs de sommet tiennent sur 8 bits (0 à 1) : la lumière cuite y entre
-# divisée par 2, et les matériaux lointains rendent ce facteur à l'albédo.
-const BAKE_SCALE := 0.5
+# Part réelle d'une lampe : entière jusqu'à REAL_LIGHT_NEAR de l'œil, nulle au-delà de
+# REAL_LIGHT_FAR. Toute lampe à moins de REAL_LIGHT_FAR d'un œil placé n'importe où
+# dans la galerie d'origine appartient à une galerie éclairée (la plus proche qui ne
+# l'est pas est à 7,4 m) : les vraies lampes ne naissent et ne meurent qu'éteintes.
+const REAL_LIGHT_NEAR := 3.0
+const REAL_LIGHT_FAR := 7.0
+
+# La brume : exponentielle, puis fondue au noir de brume entre FAR_FADE_BEGIN et
+# FAR_FADE_END. Les galeries et les anneaux naissent et disparaissent à plus de 95 m
+# de l'œil : là, la brume a tout recouvert, et rien ne change à l'image.
+const FOG_COLOR := Color(0.05, 0.035, 0.022)
+const FOG_DENSITY := 0.04      # reste de lumière : 38 % à 24 m, 15 % à 48 m, 6 % à 70 m
+const FAR_FADE_BEGIN := 70.0
+const FAR_FADE_END := 90.0
 
 const LEATHER: Array[Color] = [
 	Color(0.42, 0.12, 0.08), Color(0.30, 0.18, 0.10), Color(0.16, 0.24, 0.14),
@@ -69,18 +92,177 @@ const LEATHER: Array[Color] = [
 	Color(0.55, 0.45, 0.30),
 ]
 
+## Nuanceur de toutes les surfaces de la Bibliothèque. Variantes : SURFACE (albédo
+## uni), BOOKS (MultiMesh des livres : hauteur et cuir tirés de la graine et du
+## numéro de l'instance), FACES (façade peinte des livres lointains : les mêmes livres,
+## tirés de la même façon, dessinés à plat). Les constantes {…} viennent de ce script.
+const LIBRARY_SHADER := """
+shader_type spatial;
+render_mode diffuse_lambert, specular_disabled;
+
+#define {VARIANT}
+
+const float PITCH = {PITCH};
+const float LEVEL_PITCH = {LEVEL_PITCH};
+const float LAMP_X = {LAMP_X};
+const float LAMP_Y = {LAMP_Y};
+const float LAMP_RANGE = {LAMP_RANGE};
+const vec3 LAMP_LIGHT = {LAMP_LIGHT};   // couleur linéaire × énergie d'une lampe
+const float REAL_NEAR = {REAL_NEAR};
+const float REAL_FAR = {REAL_FAR};
+const vec3 FOG_LINEAR = {FOG_LINEAR};
+const float FOG_DENSITY = {FOG_DENSITY};
+const float FAR_FADE_BEGIN = {FAR_FADE_BEGIN};
+const float FAR_FADE_END = {FAR_FADE_END};
+
+uniform vec3 albedo_linear = vec3(1.0);
+uniform vec3 emission_linear = vec3(0.0);
+uniform int seed = 0;
+
+#if defined(BOOKS) || defined(FACES)
+const int SHELVES = {SHELVES};
+const int BOOKS_PER_SHELF = {BOOKS_PER_SHELF};
+const float BOARD_BASE = {BOARD_BASE};
+const float BOARD_PITCH = {BOARD_PITCH};
+const float CASE_TOP = {CASE_TOP};
+const float BOOK_SLOT = {BOOK_SLOT};
+const float BOOK_THICK = {BOOK_THICK};
+const float BOOK_MIN_HEIGHT = {BOOK_MIN_HEIGHT};
+const float BOOK_MAX_HEIGHT = {BOOK_MAX_HEIGHT};
+const float BOOK_MAX_DARKEN = {BOOK_MAX_DARKEN};
+const vec3 WOOD_LINEAR = {WOOD_LINEAR};
+const vec3 LEATHER[7] = vec3[7]({LEATHER});
+
+// Hachage entier « lowbias32 » ; Gallery.lowbias32 en est le jumeau.
+uint lowbias32(uint x) {
+	x ^= x >> 16u;
+	x *= 0x7feb352du;
+	x ^= x >> 15u;
+	x *= 0x846ca68bu;
+	x ^= x >> 16u;
+	return x;
+}
+
+uint book_hash(int book, uint draw) {
+	return lowbias32(uint(seed) ^ lowbias32(uint(book) * 4u + draw));
+}
+
+float unit_float(uint h) {
+	return float(h >> 8u) * (1.0 / 16777216.0);
+}
+
+float book_height(int book) {
+	return BOOK_MIN_HEIGHT + (BOOK_MAX_HEIGHT - BOOK_MIN_HEIGHT) * unit_float(book_hash(book, 0u));
+}
+
+// Le cuir est pris tel quel comme albédo linéaire, comme les couleurs d'instance d'avant.
+vec3 book_color(int book) {
+	return LEATHER[book_hash(book, 1u) % 7u] * (1.0 - BOOK_MAX_DARKEN * unit_float(book_hash(book, 2u)));
+}
+#endif
+
+#ifdef BOOKS
+varying flat vec3 book_albedo;
+#endif
+
+#ifdef FACES
+// UV.x = 2 × mur + u (u de 0 à 1 le long de l'étagère), UV.y de 0 (haut) à 1 (bas).
+vec3 painted(vec2 uv) {
+	float wall = floor(uv.x * 0.5);
+	float slot = (uv.x - 2.0 * wall) * float(BOOKS_PER_SHELF);
+	int book = clamp(int(floor(slot)), 0, BOOKS_PER_SHELF - 1);
+	float y = mix(CASE_TOP, BOARD_BASE, uv.y);
+	int board = clamp(int(floor((y - BOARD_BASE) / BOARD_PITCH)), 0, SHELVES - 1);
+	int index = (int(wall) * SHELVES + SHELVES - 1 - board) * BOOKS_PER_SHELF + book;
+	float across = abs(fract(slot) - 0.5) * BOOK_SLOT;
+	float above = y - BOARD_BASE - float(board) * BOARD_PITCH;
+	return (across < BOOK_THICK * 0.5 && above < book_height(index)) ? book_color(index) : WOOD_LINEAR;
+}
+#endif
+
+void vertex() {
+#ifdef BOOKS
+	// Boîte unité ; l'instance la pose sur sa planche, sa hauteur vient de la graine.
+	VERTEX.y = (VERTEX.y + 0.5) * book_height(INSTANCE_ID);
+	book_albedo = book_color(INSTANCE_ID);
+#endif
+}
+
+float real_weight(float d) {
+	return 1.0 - smoothstep(REAL_NEAR, REAL_FAR, d);
+}
+
+// Part des lampes du réseau que les vraies OmniLight3D ne portent pas : Σ (1 − poids
+// réel) × (1 − (d/portée)⁴)² / d × max(N·L, 0). Les lampes à moins de LAMP_RANGE du
+// point sont au plus à une galerie et à trois niveaux de lui.
+float virtual_light(vec3 p, vec3 n, vec3 eye) {
+	float n0 = round(p.z / PITCH);
+	float k0 = floor((p.y - LAMP_Y) / LEVEL_PITCH);
+	float sum = 0.0;
+	for (int iz = -1; iz <= 1; iz++) {
+		float z = (n0 + float(iz)) * PITCH;
+		for (int iy = -2; iy <= 3; iy++) {
+			float y = LAMP_Y + (k0 + float(iy)) * LEVEL_PITCH;
+			for (int side = 0; side < 2; side++) {
+				vec3 lamp = vec3(side == 0 ? -LAMP_X : LAMP_X, y, z);
+				vec3 to = lamp - p;
+				float d = length(to);
+				if (d < LAMP_RANGE && d > 0.0001) {
+					float nd = d / LAMP_RANGE;
+					nd = 1.0 - nd * nd * nd * nd;
+					sum += nd * nd / d * max(dot(n, to) / d, 0.0) * (1.0 - real_weight(distance(lamp, eye)));
+				}
+			}
+		}
+	}
+	return sum;
+}
+
+// Le rendu Compatibilité tient ALBEDO et EMISSION pour du sRGB et les linéarise ensuite.
+vec3 encoded(vec3 c) {
+#if CURRENT_RENDERER == RENDERER_COMPATIBILITY
+	return mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, c * 12.92, lessThan(c, vec3(0.0031308)));
+#else
+	return c;
+#endif
+}
+
+void fragment() {
+	vec3 albedo = albedo_linear;
+#ifdef BOOKS
+	albedo = book_albedo;
+#endif
+#ifdef FACES
+	albedo = painted(UV);
+#endif
+	vec3 world = (INV_VIEW_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	vec3 normal = normalize((INV_VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz);
+	ALBEDO = encoded(albedo);
+	// Lumière des lampes en partie virtuelles : ajoutée comme l'est la lumière diffuse.
+	EMISSION = encoded(albedo * LAMP_LIGHT * virtual_light(world, normal, CAMERA_POSITION_WORLD) + emission_linear);
+	float d = length(VERTEX);
+	FOG = vec4(FOG_LINEAR, 1.0 - exp(-FOG_DENSITY * d) * (1.0 - smoothstep(FAR_FADE_BEGIN, FAR_FADE_END, d)));
+}
+"""
+
+static var _shaders: Dictionary = {}     # variante → Shader
 static var _materials: Dictionary = {}
 static var _book_mesh: BoxMesh
+static var _book_multimesh: MultiMesh    # les 640 places de livres, hauteur unité
 static var _book_buffer := PackedFloat32Array()
-static var _interior_mesh: ArrayMesh     # murs, étagères, lampes : éclairés par les vraies lampes
-static var _distant_mesh: ArrayMesh      # la même galerie, lumière cuite, façades de livres peintes
+static var _interior_mesh: ArrayMesh     # murs, étagères, sol, plafond, lampes
+static var _faces_mesh: ArrayMesh        # façades des quatre murs de livres, à plat
 static var _ring_mesh: ArrayMesh         # l'anneau du puits d'un niveau lointain
 static var _structure_boxes: Array = []  # [Transform3D, Vector3] : collisionneurs des murs et du sol
+static var _pool: Dictionary = {}        # nom d'enfant → enfants détachés, prêts à resservir
 
 var hexagon: int
 var level: int
 var detail: Detail = Detail.DISTANT
-var _book_heights := PackedFloat32Array()
+var _book_heights := PackedFloat32Array()   # calculées à la demande (book_heights)
+var _book_material: ShaderMaterial          # livres un à un : graine de l'adresse
+var _face_material: ShaderMaterial          # façades peintes : même graine
+var _parts: Dictionary = {}                 # nom → enfant présent (voir _keep)
 
 
 static func create(p_hexagon: int, p_level: int, p_detail: Detail = Detail.FULL) -> Gallery:
@@ -92,28 +274,45 @@ static func create(p_hexagon: int, p_level: int, p_detail: Detail = Detail.FULL)
 	return gallery
 
 
-## Donne à la galerie une nouvelle adresse et un degré de détail : ses livres se
-## refont pour la nouvelle adresse, les maillages partagés restent.
+## Donne à la galerie une nouvelle adresse et un degré de détail : seule la graine
+## des livres change, les maillages partagés restent.
 func readdress(p_hexagon: int, p_level: int, p_detail: Detail) -> void:
 	if p_hexagon != hexagon or p_level != level:
 		hexagon = p_hexagon
 		level = p_level
 		name = _node_name(p_hexagon, p_level)
 		_book_heights = PackedFloat32Array()
-		_keep("Books", false, Callable())
+		var shader_seed := _signed32(book_seed())
+		if _book_material != null:
+			_book_material.set_shader_parameter("seed", shader_seed)
+		if _face_material != null:
+			_face_material.set_shader_parameter("seed", shader_seed)
 	set_detail(p_detail)
 
 
 ## Ajoute ou retire les éléments pour atteindre le degré de détail demandé.
 func set_detail(p_detail: Detail) -> void:
 	detail = p_detail
-	_keep("Distant", detail == Detail.DISTANT, _new_distant)
-	_keep("Interior", detail >= Detail.LIT, _new_interior)
+	_keep("Interior", true, _new_interior)
+	_keep("Faces", detail == Detail.DISTANT, _new_faces)
 	_keep("Books", detail >= Detail.LIT, _new_books)
 	_keep("Lights", detail >= Detail.LIT, _new_lights)
-	_keep("Structure", detail == Detail.FULL, _new_structure)
-	for wall in WALLS:
-		_keep("Bookcase%d" % wall, detail == Detail.FULL, _new_bookcase.bind(wall))
+	var full := detail == Detail.FULL
+	if _parts.has("Structure") != full:
+		_keep("Structure", full, _new_structure)
+		for wall in WALLS:
+			_keep(BOOKCASES[wall], full, _new_bookcase.bind(wall))
+
+
+## Règle la part réelle de chaque lampe de la galerie pour un œil en `eye` (repère du monde).
+func update_lights(eye: Vector3) -> void:
+	var lights: Node = _parts.get("Lights")
+	if lights == null:
+		return
+	for light: OmniLight3D in lights.get_children():
+		var weight := real_weight((position + light.position).distance_to(eye))
+		light.light_energy = LAMP_ENERGY * weight
+		light.visible = weight > 0.0
 
 
 ## Le livre sous le point `world_pos` de la façade d'une bibliothèque, ou {} entre deux étagères.
@@ -131,7 +330,7 @@ func locate_book(bookcase: StaticBody3D, world_pos: Vector3) -> Dictionary:
 
 ## Position, orientation et dimensions d'un livre, dans le repère de la galerie.
 func book_transform(wall: int, shelf: int, book: int) -> Transform3D:
-	var height := _book_heights[(wall * SHELVES + shelf) * BOOKS_PER_SHELF + book]
+	var height := book_heights()[(wall * SHELVES + shelf) * BOOKS_PER_SHELF + book]
 	var board := SHELVES - 1 - shelf
 	var local := Vector3(
 		SHELF_WIDTH * 0.5 - (book + 0.5) * BOOK_SLOT,
@@ -141,8 +340,77 @@ func book_transform(wall: int, shelf: int, book: int) -> Transform3D:
 	return Transform3D(side * Basis.from_scale(Vector3(BOOK_THICK, height, BOOK_DEPTH)), side * local)
 
 
+## Hauteur de chaque livre (numéro (mur × 5 + étagère) × 32 + livre), tirée comme le
+## fait le nuanceur des livres et des façades.
+func book_heights() -> PackedFloat32Array:
+	if _book_heights.is_empty():
+		var book_seed_value := book_seed()
+		_book_heights.resize(WALLS * SHELVES * BOOKS_PER_SHELF)
+		for i in _book_heights.size():
+			_book_heights[i] = book_height(book_seed_value, i)
+	return _book_heights
+
+
+## Graine des livres de la galerie, sur 32 bits.
+func book_seed() -> int:
+	return hash([hexagon, level]) & 0xFFFFFFFF
+
+
+## Hauteur du livre `book` pour la graine `book_seed_value` (jumeau de book_height du nuanceur).
+static func book_height(book_seed_value: int, book: int) -> float:
+	return BOOK_MIN_HEIGHT + (BOOK_MAX_HEIGHT - BOOK_MIN_HEIGHT) * _unit_float(_book_hash(book_seed_value, book, 0))
+
+
+## Cuir du livre `book` (jumeau de book_color du nuanceur), en albédo linéaire.
+static func book_color(book_seed_value: int, book: int) -> Color:
+	var leather := LEATHER[_book_hash(book_seed_value, book, 1) % LEATHER.size()]
+	return leather * (1.0 - BOOK_MAX_DARKEN * _unit_float(_book_hash(book_seed_value, book, 2)))
+
+
+## Hachage entier « lowbias32 » de Chris Wellons, sur 32 bits.
+static func lowbias32(x: int) -> int:
+	x &= 0xFFFFFFFF
+	x ^= x >> 16
+	x = _mul32(x, 0x7feb352d)
+	x ^= x >> 15
+	x = _mul32(x, 0x846ca68b)
+	x ^= x >> 16
+	return x
+
+
+## Part réelle d'une lampe à la distance `d` de l'œil (jumeau de real_weight du nuanceur).
+static func real_weight(d: float) -> float:
+	return 1.0 - smoothstep(REAL_LIGHT_NEAR, REAL_LIGHT_FAR, d)
+
+
+## Reste de lumière au-delà de la brume exponentielle : 1 jusqu'à FAR_FADE_BEGIN, 0 après FAR_FADE_END.
+static func far_fade(d: float) -> float:
+	return 1.0 - smoothstep(FAR_FADE_BEGIN, FAR_FADE_END, d)
+
+
+## Jumeau de virtual_light du nuanceur, en unités d'énergie de lampe : la lumière que
+## le nuanceur ajoute au point `p` de normale `n`, pour un œil en `eye`.
+static func virtual_light(p: Vector3, n: Vector3, eye: Vector3) -> float:
+	var n0 := roundf(p.z / PITCH)
+	var k0 := floorf((p.y - LAMP_LIGHT_Y) / LEVEL_PITCH)
+	var sum := 0.0
+	for iz in range(-1, 2):
+		var z := (n0 + iz) * PITCH
+		for iy in range(-2, 4):
+			var y := LAMP_LIGHT_Y + (k0 + iy) * LEVEL_PITCH
+			for dir: float in [-1.0, 1.0]:
+				var lamp := Vector3(dir * LAMP_X, y, z)
+				var to := lamp - p
+				var d := to.length()
+				if d < LAMP_RANGE and d > 0.0001:
+					var nd := d / LAMP_RANGE
+					nd = 1.0 - nd * nd * nd * nd
+					sum += nd * nd / d * maxf(n.dot(to) / d, 0.0) * (1.0 - real_weight(lamp.distance_to(eye)))
+	return LAMP_ENERGY * sum
+
+
 ## Maillage partagé de l'anneau du puits d'un niveau : plancher autour du trou, bord
-## du trou, plafond du dessous, balustrade et lampes, lumière cuite dans les sommets.
+## du trou, plafond du dessous, balustrade et lampes.
 static func ring_mesh() -> ArrayMesh:
 	if _ring_mesh == null:
 		var plaster := _begin()
@@ -150,38 +418,72 @@ static func ring_mesh() -> ArrayMesh:
 		_build_floor_and_ceiling(floor_st, plaster, RING_APOTHEM)
 		_build_railing(plaster, [])
 		_ring_mesh = ArrayMesh.new()
-		_add_surface(_ring_mesh, _baked(plaster.commit_to_arrays()), "plaster_far")
-		_add_surface(_ring_mesh, _baked(floor_st.commit_to_arrays()), "floor_far")
-		_add_lamp_surfaces(_ring_mesh, true)
+		_add_surface(_ring_mesh, plaster.commit_to_arrays(), "plaster")
+		_add_surface(_ring_mesh, floor_st.commit_to_arrays(), "floor")
+		_add_lamp_surfaces(_ring_mesh)
 	return _ring_mesh
 
 
 # --- Éléments d'une galerie ------------------------------------------------
 
-## Garde l'enfant `child` présent ou absent ; `factory` le fabrique au besoin.
+## Garde l'enfant `child` présent ou absent. Un enfant retiré attend dans la réserve
+## commune à toutes les galeries ; un enfant voulu en sort, ou `factory` le fabrique :
+## un pas ne construit ni ne détruit presque rien (collisionneurs compris).
 func _keep(child: String, wanted: bool, factory: Callable) -> void:
-	var node := get_node_or_null(child)
+	var node: Node = _parts.get(child)
 	if wanted and node == null:
-		node = factory.call()
+		var pool: Array = _pool.get(child, [])
+		node = pool.pop_back() if not pool.is_empty() else factory.call()
 		node.name = child
+		_fit(node)
 		add_child(node)
+		_parts[child] = node
 	elif not wanted and node != null:
 		remove_child(node)
-		node.queue_free()
+		_parts.erase(child)
+		if child == "Lights":
+			for light: OmniLight3D in node.get_children():
+				light.light_energy = 0.0
+				light.visible = false
+		if not _pool.has(child):
+			_pool[child] = []
+		_pool[child].append(node)
 
 
-func _new_distant() -> Node:
-	_ensure_shared()
-	var instance := MeshInstance3D.new()
-	instance.mesh = _distant_mesh
-	instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	return instance
+## Donne à un enfant ce qui tient à la galerie : le matériau à sa graine.
+func _fit(node: Node) -> void:
+	if node is MultiMeshInstance3D:
+		if _book_material == null:
+			_book_material = _seeded_material("BOOKS")
+		node.material_override = _book_material
+	elif node.name == "Faces":
+		if _face_material == null:
+			_face_material = _seeded_material("FACES")
+		node.material_override = _face_material
+
+
+## Libère la réserve d'enfants détachés (à la sortie du monde).
+static func release_pool() -> void:
+	for pool: Array in _pool.values():
+		for node: Node in pool:
+			node.free()
+	_pool.clear()
 
 
 func _new_interior() -> Node:
 	_ensure_shared()
 	var instance := MeshInstance3D.new()
 	instance.mesh = _interior_mesh
+	instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	return instance
+
+
+## Façades peintes des quatre murs : les livres de la galerie, à plat.
+func _new_faces() -> Node:
+	_ensure_shared()
+	var instance := MeshInstance3D.new()
+	instance.mesh = _faces_mesh
+	instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	return instance
 
 
@@ -203,77 +505,97 @@ func _new_bookcase(wall: int) -> Node:
 	return bookcase
 
 
+## Les 640 livres : un MultiMesh commun à toutes les galeries ; le matériau de la
+## galerie porte sa graine, d'où le nuanceur tire hauteur et cuir.
 func _new_books() -> Node:
-	var rng := RandomNumberGenerator.new()
-	rng.seed = hash([hexagon, level])
-	var count := WALLS * SHELVES * BOOKS_PER_SHELF
-	_book_heights.resize(count)
-	# Tampon du MultiMesh, rempli d'un bloc : seules la hauteur, l'altitude et la
-	# couleur de chaque livre changent d'une galerie à l'autre (voir _book_template).
-	var buffer := _book_template().duplicate()
-	for i in count:
-		var height := rng.randf_range(0.28, 0.36)
-		var color := LEATHER[rng.randi() % LEATHER.size()].darkened(rng.randf_range(0.0, 0.35))
-		_book_heights[i] = height
-		var o := i * 16
-		buffer[o + 5] = height
-		buffer[o + 7] += height * 0.5
-		buffer[o + 12] = color.r
-		buffer[o + 13] = color.g
-		buffer[o + 14] = color.b
-
-	var multimesh := MultiMesh.new()
-	multimesh.transform_format = MultiMesh.TRANSFORM_3D
-	multimesh.use_colors = true
-	multimesh.mesh = _shared_book_mesh()
-	multimesh.instance_count = count
-	multimesh.buffer = buffer
 	var instance := MultiMeshInstance3D.new()
-	instance.multimesh = multimesh
+	instance.multimesh = _shared_book_multimesh()
+	instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	return instance
 
 
-## Tampon des livres d'une galerie, hauteur et couleur mises à part : par livre,
-## 12 flottants de transformation (3 lignes de 4) puis 4 de couleur. Les murs
-## tournent autour de Y, donc la hauteur d'un livre n'occupe que l'élément 5 (échelle
-## en Y) et s'ajoute pour moitié à l'élément 7 (altitude du centre).
-static func _book_template() -> PackedFloat32Array:
+func _seeded_material(variant: String) -> ShaderMaterial:
+	var material := ShaderMaterial.new()
+	material.shader = _shader(variant)
+	material.set_shader_parameter("seed", _signed32(book_seed()))
+	return material
+
+
+## MultiMesh commun des livres, rempli d'un bloc par _book_places.
+static func _shared_book_multimesh() -> MultiMesh:
+	if _book_multimesh == null:
+		_book_mesh = BoxMesh.new()
+		_book_mesh.size = Vector3.ONE
+		_book_multimesh = MultiMesh.new()
+		_book_multimesh.transform_format = MultiMesh.TRANSFORM_3D
+		_book_multimesh.mesh = _book_mesh
+		_book_multimesh.instance_count = WALLS * SHELVES * BOOKS_PER_SHELF
+		_book_multimesh.buffer = _book_places()
+	return _book_multimesh
+
+
+## Les places des livres, chacun d'une hauteur unité posé sur sa planche : par livre,
+## 12 flottants (3 lignes de 4) : la base du mur mise à l'échelle (épaisseur, 1,
+## profondeur), et le pied du dos. La boîte unité, centrée, dépasse d'un demi-mètre
+## de part et d'autre de la planche : la boîte englobante couvre toutes les hauteurs.
+static func _book_places() -> PackedFloat32Array:
 	if not _book_buffer.is_empty():
 		return _book_buffer
-	_book_buffer.resize(WALLS * SHELVES * BOOKS_PER_SHELF * 16)
+	_book_buffer.resize(WALLS * SHELVES * BOOKS_PER_SHELF * 12)
 	for wall in WALLS:
 		var side := _side_basis(BOOK_SIDES[wall])
-		var b := side * Basis.from_scale(Vector3(BOOK_THICK, 0.0, BOOK_DEPTH))
+		var b := side * Basis.from_scale(Vector3(BOOK_THICK, 1.0, BOOK_DEPTH))
 		for shelf in SHELVES:
 			for book in BOOKS_PER_SHELF:
 				var origin := side * Vector3(
 					SHELF_WIDTH * 0.5 - (book + 0.5) * BOOK_SLOT,
 					BOARD_BASE + (SHELVES - 1 - shelf) * BOARD_PITCH,
 					BOOK_FRONT + BOOK_DEPTH * 0.5)
-				var o := ((wall * SHELVES + shelf) * BOOKS_PER_SHELF + book) * 16
+				var o := ((wall * SHELVES + shelf) * BOOKS_PER_SHELF + book) * 12
 				var row := [b.x.x, b.y.x, b.z.x, origin.x, b.x.y, b.y.y, b.z.y, origin.y,
-					b.x.z, b.y.z, b.z.z, origin.z, 0.0, 0.0, 0.0, 1.0]
-				for k in 16:
+					b.x.z, b.y.z, b.z.z, origin.z]
+				for k in 12:
 					_book_buffer[o + k] = row[k]
 	return _book_buffer
 
 
 ## « La luz procede de unas frutas esféricas que llevan el nombre de lámparas.
-## Hay dos en cada hexágono: transversales. »
+## Hay dos en cada hexágono: transversales. » Éteintes à la naissance :
+## update_lights leur donne leur part.
 func _new_lights() -> Node:
 	var lights := Node3D.new()
 	for dir in [-1.0, 1.0]:
 		var light := OmniLight3D.new()
 		light.position = Vector3(dir * LAMP_X, LAMP_LIGHT_Y, 0.0)
 		light.light_color = LAMP_COLOR
-		light.light_energy = LAMP_ENERGY
+		light.light_energy = 0.0
+		light.light_specular = 0.0
 		light.omni_range = LAMP_RANGE
+		light.visible = false
 		lights.add_child(light)
 	return lights
 
 
 static func _node_name(p_hexagon: int, p_level: int) -> String:
 	return "Gallery_%d_%d" % [p_hexagon, p_level]
+
+
+static func _book_hash(book_seed_value: int, book: int, draw: int) -> int:
+	return lowbias32(book_seed_value ^ lowbias32(book * 4 + draw))
+
+
+static func _unit_float(h: int) -> float:
+	return float(h >> 8) / 16777216.0
+
+
+## Produit sur 32 bits, en morceaux de 16 bits pour rester loin du dépassement de 64 bits.
+static func _mul32(a: int, b: int) -> int:
+	return (a * (b & 0xFFFF) + (((a * (b >> 16)) & 0xFFFF) << 16)) & 0xFFFFFFFF
+
+
+## Entier de 32 bits sans signe vu comme un int signé de nuanceur (mêmes bits).
+static func _signed32(x: int) -> int:
+	return x - 0x100000000 if x >= 0x80000000 else x
 
 
 # --- Maillages partagés ----------------------------------------------------
@@ -294,25 +616,18 @@ static func _ensure_shared() -> void:
 	_build_railing(plaster, _structure_boxes)
 	for wall in WALLS:
 		_build_bookcase(wall, wood)
-	var arrays := {
-		"plaster": plaster.commit_to_arrays(),
-		"wood": wood.commit_to_arrays(),
-		"floor": floor_st.commit_to_arrays(),
-	}
 
 	_interior_mesh = ArrayMesh.new()
-	for kind in arrays:
-		_add_surface(_interior_mesh, arrays[kind], kind)
-	_add_lamp_surfaces(_interior_mesh, false)
+	_add_surface(_interior_mesh, plaster.commit_to_arrays(), "plaster")
+	_add_surface(_interior_mesh, wood.commit_to_arrays(), "wood")
+	_add_surface(_interior_mesh, floor_st.commit_to_arrays(), "floor")
+	_add_lamp_surfaces(_interior_mesh)
 
-	_distant_mesh = ArrayMesh.new()
-	for kind in arrays:
-		_add_surface(_distant_mesh, _baked(arrays[kind]), kind + "_far")
 	var faces := _begin()
 	for wall in WALLS:
 		_build_book_face(wall, faces)
-	_add_surface(_distant_mesh, _baked(faces.commit_to_arrays()), "books_far")
-	_add_lamp_surfaces(_distant_mesh, true)
+	_faces_mesh = ArrayMesh.new()
+	_faces_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, faces.commit_to_arrays())
 
 
 static func _add_surface(mesh: ArrayMesh, arrays: Array, material: String) -> void:
@@ -321,7 +636,7 @@ static func _add_surface(mesh: ArrayMesh, arrays: Array, material: String) -> vo
 
 
 ## Les deux globes (lumineux par eux-mêmes) et leurs cordons.
-static func _add_lamp_surfaces(mesh: ArrayMesh, baked: bool) -> void:
+static func _add_lamp_surfaces(mesh: ArrayMesh) -> void:
 	var sphere := SphereMesh.new()
 	sphere.radius = 0.14
 	sphere.height = 0.28
@@ -340,49 +655,13 @@ static func _add_lamp_surfaces(mesh: ArrayMesh, baked: bool) -> void:
 		globes.append_from(sphere, 0, Transform3D(Basis(), at))
 		cords.append_from(cylinder, 0, Transform3D(Basis(), at + Vector3.UP * 0.29))
 	_add_surface(mesh, globes.commit_to_arrays(), "lamp")
-	if baked:
-		_add_surface(mesh, _baked(cords.commit_to_arrays()), "wood_far")
-	else:
-		_add_surface(mesh, cords.commit_to_arrays(), "wood")
-
-
-## Copie des tableaux d'une surface, avec en couleur de sommet la lumière qu'y
-## porteraient les lampes de la galerie et celles des niveaux voisins.
-static func _baked(arrays: Array) -> Array:
-	var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
-	var normals: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL]
-	var colors := PackedColorArray()
-	colors.resize(vertices.size())
-	for i in vertices.size():
-		colors[i] = _lamp_light(vertices[i], normals[i])
-	var baked := arrays.duplicate()
-	baked[Mesh.ARRAY_COLOR] = colors
-	return baked
-
-
-## Éclairement linéaire en un point, au plus près du calcul de Godot pour une
-## OmniLight3D sans ombre (atténuation (1 − (d/portée)⁴)² / d, diffus lambertien).
-static func _lamp_light(at: Vector3, normal: Vector3) -> Color:
-	var lamp := LAMP_COLOR.srgb_to_linear() * LAMP_ENERGY
-	var light := AMBIENT_COLOR.srgb_to_linear() * AMBIENT_ENERGY
-	for dy: float in [-LEVEL_PITCH, 0.0, LEVEL_PITCH]:
-		for dir: float in [-1.0, 1.0]:
-			var to := Vector3(dir * LAMP_X, LAMP_LIGHT_Y + dy, 0.0) - at
-			var d := to.length()
-			if d >= LAMP_RANGE or d < 0.001:
-				continue
-			var fade := 1.0 - pow(d / LAMP_RANGE, 4.0)
-			var lambert := maxf(normal.dot(to / d), 0.0)
-			light += lamp * (fade * fade / d * lambert)
-	light *= BAKE_SCALE
-	light.a = 1.0
-	return light
+	_add_surface(mesh, cords.commit_to_arrays(), "wood")
 
 
 # --- Construction ----------------------------------------------------------
 
 ## Plancher (anneau autour du puits jusqu'à l'apothème `outer`), bord du trou, et
-## plafond. L'anneau se découpe en bandes pour que la lumière cuite y ait des sommets.
+## plafond, en bandes concentriques.
 static func _build_floor_and_ceiling(floor_st: SurfaceTool, plaster: SurfaceTool, outer: float) -> void:
 	var bands := 3
 	for k in 6:
@@ -457,12 +736,14 @@ static func _build_bookcase(wall: int, wood: SurfaceTool) -> void:
 		_add_box(wood, Transform3D(basis, basis * box[0]), box[1])
 
 
-## Façade peinte d'un mur de livres, au ras des dos, découpée en grille pour la lumière cuite.
+## Façade peinte d'un mur de livres, au ras des dos. UV.x = 2 × mur + u : le nuanceur
+## y retrouve le mur, l'étagère et le livre de chaque pixel.
 static func _build_book_face(wall: int, st: SurfaceTool) -> void:
 	var basis := _side_basis(BOOK_SIDES[wall])
 	var normal := basis * Vector3.FORWARD   # vers le centre de la galerie
 	var columns := 4
 	var rows := SHELVES
+	var offset := 2.0 * wall
 	for col in columns:
 		for row in rows:
 			var u0 := float(col) / columns
@@ -472,9 +753,9 @@ static func _build_book_face(wall: int, st: SurfaceTool) -> void:
 			var corner := func(u: float, v: float) -> Vector3:
 				return basis * Vector3(SHELF_WIDTH * (0.5 - u), lerpf(CASE_TOP, BOARD_BASE, v), BOOK_FRONT)
 			_add_tri_uv(st, [corner.call(u0, v0), corner.call(u1, v0), corner.call(u1, v1)],
-				[Vector2(u0, v0), Vector2(u1, v0), Vector2(u1, v1)], normal)
+				[Vector2(offset + u0, v0), Vector2(offset + u1, v0), Vector2(offset + u1, v1)], normal)
 			_add_tri_uv(st, [corner.call(u0, v0), corner.call(u1, v1), corner.call(u0, v1)],
-				[Vector2(u0, v0), Vector2(u1, v1), Vector2(u0, v1)], normal)
+				[Vector2(offset + u0, v0), Vector2(offset + u1, v1), Vector2(offset + u0, v1)], normal)
 
 
 # --- Géométrie -------------------------------------------------------------
@@ -562,71 +843,67 @@ static func _solid(st: SurfaceTool, boxes: Array, xform: Transform3D, size: Vect
 
 # --- Matériaux partagés ----------------------------------------------------
 
-static func _material(kind: String) -> StandardMaterial3D:
+## Albédos (sRGB, comme dans un StandardMaterial3D) et émission des globes.
+const ALBEDO := {
+	"plaster": Color(0.72, 0.64, 0.50),
+	"wood": Color(0.30, 0.19, 0.11),
+	"floor": Color(0.36, 0.30, 0.24),
+	"lamp": Color(1.0, 0.85, 0.6),
+}
+const LAMP_EMISSION := Color(1.0, 0.8, 0.5)
+const LAMP_EMISSION_ENERGY := 3.0
+
+
+static func _material(kind: String) -> ShaderMaterial:
 	if _materials.has(kind):
 		return _materials[kind]
-	var material := StandardMaterial3D.new()
-	match kind:
-		"plaster":
-			material.albedo_color = Color(0.72, 0.64, 0.50)
-			material.roughness = 0.95
-		"wood":
-			material.albedo_color = Color(0.30, 0.19, 0.11)
-			material.roughness = 0.7
-		"floor":
-			material.albedo_color = Color(0.36, 0.30, 0.24)
-			material.roughness = 0.85
-		"book":
-			material.vertex_color_use_as_albedo = true
-			material.roughness = 0.8
-		"lamp":
-			material.albedo_color = Color(1.0, 0.85, 0.6)
-			material.emission_enabled = true
-			material.emission = Color(1.0, 0.8, 0.5)
-			material.emission_energy_multiplier = 3.0
-		"plaster_far", "wood_far", "floor_far":
-			# Même teinte que de près ; la couleur de sommet porte la lumière cuite.
-			material.albedo_color = _unbaked(_material(kind.trim_suffix("_far")).albedo_color)
-			material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-			material.vertex_color_use_as_albedo = true
-		"books_far":
-			material.albedo_texture = _book_face_texture()
-			material.albedo_color = _unbaked(Color.WHITE)
-			material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-			material.vertex_color_use_as_albedo = true
+	var material := ShaderMaterial.new()
+	material.shader = _shader("SURFACE")
+	material.set_shader_parameter("albedo_linear", _linear(ALBEDO[kind]))
+	if kind == "lamp":
+		material.set_shader_parameter("emission_linear", _linear(LAMP_EMISSION) * LAMP_EMISSION_ENERGY)
 	_materials[kind] = material
 	return material
 
 
-## Albédo multiplié par 1 / BAKE_SCALE en lumière linéaire, réexprimé en sRGB.
-static func _unbaked(albedo: Color) -> Color:
-	var linear := albedo.srgb_to_linear() / BAKE_SCALE
-	linear.a = 1.0
-	return linear.linear_to_srgb()
+## Le nuanceur de la Bibliothèque pour une variante (SURFACE, BOOKS, FACES).
+static func _shader(variant: String) -> Shader:
+	if _shaders.has(variant):
+		return _shaders[variant]
+	var lamp := _linear(LAMP_COLOR) * LAMP_ENERGY
+	var leather := PackedStringArray()
+	for color in LEATHER:
+		leather.append(_vec3(Vector3(color.r, color.g, color.b)))
+	var shader := Shader.new()
+	shader.code = LIBRARY_SHADER.format({
+		"VARIANT": variant,
+		"PITCH": _float(PITCH), "LEVEL_PITCH": _float(LEVEL_PITCH),
+		"LAMP_X": _float(LAMP_X), "LAMP_Y": _float(LAMP_LIGHT_Y), "LAMP_RANGE": _float(LAMP_RANGE),
+		"LAMP_LIGHT": _vec3(lamp),
+		"REAL_NEAR": _float(REAL_LIGHT_NEAR), "REAL_FAR": _float(REAL_LIGHT_FAR),
+		"FOG_LINEAR": _vec3(_linear(FOG_COLOR)), "FOG_DENSITY": _float(FOG_DENSITY),
+		"FAR_FADE_BEGIN": _float(FAR_FADE_BEGIN), "FAR_FADE_END": _float(FAR_FADE_END),
+		"SHELVES": str(SHELVES), "BOOKS_PER_SHELF": str(BOOKS_PER_SHELF),
+		"BOARD_BASE": _float(BOARD_BASE), "BOARD_PITCH": _float(BOARD_PITCH), "CASE_TOP": _float(CASE_TOP),
+		"BOOK_SLOT": _float(BOOK_SLOT), "BOOK_THICK": _float(BOOK_THICK),
+		"BOOK_MIN_HEIGHT": _float(BOOK_MIN_HEIGHT), "BOOK_MAX_HEIGHT": _float(BOOK_MAX_HEIGHT),
+		"BOOK_MAX_DARKEN": _float(BOOK_MAX_DARKEN),
+		"WOOD_LINEAR": _vec3(_linear(ALBEDO["wood"])),
+		"LEATHER": ", ".join(leather),
+	})
+	_shaders[variant] = shader
+	return shader
 
 
-static func _shared_book_mesh() -> BoxMesh:
-	if _book_mesh == null:
-		_book_mesh = BoxMesh.new()
-		_book_mesh.size = Vector3.ONE
-		_book_mesh.material = _material("book")
-	return _book_mesh
+## Couleur sRGB en lumière linéaire.
+static func _linear(color: Color) -> Vector3:
+	var linear := color.srgb_to_linear()
+	return Vector3(linear.r, linear.g, linear.b)
 
 
-## Dos de livres peints : 5 rangées de 32 livres de cuir, chacun de sa hauteur,
-## sur le fond sombre de la bibliothèque. Sert de façade aux galeries lointaines.
-static func _book_face_texture() -> ImageTexture:
-	var slot_px := 8
-	var row_px := 32
-	var image := Image.create(BOOKS_PER_SHELF * slot_px, SHELVES * row_px, false, Image.FORMAT_RGB8)
-	image.fill(_material("wood").albedo_color.darkened(0.6))
-	var rng := RandomNumberGenerator.new()
-	rng.seed = 1941   # « La biblioteca de Babel », 1941
-	for row in SHELVES:
-		for book in BOOKS_PER_SHELF:
-			var height := int(row_px * rng.randf_range(0.28, 0.36) / BOARD_PITCH)
-			var color := LEATHER[rng.randi() % LEATHER.size()].darkened(rng.randf_range(0.0, 0.35))
-			var bottom := (row + 1) * row_px - 2
-			image.fill_rect(Rect2i(book * slot_px, bottom - height, slot_px - 1, height), color)
-	image.generate_mipmaps()
-	return ImageTexture.create_from_image(image)
+static func _float(x: float) -> String:
+	return "%.8f" % x
+
+
+static func _vec3(v: Vector3) -> String:
+	return "vec3(%s, %s, %s)" % [_float(v.x), _float(v.y), _float(v.z)]

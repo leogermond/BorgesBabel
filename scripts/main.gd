@@ -12,19 +12,28 @@ extends Node3D
 ## - complète, avec collisionneurs : dy = 0, |dz| ≤ 1 ;
 ## - éclairée (livres un à un, vraies lampes) : |dz| ≤ 2 et |dy| ≤ 1, ou dy = 0 et
 ##   |dz| ≤ LIT_ALONG_HALL, ou dz = 0 et |dy| ≤ LIT_VERTICAL ;
-## - lointaine (maillage partagé, lumière cuite) : |dy| ≤ 1 et |dz| ≤ REACH_ALONG_HALL,
-##   ou dz = 0 et |dy| ≤ ROOMS_VERTICAL.
+## - lointaine (façades peintes, sans lampe réelle) : |dy| ≤ 1 et |dz| ≤ REACH_ALONG_HALL,
+##   ou dz = 0 et |dy| ≤ ROOMS_VERTICAL, ou sur les diagonales vues par les puits
+##   voisins : 1 ≤ |dz| ≤ DIAGONAL_REACH et |dz| − 1 ≤ |dy| ≤ |dz| + 1.
 ## Au-delà, le puits garde ses anneaux jusqu'à REACH_VERTICAL, puis les trompe-l'œil
 ## de FarView prolongent la vue dans les quatre directions.
+##
+## Rien de ce qui change de détail ne change d'éclat : toutes les surfaces partagent
+## le nuanceur de Gallery, qui rend la même lumière quelle que soit la part des vraies
+## lampes ; chaque image, _update_lamps donne à chaque vraie lampe sa part selon sa
+## distance à l'œil, et le nuanceur ajoute le reste. Les galeries et les anneaux qui
+## naissent ou disparaissent à un pas sont hors de vue, ou à plus de
+## Gallery.FAR_FADE_END de l'œil, là où la brume a tout recouvert.
 
 const REACH_ALONG_HALL := 8    # galeries de chaque côté le long du vestibule : 8 × 12 m = 96 m
 const REACH_VERTICAL := 30     # niveaux au-dessus et au-dessous, par le puits : 30 × 3,4 m = 102 m
 const ROOMS_VERTICAL := 4      # niveaux du puits construits en galeries entières ; au-delà, l'anneau
 const LIT_ALONG_HALL := 3      # galeries éclairées par de vraies lampes le long du vestibule
 const LIT_VERTICAL := 2        # niveaux éclairés par de vraies lampes dans le puits
+const DIAGONAL_REACH := 8      # diagonales vues à travers les puits voisins (voir detail_at)
 
-const FOG_COLOR := Color(0.05, 0.035, 0.022)
-const FOG_DENSITY := 0.04      # reste de lumière : 38 % à 24 m, 15 % à 48 m, 2 % à 96 m
+const FOG_COLOR := Gallery.FOG_COLOR
+const FOG_DENSITY := Gallery.FOG_DENSITY
 
 ## Adresse de la galerie placée à l'origine du monde.
 var origin_hexagon: int
@@ -35,7 +44,9 @@ var hud: Hud
 var reader: Reader
 var far_view: FarView
 static var _cells: Dictionary = {}   # cache de gallery_cells()
-var _galleries: Dictionary = {}   # "hexagone:niveau" → Gallery
+var _galleries: Dictionary = {}   # case Vector2i(dz, dy) relative à l'origine → Gallery
+var _lit: Array[Gallery] = []     # galeries à vraies lampes (LIT et FULL)
+static var _lit_cells: Array[Vector2i] = []
 var _highlight: MeshInstance3D
 var _target: Dictionary = {}
 var _mouse_captured := false
@@ -79,6 +90,14 @@ func _ready() -> void:
 	add_child(reader)
 
 	_capture_mouse()
+
+
+func _exit_tree() -> void:
+	Gallery.release_pool()
+
+
+func _process(_delta: float) -> void:
+	_update_lamps()
 
 
 func _physics_process(_delta: float) -> void:
@@ -163,7 +182,7 @@ func _show_target(target: Dictionary) -> void:
 func _shift(step: int) -> void:
 	origin_hexagon += step
 	player.position.z -= step * Gallery.PITCH
-	_update_galleries()
+	_update_galleries(Vector2i(step, 0))
 	hud.set_address(origin_hexagon, origin_level)
 
 
@@ -171,12 +190,18 @@ func _shift(step: int) -> void:
 func _shift_level(step: int) -> void:
 	origin_level += step
 	player.position.y -= step * Gallery.LEVEL_PITCH
-	_update_galleries()
+	_update_galleries(Vector2i(0, step))
 	hud.set_address(origin_hexagon, origin_level)
 
 
 ## Degré de détail de la galerie décalée de (dz, dy) par rapport à l'origine, ou −1
 ## quand elle reste à construire (hors de vue, ou réduite à l'anneau du puits).
+##
+## Les diagonales : un regard qui descend (ou monte) d'un niveau par galerie passe
+## par le vestibule, puis par le puits de la galerie suivante, et ainsi de suite ; il
+## voit les cases |dy| = |dz| ± 1 jusqu'au fond de la brume. Elles sont construites,
+## lointaines, jusqu'à DIAGONAL_REACH : au passage d'un niveau, les rangées de galeries
+## qui naissent et disparaissent restent ainsi hors de vue (vérifié par test_depth).
 static func detail_at(dz: int, dy: int) -> int:
 	var along := absi(dz)
 	var across := absi(dy)
@@ -187,6 +212,8 @@ static func detail_at(dz: int, dy: int) -> int:
 		return Gallery.Detail.LIT
 	if (across <= 1 and along <= REACH_ALONG_HALL) or (dz == 0 and across <= ROOMS_VERTICAL):
 		return Gallery.Detail.DISTANT
+	if along >= 1 and along <= DIAGONAL_REACH and across <= along + 1 and across >= along - 1:
+		return Gallery.Detail.DISTANT
 	return -1
 
 
@@ -195,8 +222,9 @@ static func gallery_cells() -> Dictionary:
 	if not _cells.is_empty():
 		return _cells
 	var cells := {}
+	var rise := maxi(ROOMS_VERTICAL, DIAGONAL_REACH + 1)
 	for dz in range(-REACH_ALONG_HALL, REACH_ALONG_HALL + 1):
-		for dy in range(-ROOMS_VERTICAL, ROOMS_VERTICAL + 1):
+		for dy in range(-rise, rise + 1):
 			var detail := detail_at(dz, dy)
 			if detail >= 0:
 				cells[Vector2i(dz, dy)] = detail
@@ -204,25 +232,35 @@ static func gallery_cells() -> Dictionary:
 	return cells
 
 
-## Place les galeries autour de l'origine, chacune à son degré de détail. Les galeries
-## sorties du champ servent aux cases nouvelles (même détail d'abord) : un pas ne
-## refait que les livres et les collisionneurs qui changent de main.
-func _update_galleries() -> void:
+## Les cases à vraies lampes (LIT et FULL).
+static func lit_cells() -> Array[Vector2i]:
+	if _lit_cells.is_empty():
+		var cells := gallery_cells()
+		for cell: Vector2i in cells:
+			if cells[cell] >= Gallery.Detail.LIT:
+				_lit_cells.append(cell)
+	return _lit_cells
+
+
+## Place les galeries autour de l'origine, chacune à son degré de détail, après un
+## décalage de l'origine de `moved` (galeries, niveaux). Une galerie dont la case reste
+## dans le champ garde son adresse ; les autres servent aux cases nouvelles (même
+## détail d'abord) : un pas ne change que des graines, des positions, et des enfants
+## qui passent par la réserve de Gallery.
+func _update_galleries(moved := Vector2i.ZERO) -> void:
 	var cells := gallery_cells()
-	var wanted: Dictionary = {}
-	var placed: Dictionary = {}   # clé → [case, détail]
-	for cell: Vector2i in cells:
-		var key := "%d:%d" % [origin_hexagon + cell.x, origin_level + cell.y]
-		placed[key] = [cell, cells[cell]]
+	var placed: Dictionary = {}
 	var spares: Array = [[], [], []]   # par degré de détail
-	for key in _galleries:
-		if not placed.has(key):
-			var spare: Gallery = _galleries[key]
-			spares[spare.detail].append(spare)
-	for key: String in placed:
-		var cell: Vector2i = placed[key][0]
-		var detail: int = placed[key][1]
-		var gallery: Gallery = _galleries.get(key)
+	for old_cell: Vector2i in _galleries:
+		var cell := old_cell - moved
+		var gallery: Gallery = _galleries[old_cell]
+		if cells.has(cell):
+			placed[cell] = gallery
+		else:
+			spares[gallery.detail].append(gallery)
+	for cell: Vector2i in cells:
+		var detail: int = cells[cell]
+		var gallery: Gallery = placed.get(cell)
 		if gallery == null:
 			gallery = _take_spare(spares, detail)
 			if gallery == null:
@@ -230,14 +268,27 @@ func _update_galleries() -> void:
 				add_child(gallery)
 			else:
 				gallery.readdress(origin_hexagon + cell.x, origin_level + cell.y, detail as Gallery.Detail)
+			placed[cell] = gallery
 		elif gallery.detail != detail:
 			gallery.set_detail(detail as Gallery.Detail)
 		gallery.position = Vector3(0.0, cell.y * Gallery.LEVEL_PITCH, cell.x * Gallery.PITCH)
-		wanted[key] = gallery
 	for pool: Array in spares:
 		for spare: Gallery in pool:
 			spare.queue_free()
-	_galleries = wanted
+	_galleries = placed
+	_lit.clear()
+	for cell: Vector2i in lit_cells():
+		_lit.append(placed[cell])
+	_update_lamps()
+
+
+## Part réelle de chaque vraie lampe, selon sa distance à l'œil (voir Gallery.real_weight).
+func _update_lamps() -> void:
+	var eye := Vector3(0.0, Player.EYE_HEIGHT, 3.2)
+	if player != null:
+		eye = player.camera.global_position
+	for gallery: Gallery in _lit:
+		gallery.update_lights(eye)
 
 
 ## Une galerie libérée, de préférence au même degré de détail, ou null.

@@ -35,8 +35,22 @@ direct au GPU et la souris reste libre ; le Godot Windows capture la souris et r
   du dessus et du dessous. Deux lampes sphériques, transversales, éclairent chaque galerie.
 - L'adresse de la galerie (hexagone, niveau) s'affiche en haut à gauche. Elle est tirée au
   hasard au lancement ; l'hexagone avance ou recule d'un cran à chaque vestibule franchi.
-- Les galeries se construisent autour du bibliothécaire : deux de chaque côté le long des
-  vestibules, et un niveau au-dessus et au-dessous.
+- Les galeries se construisent autour du bibliothécaire, sur une centaine de mètres : huit de
+  chaque côté le long des vestibules sur trois niveaux, quatre niveaux par le puits, et les
+  diagonales que le regard enfile d'un puits voisin à l'autre (un niveau par galerie). Plus loin,
+  le puits garde ses anneaux jusqu'à trente niveaux. Trois degrés de détail : complète (avec
+  collisionneurs) pour la galerie du bibliothécaire et ses deux voisines, éclairée (livres un à
+  un, vraies lampes) tout près, lointaine (façades de livres peintes) au-delà.
+- Une seule lumière, quel que soit le détail : toutes les surfaces partagent un nuanceur qui
+  calcule, pixel par pixel, la lumière de chaque lampe de la Bibliothèque par la formule même de
+  Godot pour une OmniLight3D. Une lampe proche de l'œil (moins de 7 m) éclaire en partie par une
+  vraie OmniLight3D, et le nuanceur ajoute exactement le reste : la somme ne dépend pas du détail,
+  et une vraie lampe ne naît ou ne s'éteint qu'à part nulle. Une galerie lointaine reçoit donc la
+  lumière d'une galerie proche ; ses livres peints ont les hauteurs et les cuirs des vrais, tirés
+  de la même graine.
+- La brume, exponentielle, se fond entièrement dans sa couleur entre 70 et 90 m. Une galerie qui
+  naît ou disparaît à un pas est hors de vue, ou au-delà de 90 m : en franchissant un vestibule
+  ou un niveau, rien ne change d'éclat à l'image.
 
 ## Les livres
 
@@ -102,7 +116,15 @@ godot --headless --path . -s tests/test_babel_service.gd   # temps de réponse, 
 godot --headless --path . --import
 godot --headless --path . -s tests/test_book_text.gd   # texte : déterminisme, 40 × 80, alphabet, diversité
 godot --headless --path . -s tests/test_world.gd       # monde : apparition, livre visé, lecture, vestibule, balustrade
+godot --headless --path . -s tests/test_depth.gd       # profondeur, continuité de la lumière, coût d'un pas
 ```
+
+`test_depth` relève, en 1 871 points fixes de la Bibliothèque (le long du vestibule, des diagonales
+et du puits), la lumière des lampes renvoyée vers l'œil, fois le reste de brume, juste avant et
+juste après le passage d'un vestibule ou d'un niveau, l'œil restant au même point. Tout écart de
+plus de 1 % (+ 1e-4) en un point en vue est un saut d'éclat et fait échouer le test ; il vérifie
+aussi qu'aucune galerie ne naît ou ne disparaît en vue en deçà de 90 m, que chaque lampe en partie
+réelle a sa OmniLight3D, et qu'un pas coûte moins de 8 ms.
 
 Captures de rendu dans un écran virtuel Xvfb (paquet `xvfb`), sans fenêtre :
 
@@ -116,8 +138,9 @@ Chaque test affiche ses vérifications et sort avec le code 0 quand toutes passe
 
 ## Organisation
 
-- `scripts/main.gd` : tirage de la galerie, entretien des galeries voisines, entrées, environnement.
-- `scripts/gallery.gd` : construction d'une galerie (géométrie, étagères, livres en MultiMesh, lampes) et repérage du livre visé.
+- `scripts/main.gd` : tirage de la galerie, entretien des galeries voisines (degrés de détail, part réelle des lampes), entrées, environnement.
+- `scripts/gallery.gd` : construction d'une galerie (géométrie, étagères, livres en MultiMesh, lampes), nuanceur de lumière commun, réserve d'éléments réutilisés, et repérage du livre visé.
+- `scripts/far_view.gd` : anneaux du puits au loin et trompe-l'œil aux quatre bouts.
 - `scripts/player.gd` : déplacement à la première personne et rayon de visée.
 - `scripts/book_text.gd` : texte des pages.
 - `scripts/reader.gd` : fenêtre de lecture.

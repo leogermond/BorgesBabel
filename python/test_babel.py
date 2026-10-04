@@ -5,6 +5,7 @@ uv run --with pytest --with hypothesis pytest python/
 
 import base64
 import io
+from fractions import Fraction
 import json
 import random
 import struct
@@ -238,6 +239,89 @@ def test_letterbox_uses_darkest_ink():
     assert darkest == 0
 
 
+def _reference_grid(width, height):
+    """image_grid recalculé en fractions exactes, d'après sa définition."""
+    scale = min(Fraction(b.IMAGE_WIDTH, width), Fraction(b.IMAGE_HEIGHT, height))
+
+    def half_up(value):   # value > 0
+        return int(value + Fraction(1, 2))
+
+    fit_w = min(b.IMAGE_WIDTH, max(1, half_up(width * scale)))
+    fit_h = min(b.IMAGE_HEIGHT, max(1, half_up(height * scale)))
+    step_x = min(4, -(-width // fit_w))
+    step_y = min(4, -(-height // fit_h))
+    cols = [int((tx + Fraction(2 * i + 1, 2 * step_x)) * width / fit_w) for tx in range(fit_w) for i in range(step_x)]
+    rows = [int((ty + Fraction(2 * j + 1, 2 * step_y)) * height / fit_h) for ty in range(fit_h) for j in range(step_y)]
+    return fit_w, fit_h, cols, rows
+
+
+@given(st.integers(1, 20000), st.integers(1, 20000))
+@settings(max_examples=300)
+def test_image_grid_is_exact(width, height):
+    fit_w, fit_h, cols, rows = b.image_grid(width, height)
+    assert (fit_w, fit_h, cols, rows) == _reference_grid(width, height)
+    assert len(cols) <= 200 and len(rows) <= 256
+    assert all(0 <= c < width for c in cols) and all(0 <= r < height for r in rows)
+    assert cols == sorted(cols) and rows == sorted(rows)
+
+
+@pytest.mark.parametrize("width,height,fit", [
+    (4, 1, (50, 13)),      # 12,5 → 13 : moitié vers le haut (round() de Python donnerait 12)
+    (100, 1, (50, 1)),     # 0,5 → 1
+    (1, 1, (50, 50)),
+    (50, 64, (50, 64)),
+    (25, 64, (25, 64)),
+    (6000, 4000, (50, 33)),
+])
+def test_image_grid_rounds_half_up(width, height, fit):
+    assert b.image_grid(width, height)[:2] == fit
+
+
+def _game_samples(width, height, rgba):
+    """Ce que fait BookText.search_image : ne lire que les points de grille de l'image."""
+    _fit_w, _fit_h, cols, rows = b.image_grid(width, height)
+    out = bytearray()
+    for y in rows:
+        for x in cols:
+            o = (y * width + x) * 4
+            out += rgba[o:o + 4]
+    return bytes(out)
+
+
+@pytest.mark.parametrize("width,height", [(1, 1), (3, 40), (513, 200), (1024, 1024), (6000, 10), (7, 3000), (64, 50)])
+def test_game_request_matches_cli(width, height, tmp_path, capsys):
+    """Même image → même adresse, que le jeu envoie ses points de grille ou que la ligne de
+    commande lise le PNG complet ; la requête du jeu reste bornée."""
+    rng = random.Random(width * 7919 + height)
+    rgba = rng.randbytes(width * height * 4)
+    samples = _game_samples(width, height, rgba)
+    assert len(samples) <= 200 * 256 * 4
+    assert b.quantize_samples(width, height, samples) == b.quantize(width, height, rgba)
+    game, full = _serve([
+        json.dumps({"op": "search_image", "width": width, "height": height,
+                    "samples": base64.b64encode(samples).decode()}),
+        json.dumps({"op": "search_image", "width": width, "height": height,
+                    "rgba": base64.b64encode(rgba).decode()}),
+    ])
+    assert game == full and "address" in game
+    if width * height <= 300_000:    # le décodeur PNG en Python pur est lent sur les grandes images
+        path = tmp_path / "image.png"
+        path.write_bytes(_encode_png(width, height, 6, rgba))
+        assert b.main(["search-image", str(path), "--json"]) == 0
+        assert json.loads(capsys.readouterr().out)["address"] == game["address"]
+
+
+def test_search_image_request_errors():
+    rgba = base64.b64encode(b"\x00" * 16).decode()
+    responses = _serve([
+        json.dumps({"op": "search_image", "width": 2, "height": 2}),
+        json.dumps({"op": "search_image", "width": 2, "height": 2, "rgba": rgba, "samples": rgba}),
+        json.dumps({"op": "search_image", "width": 2, "height": 2, "samples": rgba}),   # 50 × 50 points attendus
+        json.dumps({"op": "search_image", "width": 0, "height": 2, "samples": ""}),
+    ])
+    assert all("error" in r for r in responses), responses
+
+
 def test_image_tries_average():
     rng = random.Random(5)
     tries = [b.locate(rng.randrange(b.N), image=True)[1] for _ in range(200)]
@@ -333,6 +417,42 @@ def test_cli_page_and_search_text(tmp_path, capsys):
     assert b.main(["page", full]) == 0
     lines = capsys.readouterr().out.splitlines()
     assert lines[0].startswith("une phrase de borges.") and len(lines) == 40
+
+
+def test_cli_page_negative_hexagon(capsys):
+    """Une adresse qui commence par « - » reste un argument, avec ou sans « -- »."""
+    expected = b.page_lines(b.Address(-12345, -3, 0, 4, 17, 205))
+    assert b.main(["page", "-12345:-3:0:4:17:205"]) == 0
+    assert capsys.readouterr().out.splitlines() == expected
+    assert b.main(["page", "--", "-12345:-3:0:4:17:205"]) == 0
+    assert capsys.readouterr().out.splitlines() == expected
+
+
+def _text_with_negative_hexagon():
+    for i in range(100):
+        text = f"texte numero {'abcdefghij'[i % 10]} {'abcdefghij'[i // 10]}"
+        if b.search_text(text)[0].hexagon < 0:
+            return text
+    raise AssertionError("aucun hexagone négatif sur 100 textes")
+
+
+def test_cli_search_text_then_page_negative_hexagon(tmp_path, capsys):
+    text = _text_with_negative_hexagon()
+    source = tmp_path / "texte.txt"
+    source.write_text(text, encoding="utf-8")
+    assert b.main(["search-text", str(source)]) == 0
+    full = capsys.readouterr().out.strip()
+    assert full.startswith("-")
+    assert b.main(["page", full]) == 0
+    assert "".join(capsys.readouterr().out.splitlines()) == b.pad(text)
+    # Le même enchaînement en processus, comme `babel.py page "$(babel.py search-text f.txt)"`.
+    script = [sys.executable, "-X", "utf8", str(HERE / "babel.py")]
+    found = subprocess.run(script + ["search-text", str(source)], capture_output=True, text=True,
+                           encoding="utf-8", timeout=60, check=True).stdout.strip()
+    assert found == full
+    page = subprocess.run(script + ["page", found], capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert page.returncode == 0, page.stderr
+    assert "".join(page.stdout.splitlines()) == b.pad(text)
 
 
 def test_cli_bad_address(capsys):

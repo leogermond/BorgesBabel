@@ -42,6 +42,21 @@ Livres d'images
     (portrait, pixels carrés) : le pixel (x, y) est le symbole y·50 + x, et le symbole d'indice i
     dans l'alphabet prend l'encre PALETTE[i].
 
+Image cherchée (image_grid, fit_samples, quantize_samples)
+    Une image W × H se lit seulement en ses points de grille, calculés en arithmétique entière
+    (aucun flottant, aucun arrondi de bibliothèque) pour que le jeu et la ligne de commande
+    prennent les mêmes pixels source :
+    fit_w × fit_h = taille ajustée dans 50 × 64, proportions gardées, arrondi moitié vers le haut
+    (si 50·H ≤ 64·W : fit_w = 50, fit_h = ⌊(100·H + W) / 2W⌋, sinon fit_h = 64,
+    fit_w = ⌊(128·W + H) / 2H⌋ ; puis bornée à [1, 50] × [1, 64]) ;
+    step_x = min(4, ⌈W / fit_w⌉), step_y = min(4, ⌈H / fit_h⌉) ;
+    colonne k = ⌊(2k + 1)·W / (2·step_x·fit_w)⌋ pour k < fit_w·step_x, lignes de même.
+    Le jeu (BookText.image_grid) refait ce calcul et n'envoie que ces points (au plus 200 × 256,
+    soit 200 Ko), quelle que soit la taille de l'image ; la ligne de commande les prend dans le PNG
+    décodé (sample_image). Chaque point est posé sur l'encre 0 (transparence), chaque pixel de la
+    page moyenne ses step_x × step_y points, l'image ajustée est centrée et bordée de l'encre 0,
+    puis tramée aux 25 encres par Floyd–Steinberg.
+
 Normalisation d'un texte cherché (normalize)
     minuscules ; accents retirés (décomposition Unicode NFD, marques combinantes ôtées) ;
     œ → oe, æ → ae, ß → ss ; k → c, q → c, w → v, y → i ; tout blanc (espace, tabulation,
@@ -66,7 +81,7 @@ from dataclasses import dataclass
 if hasattr(sys, "set_int_max_str_digits"):
     sys.set_int_max_str_digits(0)
 
-PROTOCOL = 1
+PROTOCOL = 2
 ALPHABET = "abcdefghijlmnoprstuvxz ,."
 PAGES = 410
 LINES = 40
@@ -376,46 +391,89 @@ def search_text(text: str) -> tuple[Address, int]:
 
 # --- Images -------------------------------------------------------------------------------
 
-def fit_image(width: int, height: int, rgba: bytes) -> list[tuple[float, float, float]]:
-    """Ramène l'image à 50 × 64 pixels en gardant ses proportions, bordée de l'encre 0.
+def image_grid(width: int, height: int) -> tuple[int, int, list[int], list[int]]:
+    """Grille d'échantillonnage d'une image width × height : (fit_w, fit_h, colonnes, lignes).
 
-    L'image est d'abord posée sur l'encre 0 (transparence), puis chaque pixel de la page
-    moyenne une grille d'au plus 4 × 4 points de sa zone source (réduction) ou reprend le
-    point source le plus proche (agrandissement).
+    Arithmétique entière seule, reproduite à l'identique par BookText.image_grid dans le jeu :
+    l'image ajustée occupe fit_w × fit_h pixels de la page (proportions gardées, arrondi au plus
+    proche, moitié vers le haut) ; chaque pixel de la page lit step_x × step_y points source,
+    step = min(4, ⌈côté source / côté ajusté⌉). Le point k (k = tx·step_x + i) d'un axe est la
+    colonne ⌊(2k + 1)·width / (2·step_x·fit_w)⌋ : le centre du k-ième sous-intervalle, arrondi
+    vers le bas. Au plus 200 colonnes et 256 lignes, quelle que soit la taille de l'image.
     """
+    if width <= 0 or height <= 0:
+        raise ValueError(f"image {width} × {height} : dimensions positives attendues")
+    if IMAGE_WIDTH * height <= IMAGE_HEIGHT * width:   # la largeur borne
+        fit_w = IMAGE_WIDTH
+        fit_h = min(IMAGE_HEIGHT, max(1, (2 * height * IMAGE_WIDTH + width) // (2 * width)))
+    else:                                              # la hauteur borne
+        fit_h = IMAGE_HEIGHT
+        fit_w = min(IMAGE_WIDTH, max(1, (2 * width * IMAGE_HEIGHT + height) // (2 * height)))
+    step_x = min(4, -(-width // fit_w))
+    step_y = min(4, -(-height // fit_h))
+    cols = [(2 * k + 1) * width // (2 * step_x * fit_w) for k in range(fit_w * step_x)]
+    rows = [(2 * k + 1) * height // (2 * step_y * fit_h) for k in range(fit_h * step_y)]
+    return fit_w, fit_h, cols, rows
+
+
+def sample_image(width: int, height: int, rgba: bytes) -> bytes:
+    """Les points de la grille (image_grid) pris dans l'image RGBA complète : 4 octets par point,
+    ligne de grille après ligne de grille. C'est ce que le jeu envoie au service (champ samples)."""
     if width <= 0 or height <= 0 or len(rgba) != width * height * 4:
         raise ValueError(f"image {width} × {height} : {len(rgba)} octets reçus, {width * height * 4} attendus")
-    scale = min(IMAGE_WIDTH / width, IMAGE_HEIGHT / height)
-    fit_w = min(IMAGE_WIDTH, max(1, round(width * scale)))
-    fit_h = min(IMAGE_HEIGHT, max(1, round(height * scale)))
+    _fit_w, _fit_h, cols, rows = image_grid(width, height)
+    stride = width * 4
+    out = bytearray()
+    for sy in rows:
+        line = rgba[sy * stride:(sy + 1) * stride]
+        out += b"".join(line[sx * 4:sx * 4 + 4] for sx in cols)
+    return bytes(out)
+
+
+def fit_samples(width: int, height: int, samples: bytes) -> list[tuple[float, float, float]]:
+    """Ramène l'image à 50 × 64 pixels en gardant ses proportions, bordée de l'encre 0, à partir
+    de ses seuls points de grille (sample_image).
+
+    Chaque point est d'abord posé sur l'encre 0 (transparence), puis chaque pixel de la page
+    moyenne ses step_x × step_y points (au plus 4 × 4 en réduction, un seul point source, le plus
+    proche, en agrandissement).
+    """
+    fit_w, fit_h, cols, rows = image_grid(width, height)
+    if len(samples) != len(cols) * len(rows) * 4:
+        raise ValueError(f"image {width} × {height} : {len(samples)} octets d'échantillons reçus,"
+                         f" {len(cols) * len(rows) * 4} attendus ({len(cols)} × {len(rows)} points)")
+    step_x = len(cols) // fit_w
+    step_y = len(rows) // fit_h
+    stride = len(cols) * 4
     left = (IMAGE_WIDTH - fit_w) // 2
     top = (IMAGE_HEIGHT - fit_h) // 2
     ink = tuple(float(c) for c in PALETTE[0])
     pixels = [ink] * (IMAGE_WIDTH * IMAGE_HEIGHT)
-    step_x = min(4, -(-width // fit_w))
-    step_y = min(4, -(-height // fit_h))
+    n = step_x * step_y
     for ty in range(fit_h):
-        rows = [min(height - 1, int((ty + (j + 0.5) / step_y) * height / fit_h)) for j in range(step_y)]
         for tx in range(fit_w):
-            cols = [min(width - 1, int((tx + (i + 0.5) / step_x) * width / fit_w)) for i in range(step_x)]
             r = g = b = 0.0
-            for sy in rows:
-                row = sy * width
-                for sx in cols:
-                    o = (row + sx) * 4
-                    a = rgba[o + 3] / 255.0
-                    r += ink[0] + (rgba[o] - ink[0]) * a
-                    g += ink[1] + (rgba[o + 1] - ink[1]) * a
-                    b += ink[2] + (rgba[o + 2] - ink[2]) * a
-            n = step_x * step_y
+            for j in range(step_y):
+                o = (ty * step_y + j) * stride + tx * step_x * 4
+                for _i in range(step_x):
+                    a = samples[o + 3] / 255.0
+                    r += ink[0] + (samples[o] - ink[0]) * a
+                    g += ink[1] + (samples[o + 1] - ink[1]) * a
+                    b += ink[2] + (samples[o + 2] - ink[2]) * a
+                    o += 4
             pixels[(top + ty) * IMAGE_WIDTH + left + tx] = (r / n, g / n, b / n)
     return pixels
 
 
-def quantize(width: int, height: int, rgba: bytes) -> bytes:
+def fit_image(width: int, height: int, rgba: bytes) -> list[tuple[float, float, float]]:
+    """fit_samples sur l'image RGBA complète (ligne de commande, PNG décodé)."""
+    return fit_samples(width, height, sample_image(width, height, rgba))
+
+
+def quantize_samples(width: int, height: int, samples: bytes) -> bytes:
     """Les 3200 indices d'encre de l'image ajustée, tramée par Floyd–Steinberg
     (distance euclidienne en RVB, parcours ligne par ligne de gauche à droite)."""
-    work = [list(p) for p in fit_image(width, height, rgba)]
+    work = [list(p) for p in fit_samples(width, height, samples)]
     out = bytearray(IMAGE_WIDTH * IMAGE_HEIGHT)
     palette = PALETTE
     for y in range(IMAGE_HEIGHT):
@@ -447,9 +505,19 @@ def indices_to_rgb(indices: bytes) -> bytes:
     return b"".join(table[i] for i in indices)
 
 
+def quantize(width: int, height: int, rgba: bytes) -> bytes:
+    """quantize_samples sur l'image RGBA complète."""
+    return quantize_samples(width, height, sample_image(width, height, rgba))
+
+
+def search_samples(width: int, height: int, samples: bytes) -> tuple[Address, int]:
+    """Adresse d'un livre d'images dont la page montre quantize_samples(…), et le nombre d'essais."""
+    return locate(unmix(from_digits(quantize_samples(width, height, samples))), image=True)
+
+
 def search_image(width: int, height: int, rgba: bytes) -> tuple[Address, int]:
     """Adresse d'un livre d'images dont la page montre quantize(image), et le nombre d'essais."""
-    return locate(unmix(from_digits(quantize(width, height, rgba))), image=True)
+    return search_samples(width, height, sample_image(width, height, rgba))
 
 
 # --- PNG ----------------------------------------------------------------------------------
@@ -592,8 +660,14 @@ def handle(request: dict) -> dict:
         return {"address": address.to_json(), "tries": tries}
     if op == "search_image":
         width, height = _as_int(request, "width"), _as_int(request, "height")
-        rgba = base64.b64decode(request.get("rgba") or "", validate=True)
-        address, tries = search_image(width, height, rgba)
+        if ("samples" in request) == ("rgba" in request):
+            raise ValueError("search_image attend samples (points de grille) ou rgba (image complète), l'un des deux")
+        if "samples" in request:
+            samples = base64.b64decode(request.get("samples") or "", validate=True)
+            address, tries = search_samples(width, height, samples)
+        else:
+            rgba = base64.b64decode(request.get("rgba") or "", validate=True)
+            address, tries = search_image(width, height, rgba)
         return {"address": address.to_json(), "tries": tries}
     if op == "is_image_book":
         books = request.get("books")
@@ -642,6 +716,14 @@ def _print_address(address: Address, tries: int, as_json: bool) -> None:
         print(address.short(), file=sys.stderr)
 
 
+def _protect_negative_address(argv: list[str]) -> list[str]:
+    """`page -12:3:0:0:0:0` : argparse lirait l'adresse (hexagone négatif) comme une option ;
+    un `--` inséré devant en fait l'argument positionnel. `page -- -12:…` reste accepté."""
+    if len(argv) >= 2 and argv[0] == "page" and len(argv[1]) > 1 and argv[1][0] == "-" and argv[1][1].isdigit():
+        return [argv[0], "--", *argv[1:]]
+    return argv
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="babel.py",
@@ -659,7 +741,7 @@ def main(argv: list[str] | None = None) -> int:
     image.add_argument("file", help="fichier PNG (convertir d'abord un JPG en PNG)")
     image.add_argument("--json", action="store_true", help="adresse en JSON")
     commands.add_parser("serve", help="service JSON ligne à ligne sur l'entrée et la sortie standard")
-    args = parser.parse_args(argv)
+    args = parser.parse_args(_protect_negative_address(sys.argv[1:] if argv is None else list(argv)))
 
     try:
         if args.command == "page":

@@ -29,9 +29,10 @@ const IMAGE_WIDTH := 50
 const IMAGE_HEIGHT := 64
 const PYTHON_SETTING := "babel/python_command"
 const SCRIPT_PATH := "res://python/babel.py"
-const PROTOCOL := 1
-## Côté le plus long envoyé au service par search_image : l'image se réduit d'abord dans Godot.
-const MAX_SENT_SIDE := 8 * IMAGE_HEIGHT
+const PROTOCOL := 2
+## Quand le service meurt pendant une requête : attente de sa fin, lignes d'erreur reprises.
+const STDERR_WAIT_MS := 1000
+const STDERR_TAIL_LINES := 5
 
 ## Dernière erreur du service (vide quand tout va bien).
 static var last_error := ""
@@ -153,17 +154,91 @@ static func search_text_file(path: String) -> Dictionary:
 
 ## L'adresse d'une page de livre d'images qui montre l'image, ajustée à 50 × 64 et tramée aux
 ## encres de la palette par le service ; {} en cas d'erreur (voir last_error).
+## Seuls les points de la grille image_grid partent au service (au plus 200 × 256 pixels, quelle
+## que soit la taille de l'image) : la ligne de commande `babel.py search-image` lit les mêmes
+## points dans le PNG, si bien que la même image donne la même adresse dans le jeu et hors du jeu.
 static func search_image(source: Image) -> Dictionary:
-	var img := source.duplicate() as Image
-	if img.is_compressed():
-		img.decompress()
-	var longest := maxi(img.get_width(), img.get_height())
-	if longest > MAX_SENT_SIDE:
-		var ratio := float(MAX_SENT_SIDE) / longest
-		img.resize(maxi(1, roundi(img.get_width() * ratio)), maxi(1, roundi(img.get_height() * ratio)), Image.INTERPOLATE_LANCZOS)
-	img.convert(Image.FORMAT_RGBA8)
-	return _request({"op": "search_image", "width": img.get_width(), "height": img.get_height(),
-		"rgba": Marshalls.raw_to_base64(img.get_data())}).get("address", {})
+	var request := image_request(source)
+	if request.is_empty():
+		return {}
+	return _request(request).get("address", {})
+
+
+## La requête search_image d'une image : largeur et hauteur d'origine, et ses points de grille
+## en RGBA (4 octets par point, ligne de grille après ligne de grille), en base 64.
+static func image_request(source: Image) -> Dictionary:
+	if source == null or source.is_empty():
+		last_error = "image vide"
+		push_error(last_error)
+		return {}
+	var img := source
+	if img.is_compressed() or not (img.get_format() in [Image.FORMAT_L8, Image.FORMAT_LA8, Image.FORMAT_RGB8, Image.FORMAT_RGBA8]):
+		img = source.duplicate() as Image
+		if img.is_compressed():
+			img.decompress()
+		img.convert(Image.FORMAT_RGBA8)
+	var width := img.get_width()
+	var height := img.get_height()
+	var grid := image_grid(width, height)
+	var cols: PackedInt64Array = grid.cols
+	var rows: PackedInt64Array = grid.rows
+	var data := img.get_data()   # partagé avec l'image (copie à l'écriture), pas recopié
+	var format := img.get_format()
+	var bpp: int = {Image.FORMAT_L8: 1, Image.FORMAT_LA8: 2, Image.FORMAT_RGB8: 3, Image.FORMAT_RGBA8: 4}[format]
+	var samples := PackedByteArray()
+	samples.resize(cols.size() * rows.size() * 4)
+	var o := 0
+	for y in rows:
+		var row := y * width
+		for x in cols:
+			var p := (row + x) * bpp
+			match format:
+				Image.FORMAT_RGBA8:
+					samples[o] = data[p]
+					samples[o + 1] = data[p + 1]
+					samples[o + 2] = data[p + 2]
+					samples[o + 3] = data[p + 3]
+				Image.FORMAT_RGB8:
+					samples[o] = data[p]
+					samples[o + 1] = data[p + 1]
+					samples[o + 2] = data[p + 2]
+					samples[o + 3] = 255
+				Image.FORMAT_LA8:
+					samples[o] = data[p]
+					samples[o + 1] = data[p]
+					samples[o + 2] = data[p]
+					samples[o + 3] = data[p + 1]
+				_:
+					samples[o] = data[p]
+					samples[o + 1] = data[p]
+					samples[o + 2] = data[p]
+					samples[o + 3] = 255
+			o += 4
+	return {"op": "search_image", "width": width, "height": height, "samples": Marshalls.raw_to_base64(samples)}
+
+
+## La grille d'échantillonnage d'une image width × height, en arithmétique entière seule, à
+## l'identique de image_grid dans python/babel.py : {fit_w, fit_h, cols, rows}. L'image ajustée
+## occupe fit_w × fit_h pixels de la page (arrondi moitié vers le haut) ; chaque pixel lit
+## step × step points, step = min(4, ⌈côté source / côté ajusté⌉), et le point k d'un axe est
+## ⌊(2k + 1)·côté source / (2·step·côté ajusté)⌋.
+@warning_ignore("integer_division")
+static func image_grid(width: int, height: int) -> Dictionary:
+	var fit_w := IMAGE_WIDTH
+	var fit_h := IMAGE_HEIGHT
+	if IMAGE_WIDTH * height <= IMAGE_HEIGHT * width:
+		fit_h = clampi((2 * height * IMAGE_WIDTH + width) / (2 * width), 1, IMAGE_HEIGHT)
+	else:
+		fit_w = clampi((2 * width * IMAGE_HEIGHT + height) / (2 * height), 1, IMAGE_WIDTH)
+	var step_x := mini(4, (width + fit_w - 1) / fit_w)
+	var step_y := mini(4, (height + fit_h - 1) / fit_h)
+	var cols := PackedInt64Array()
+	for k in fit_w * step_x:
+		cols.append((2 * k + 1) * width / (2 * step_x * fit_w))
+	var rows := PackedInt64Array()
+	for k in fit_h * step_y:
+		rows.append((2 * k + 1) * height / (2 * step_y * fit_h))
+	return {"fit_w": fit_w, "fit_h": fit_h, "cols": cols, "rows": rows}
 
 
 ## Comme search_image, à partir d'un fichier PNG, JPG ou WebP chargé par Godot.
@@ -199,14 +274,42 @@ static func _request(request: Dictionary) -> Dictionary:
 		return {"error": last_error}
 	var response := _exchange(request)
 	if response.is_empty():
-		shutdown()
+		var tail := _stop_and_read_stderr()
 		last_error = "le service Python s'est arrêté pendant la requête « %s »" % request.get("op")
+		if not tail.is_empty():
+			last_error += " : " + tail
 		push_error(last_error)
 		return {"error": last_error}
 	if response.has("error"):
 		last_error = str(response.error)
 		push_error("babel.py : " + last_error)
 	return response
+
+
+## Arrête le service et rend les dernières lignes de son erreur standard (une trace Python,
+## par exemple), jointes par « | ». Le processus est attendu une seconde au plus, puis tué :
+## une fois le processus fini, la lecture du tube atteint sa fin au lieu d'attendre.
+static func _stop_and_read_stderr() -> String:
+	var err := _stderr
+	var pid := _pid
+	var waited := 0
+	while pid > 0 and OS.is_process_running(pid) and waited < STDERR_WAIT_MS:
+		OS.delay_msec(10)
+		waited += 10
+	if pid > 0 and OS.is_process_running(pid):
+		OS.kill(pid)
+	_pid = -1
+	shutdown()
+	if err == null:
+		return ""
+	var lines := PackedStringArray()
+	for _i in 10000:
+		var line := err.get_line()
+		if line.is_empty() and err.get_error() != OK:
+			break
+		if not line.strip_edges().is_empty():
+			lines.append(line.strip_edges())
+	return " | ".join(lines.slice(-STDERR_TAIL_LINES))
 
 
 static func _exchange(request: Dictionary) -> Dictionary:

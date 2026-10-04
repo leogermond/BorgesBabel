@@ -3,11 +3,14 @@
   "tasks": [
     {
       "label": "Lancer le jeu",
-      "detail": "Godot Windows natif : GPU direct et souris capturée (WSLg ne capture pas la souris)",
+      "detail": "Godot Windows natif : GPU direct et souris capturée (WSLg ne capture pas la souris). Importe d'abord le projet : les nouvelles classes globales s'enregistrent.",
       "type": "shell",
-      "command": "\"$GODOT_WIN\" --path \"$(wslpath -w '${workspaceFolder}')\"",
+      "command": "P=\"$(wslpath -w '${workspaceFolder}')\" && \"$GODOT_WIN_CONSOLE\" --headless --path \"$P\" --import && \"$GODOT_WIN\" --path \"$P\"",
       "options": {
-        "env": { "GODOT_WIN": "/mnt/c/Users/germond/AppData/Local/Programs/Godot/Godot_v4.7.2-stable_win64.exe" }
+        "env": {
+          "GODOT_WIN": "/mnt/c/Users/germond/AppData/Local/Programs/Godot/Godot_v4.7.2-stable_win64.exe",
+          "GODOT_WIN_CONSOLE": "/mnt/c/Users/germond/AppData/Local/Programs/Godot/Godot_v4.7.2-stable_win64_console.exe"
+        }
       },
       "group": { "kind": "build", "isDefault": true },
       "presentation": { "reveal": "silent", "panel": "dedicated", "clear": true },
@@ -15,9 +18,8 @@
     },
     {
       "label": "Lancer le jeu (Godot Linux, WSLg)",
-      "type": "process",
-      "command": "godot",
-      "args": ["--path", "${workspaceFolder}"],
+      "type": "shell",
+      "command": "godot --headless --path '${workspaceFolder}' --import && godot --path '${workspaceFolder}'",
       "group": "build",
       "problemMatcher": []
     }

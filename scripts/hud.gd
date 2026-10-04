@@ -113,14 +113,23 @@ func _ready() -> void:
 ## « display » du service : signe, 4 premiers chiffres, 4 derniers, nombre de chiffres.
 ## `moved` : le pas (galeries, niveaux) qui mène de l'adresse précédente à celle-ci ; les
 ## derniers chiffres et le guidage suivent alors le pas sans relire les coordonnées (un pas reste
-## dans le budget d'une image même à 900 000 chiffres) ; sinon tout se recalcule.
+## dans le budget d'une image même à 900 000 chiffres ; les chaînes, canoniques, ne sont alors pas
+## relues) ; sinon tout se recalcule.
 func set_address(hexagon: Variant, level: Variant, moved := Vector2i.ZERO) -> void:
-	_hexagon = BookTextScript.b25(hexagon)
-	_level = BookTextScript.b25(level)
-	_hexagon_summary = _next_summary(_hexagon_summary, _hexagon, moved.x)
-	_level_summary = _next_summary(_level_summary, _level, moved.y)
+	var stepping := moved != Vector2i.ZERO and hexagon is String and level is String \
+		and not _hexagon_summary.is_empty() and not _level_summary.is_empty()
+	if stepping:
+		_hexagon = hexagon
+		_level = level
+		_hexagon_summary = _stepped_summary(_hexagon_summary, _hexagon, moved.x)
+		_level_summary = _stepped_summary(_level_summary, _level, moved.y)
+	else:
+		_hexagon = BookTextScript.b25(hexagon)
+		_level = BookTextScript.b25(level)
+		_hexagon_summary = BookTextScript.coordinate_summary(_hexagon)
+		_level_summary = BookTextScript.coordinate_summary(_level)
 	_address.text = "Hexagone %s · niveau %s" % [BookTextScript.summary_text(_hexagon_summary), BookTextScript.summary_text(_level_summary)]
-	_refresh_widget(moved)
+	_refresh_widget(moved if stepping else Vector2i.ZERO)
 
 
 ## Hexagone et niveau de la galerie courante, en base 25.
@@ -128,14 +137,14 @@ func address() -> Dictionary:
 	return {"hexagon": _hexagon, "level": _level}
 
 
-## Le résumé d'écran d'une coordonnée : celui d'avant, avancé du pas, quand il le permet
-## (BookText.summary_step) ; sinon recalculé (exact en int, ou par le service).
-static func _next_summary(previous: Dictionary, coordinate: String, step: int) -> Dictionary:
-	if step != 0:
-		var next := BookTextScript.summary_step(previous, step)
-		if not next.is_empty():
-			return next
-	return BookTextScript.coordinate_summary(coordinate)
+## Le résumé d'écran d'une coordonnée après un pas : celui d'avant (pas nul sur cet axe), ou
+## avancé du pas quand il le permet (BookText.summary_step) ; sinon recalculé (exact en int, ou
+## par le service, une fois tous les 10 000 pas au plus).
+static func _stepped_summary(previous: Dictionary, coordinate: String, step: int) -> Dictionary:
+	if step == 0:
+		return previous
+	var next := BookTextScript.summary_step(previous, step)
+	return next if not next.is_empty() else BookTextScript.coordinate_summary(coordinate)
 
 
 ## Affiche la cote du livre visé, ou rien.

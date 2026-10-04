@@ -77,6 +77,7 @@ static var _palette := PackedByteArray()
 static var _keys: Dictionary = {}        # adresse de livre (Dictionary) → clé du service
 static var _b25_regex: RegEx
 static var _b25_regex_any_case: RegEx
+static var _b25_canonical: RegEx
 static var _int_limit := ""              # 2^62 en base 25 : au-delà, plus d'arithmétique int
 
 
@@ -179,6 +180,8 @@ static func b25(value: Variant) -> String:
 	var text: String = value
 	if not b25_valid(text):
 		return ""
+	if _b25_canonical.search(text) != null:
+		return text   # déjà canonique : aucune copie
 	if _b25_regex.search(text) == null:   # capitales : rare, et seulement ici
 		text = text.to_lower()
 	var negative := text.begins_with("-")
@@ -194,6 +197,7 @@ static func b25_valid(text: String) -> bool:
 	if _b25_regex == null:
 		_b25_regex = RegEx.create_from_string("^[+-]?[0-9a-o]+\\z")
 		_b25_regex_any_case = RegEx.create_from_string("^[+-]?[0-9a-oA-O]+\\z")
+		_b25_canonical = RegEx.create_from_string("^(?:0|-?[1-9a-o][0-9a-o]*)\\z")
 	return _b25_regex.search(text) != null or _b25_regex_any_case.search(text) != null
 
 
@@ -295,7 +299,9 @@ static func b25_add_small(text: String, delta: int) -> String:
 ## différence (erreur relative < 10^−15). Coût : quelques copies et comparaisons natives ; une
 ## boucle GDScript ne parcourt les chiffres qu'au-delà du premier chiffre qui diffère.
 static func b25_difference(a: String, b: String) -> Dictionary:
-	if b25_fits_int(a) and b25_fits_int(b):
+	var short_a := a.length() - (1 if a.begins_with("-") else 0) <= 13
+	var short_b := b.length() - (1 if b.begins_with("-") else 0) <= 13
+	if short_a and short_b:   # au plus 13 chiffres chacun : |a − b| < 3·10^18, en int
 		return _exact_difference(b25_to_int(a) - b25_to_int(b))
 	var na := a.begins_with("-")
 	var nb := b.begins_with("-")
@@ -340,10 +346,14 @@ static func b25_decimal_digits(text: String) -> int:
 	return int(floor(log(float(_top_window(text, start, length, length))) / log(10.0) + (length - 12) * LOG10_25)) + 1
 
 
+## Le résumé d'une différence connue en int : exacte sous 25^12, en ordre de grandeur au-delà
+## (nombre de chiffres exact), comme b25_difference.
 static func _exact_difference(value: int) -> Dictionary:
 	var digits := str(absi(value)).length()
-	return {"sign": signi(value), "exact": true, "value": value, "digits": digits,
-		"log10": 0.0 if value == 0 else log(float(absi(value))) / log(10.0)}
+	var log10 := 0.0 if value == 0 else log(float(absi(value))) / log(10.0)
+	if absi(value) >= B25_POW12:
+		return {"sign": signi(value), "exact": false, "value": 0, "digits": digits, "log10": log10}
+	return {"sign": signi(value), "exact": true, "value": value, "digits": digits, "log10": log10}
 
 
 static func _approx_difference(sign: int, log10: float) -> Dictionary:

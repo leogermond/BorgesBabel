@@ -152,15 +152,18 @@ func target_in_gallery(hexagon: Variant, level: Variant) -> Dictionary:
 ##  book_text, summary}. `moved` : le pas (galeries, niveaux) qui mène de la galerie du guidage
 ## précédent à celle-ci ; la différence suit alors le pas sans relire les coordonnées.
 func guidance(hexagon: Variant, level: Variant, moved := Vector2i.ZERO) -> Dictionary:
-	var h := BookTextScript.b25(hexagon)
-	var l := BookTextScript.b25(level)
-	if moved != Vector2i.ZERO and not _guide_origin.is_empty():
+	if moved != Vector2i.ZERO and not _guide_origin.is_empty() and hexagon is String and level is String:
+		# Un pas annoncé : chaînes canoniques de l'appelant, ni relues ni comparées.
 		_guide_dz = _step(_guide_dz, -moved.x)
 		_guide_dy = _step(_guide_dy, -moved.y)
-	elif _guide_origin.is_empty() or _guide_origin[0] != h or _guide_origin[1] != l:
-		_guide_dz = BookTextScript.b25_difference(book.hexagon, h)
-		_guide_dy = BookTextScript.b25_difference(book.level, l)
-	_guide_origin = [h, l]
+		_guide_origin = [hexagon, level]
+	else:
+		var h := BookTextScript.b25(hexagon)
+		var l := BookTextScript.b25(level)
+		if _guide_origin.is_empty() or _guide_origin[0] != h or _guide_origin[1] != l:
+			_guide_dz = BookTextScript.b25_difference(book.hexagon, h)
+			_guide_dy = BookTextScript.b25_difference(book.level, l)
+		_guide_origin = [h, l]
 	var dz := _guide_dz
 	var dy := _guide_dy
 	var hall: int = dz.sign

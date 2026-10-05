@@ -253,6 +253,14 @@ func _check_launchers() -> void:
 	var wait_ms := _ms(start)
 	_check(wait_ms < 800.0 and lines[0].begins_with("Bibliothèque indisponible") and BookTextScript.last_error.contains("se lance encore"),
 		"lancement long : le fil principal rend la main après %.0f ms (au plus 300 ms d'attente), « se lance encore »" % wait_ms)
+	# Le lancement continue : les requêtes suivantes ne l'attendent plus, elles échouent aussitôt.
+	var again_ms := 0.0
+	for _i in 3:
+		start = Time.get_ticks_usec()
+		lines = BookTextScript.page_lines(0, 0, 0, 0, 0, 0)
+		again_ms = maxf(again_ms, _ms(start))
+	_check(again_ms < 50.0 and lines[0].begins_with("Bibliothèque indisponible") and BookTextScript.last_error.contains("se lance encore"),
+		"lancement long, requêtes suivantes : échec immédiat (%.1f ms au pire), sans attendre de nouveau" % again_ms)
 	start = Time.get_ticks_usec()
 	BookTextScript.restart()
 	_check(_ms(start) < 500.0 and not _running("sleep 41.73"), "restart() arrête le lancement en cours et sa famille (%.0f ms)" % _ms(start))

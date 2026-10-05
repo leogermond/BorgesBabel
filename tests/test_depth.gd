@@ -13,6 +13,7 @@ const FULL_GALLERIES := 3        # galeries à collisionneurs : l'origine et ses
 const SHIFT_BUDGET_USEC := 8000  # un pas (vestibule ou niveau) : moins d'une demi-image à 60 i/s
 const CROSSINGS := 16
 const LEVEL_SHIFTS := 6
+const QuestScript := preload("res://scripts/quest.gd")
 const BookSpineScript := preload("res://scripts/book_spine.gd")
 const BookTextScript := preload("res://scripts/book_text.gd")
 const AmbientSpeakerScript := preload("res://scripts/ambient_speaker.gd")
@@ -25,6 +26,8 @@ var _failures := 0
 
 
 func _initialize() -> void:
+	QuestScript.user_dir = "user://essai_test_depth"   # jamais les fichiers du joueur
+	_clear_user_dir()
 	var main: Node3D = load("res://main.tscn").instantiate()
 	root.add_child(main)
 	await _steps(30)
@@ -127,6 +130,7 @@ func _initialize() -> void:
 
 	_check(await AmbientSpeakerScript.silence_all(self), "sortie : les haut-parleurs se taisent, le serveur audio rend leurs lectures")
 	print("test_depth : %s" % ("OK" if _failures == 0 else "%d échec(s)" % _failures))
+	_clear_user_dir()
 	quit(1 if _failures else 0)
 
 
@@ -849,3 +853,13 @@ func _check(condition: bool, label: String) -> void:
 	print(("  ok    " if condition else "  ÉCHEC ") + label)
 	if not condition:
 		_failures += 1
+
+
+## Retire le dossier des fichiers du joueur du test (quête en cours écrite au premier lancement).
+static func _clear_user_dir() -> void:
+	var dir := ProjectSettings.globalize_path(QuestScript.user_dir)
+	if not QuestScript.user_dir.begins_with("user://essai") or not DirAccess.dir_exists_absolute(dir):
+		return
+	for file in DirAccess.get_files_at(dir):
+		DirAccess.remove_absolute(dir.path_join(file))
+	DirAccess.remove_absolute(dir)

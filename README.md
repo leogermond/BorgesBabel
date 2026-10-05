@@ -53,7 +53,15 @@ direct au GPU et la souris reste libre ; le Godot Windows capture la souris et r
   ou un niveau, rien ne change d'éclat à l'image.
 - Chaque livre porte au dos un titre court en lettres dorées (Lora), tiré de son adresse : le même
   que montre la fenêtre de lecture ; les livres d'images ont un double filet doré en tête et en
-  pied. La dorure se fond dans le cuir entre 24 et 32 m.
+  pied. Un liseré sombre autour des lettres les détache des cuirs clairs. La dorure se fond dans le
+  cuir entre 24 et 32 m.
+- Une galerie a toujours le même aspect, quel que soit le chemin qui y mène (à pied, d'un saut,
+  au-delà de 2^62 ou à 917 000 chiffres) : la hauteur et le cuir de ses livres et leurs titres se
+  tirent d'une clé calculée sur ses vraies coordonnées (leurs restes modulo 25^8 − 1 et 25^8 + 1,
+  que le jeu suit pas à pas sans relire les coordonnées, et qui valent ceux de la coordonnée relue
+  en entier). Les titres se calculent sur les fils du moteur, et les livres d'images se demandent
+  à un second service Python, sur son propre fil : marcher ne coûte presque rien à l'image
+  (~0,1 ms par image pour les titres).
 - Une musique d'ambiance, la même partout et synchronisée, sort d'un haut-parleur au milieu de
   chaque vestibule du niveau du bibliothécaire, et s'éteint avec la distance.
 
@@ -70,7 +78,10 @@ direct au GPU et la souris reste libre ; le Godot Windows capture la souris et r
   plus 917 045 chiffres décimaux est pleine ; au-delà d'une dernière galerie à moitié garnie, les
   étagères sont vides. Une adresse trouvée par la recherche a un hexagone et un niveau d'environ
   917 000 chiffres décimaux : le jeu les garde en base 25 (la forme du service), les fait avancer
-  de ±1 à chaque pas sans les relire, et les affiche en abrégé, « 1096…5346 (917047 chiffres) ».
+  de ±1 à chaque pas sans les relire, et les affiche en abrégé, « 1096…5346 (917047 chiffres) » :
+  les 18 derniers chiffres suivent le pas, le reste se recalcule en arrière-plan quand ils
+  débordent ; une retenue qui traverse toute la coordonnée se prépare d'avance sur un fil. Une
+  coordonnée qui tient dans un entier (jusqu'à 2^62) s'écrit en entier.
 - Un livre sur 144 exactement est un livre d'images, reconnu à son contenu (ses deux premiers
   symboles autres que l'espace sont des signes) et calculé depuis l'adresse sans calculer le livre :
   chacune de ses pages se lit comme une image de 50 × 64 pixels, un symbole par pixel, dans une
@@ -79,9 +90,12 @@ direct au GPU et la souris reste libre ; le Godot Windows capture la souris et r
 - Le jeu lance le service Python au premier livre ouvert ; il faut Python 3.10 ou plus, sans
   autre paquet. Sans Python, la page ouverte affiche l'erreur. Le réglage de projet
   `babel/python_command` choisit l'interpréteur (par défaut `py -3`, `python`, puis `python3` sous
-  Windows ; `python3` sous Linux). Un service qui ne répond pas dans le délai (3 s pour une page,
-  10 s pour une recherche) est arrêté : la page affiche l'erreur, le jeu ne se fige pas, et le
-  service est relancé à la requête suivante.
+  Windows ; `python3` sous Linux) ; sous Windows, le lanceur `py` est remplacé par le python.exe
+  qu'il choisit. Un service qui ne répond pas dans le délai (3 s pour une page, 10 s pour une
+  recherche, 20 s au lancement) est arrêté, avec tous ses processus (un interpréteur lancé par un
+  lanceur, `uv run` par exemple) : la page affiche l'erreur, le jeu ne se fige pas, et le service
+  est relancé à la requête suivante ; après un lancement trop lent, la relance attend quelques
+  secondes (5 s, doublées à chaque nouvel échec). Seul un Python absent reste un échec durable.
 
 ## Recherche inverse
 
@@ -165,8 +179,10 @@ linéaire. Un entier JSON est aussi accepté pour une petite coordonnée. Un liv
 clés et le contenu des 4 derniers livres ouverts, ce qui évite de renvoyer 1,3 Mo d'adresse à chaque
 page tournée. Le client du jeu (`scripts/book_text.gd`) demande ainsi les pages d'un livre déjà ouvert
 par sa clé, renvoie l'adresse quand le service répond `unknown_key`, et lit chaque réponse sous un
-délai : au-delà de 3 s (10 s pour une recherche), un chien de garde arrête le service, l'appel rend
-l'erreur (`BookText.last_error`) et le service repart à la requête suivante.
+délai : au-delà de 3 s (10 s pour une recherche), un chien de garde arrête le service et ses
+descendants, l'appel rend l'erreur (`BookText.last_error`) et le service repart à la requête
+suivante. Un second service, propre à un fil (`BookText.submit` / `take`), répond aux requêtes qui
+ne doivent pas coûter une image : genres des livres d'une galerie, résumé d'une coordonnée.
 
 | `op` | Requête | Réponse |
 |---|---|---|
@@ -178,7 +194,7 @@ l'erreur (`BookText.last_error`) et le service repart à la requête suivante.
 | `search_text` | `text` | `{"address", "key", "is_image", "text_pages": pages occupées, "truncated": bool, "notice"?}` |
 | `search_image` | `width`, `height` de l'image d'origine, et soit `samples` (base64 : les points de grille seuls, 4 octets RGBA par point, ligne de grille après ligne de grille ; ce qu'envoie le jeu), soit `rgba` (base64 : l'image complète) | `{"address", "key", "is_image": true}` |
 | `is_image_book` | `books` : liste d'adresses de livres, ou `gallery` : `{"hexagon", "level"}` | `{"is_image": [true, false ou null (emplacement vide) …]}` ; pour `gallery`, 640 valeurs dans l'ordre (mur·5 + étagère)·32 + livre |
-| `display` | `address` (page facultative) ou `key`, `full` (facultatif) | `{"short": "hexagone -1096…7662 (917047 chiffres) · …", "hexagon": {"sign", "digits", "lead", "tail"}, "level": {…}}` ; `full: true` ajoute `"full"` (décimal complet, ~1,5 s) |
+| `display` | `address` (page facultative) ou `key`, `full` (facultatif) | `{"short": "hexagone -1096…7662 (917047 chiffres) · …", "hexagon": {"sign", "digits", "lead", "tail", "low"}, "level": {…}}` (`low` : les 18 derniers chiffres) ; `full: true` ajoute `"full"` (décimal complet, ~1,5 s) |
 
 Un champ `id` facultatif revient tel quel dans la réponse. Toute erreur répond
 `{"error": "…", "code": "…"}` sur sa ligne et le service continue ; `code` vaut `bad_request`,
@@ -225,6 +241,16 @@ xvfb-run -a -s "-screen 0 1600x900x24" godot --rendering-driver opengl3 --path .
 Les PNG vont dans `.foreman/scratch/screenshots` (ou dans le dossier passé après `--`).
 
 Chaque test affiche ses vérifications et sort avec le code 0 quand toutes passent.
+
+## Catalogue des quêtes
+
+`data/quetes/catalogue.bcat` (métadonnées des œuvres, adresse de chaque livre et SHA-256 de ses
+pages, aucun texte) est écrit par `tools/make_catalogue.py` sous une forme compacte : les
+coordonnées de ~656 000 chiffres, qui partagent presque toutes leurs chiffres de tête, y sont
+écrites par différence, et le JSON compressé (deflate) ; 0,90 Mo au lieu de 22,3 Mo, relu en
+~0,2 s, la même structure en mémoire. Les épingles du joueur (`user://quetes_epinglees.json`)
+s'enregistrent sous la même forme. `python3 tools/make_catalogue.py --from <catalogue>` récrit un
+catalogue existant (livres relus à leur adresse, aller-retour vérifié).
 
 ## Organisation
 

@@ -846,7 +846,7 @@ func locate_book(bookcase: StaticBody3D, world_pos: Vector3) -> Dictionary:
 	if slot < 0 or slot >= BOOKS_PER_SHELF or board < 0 or board >= SHELVES:
 		return {}
 	return {
-		"gallery": self, "hexagon": hexagon, "level": level, "place": place,
+		"gallery": self, "hexagon": hexagon, "level": level,
 		"wall": int(bookcase.get_meta("book_wall")), "shelf": SHELVES - 1 - board, "book": slot,
 	}
 

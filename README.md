@@ -251,7 +251,7 @@ godot --headless --path . -s tests/test_babel_service.gd
 tools/check_no_class_cache.sh                          # lancement sans réimport : cache de classes périmé ou vide, aucune erreur de script
 ```
 
-Les fichiers du joueur (épingles, quête en cours, livre emporté) vont dans `user://`, ou dans le
+`check_no_class_cache.sh` lance le jeu avec `--dossier-joueur` dans son dossier temporaire. Les fichiers du joueur (épingles, quête en cours, livre emporté) vont dans `user://`, ou dans le
 dossier donné après `--` par `--dossier-joueur=<dossier>` (`QuestScript.user_dir`) : chaque test
 qui crée le monde ou le Hud prend le sien (`user://essai_…`) et le retire en sortant ; les fichiers
 du joueur ne sont jamais touchés. `test_world` relance le monde sur les mêmes fichiers (quête et
@@ -306,7 +306,8 @@ fonctionnement, pour qui développe.
   jusqu'au niveau du livre, au même hexagone. Sans quête, le mot s'efface.
 - **« tlon »** (seulement en lisant : lecteur ouvert, ou carnet ouvert par-dessus) : le livre lu
   est emporté. Le bibliothécaire en porte un au plus : en emporter un autre rend le précédent à
-  sa place. Le livre emporté est gardé d'une session à l'autre (`user://livre_emporte.json`) et
+  sa place. Le livre emporté est gardé d'une session à l'autre (`user://livre_emporte.json`, ~0,8 Mo
+  à 917 000 chiffres, écrit sur un fil du moteur puis renommé d'un coup) et
   laisse un vide sur son étagère tant qu'il n'est pas rendu. La touche du carnet, carnet ouvert,
   ouvre le livre emporté dans le lecteur. Proposé, en attente de confirmation :
   `main.gd` `RETURN_CARRIED_ON_TLON` (vrai) — « tlon » en relisant le livre emporté le rend à sa
@@ -316,7 +317,9 @@ fonctionnement, pour qui développe.
   (`destinations.golem`, rempli plus tard) ; tant que la destination est vide, le mot s'efface.
 - Un déplacement est un saut instantané (`place_origin`, galeries reconstruites) caché par un
   fondu au noir (0,2 s à l'aller, 0,2 s au retour) ; le bibliothécaire garde son orientation (et sa
-  place dans la galerie), sauf pour « sator » et « golem ». Coût sur le fil principal, au noir, à
+  place dans la galerie), sauf pour « sator » et « golem ». Le bibliothécaire reste immobile tant
+  qu'une raison le retient (`Player.hold` : saut, lecteur, panneau, carnet), dans tout ordre ; un
+  saut invoqué pendant un autre part, à sa fin, de la galerie d'arrivée. Coût sur le fil principal, au noir, à
   ~917 000 chiffres (test_world) : « aleph » et « zahir » ~30 à 60 ms, « sator » ~0,23 s (livre
   jamais ouvert compris).
 

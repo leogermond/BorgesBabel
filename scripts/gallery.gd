@@ -25,16 +25,26 @@ extends Node3D
 ## OmniLight3D sans ombre. Une galerie lointaine reçoit donc exactement la lumière
 ## d'une galerie proche ; une vraie lampe naît et meurt à poids nul.
 ##
+## Adresse : `hexagon` et `level` sont le repère local de main.gd (des int, noms des nœuds et
+## positions) ; `place` désigne la vraie galerie : sa clé (BookText.gallery_key, tirée des vraies
+## coordonnées seules) et ses vraies coordonnées, base 25 + petit décalage. La graine des livres
+## (hauteurs, cuirs) et les titres des dos se tirent de la clé : une galerie est la même quel que
+## soit le chemin qui y mène (à pied, d'un saut, au-delà de 2^62 ou à 917 000 chiffres).
+##
 ## Les titres dorés (BookSpine) : le MultiMesh commun n'a pas de donnée par instance ; chaque
 ## galerie LIT ou FULL donne à son matériau des livres une petite texture RGBA8 (96 × 20 texels,
 ## 12 octets par livre) que le nuanceur lit au texel près selon INSTANCE_ID, sous Forward+ comme
 ## sous Compatibility. Les titres d'une galerie (SHA-256 de 640 adresses, ~4 ms) se calculent sur
-## un fil du moteur, après la requête des livres d'images au service (pump_titles, une galerie par
-## image) ; ceux des galeries qui deviendront LIT au prochain pas sont préparés d'avance
-## (prefetch_titles) et gardés en mémoire : un pas ne fait que poser des textures prêtes. Des
-## titres arrivés en retard entrent en fondu (TITLE_APPEAR). La dorure est éclairée comme le cuir
-## (part réelle et part du nuanceur) ; son reflet, que les vraies lampes ne portent pas, vient du
-## nuanceur seul, pour toutes les lampes du réseau.
+## le fil d'arrière-plan de BookText (priorité basse), après les genres de ses livres (livres
+## d'images : double filet doré) demandés au service d'arrière-plan (son propre processus) :
+## pump_titles, une fois par image, ne fait que relever ce qui est prêt et lancer la suite, sans
+## jamais attendre le service. Ceux des galeries qui deviendront LIT au prochain pas sont préparés
+## d'avance (prefetch_titles) et gardés en mémoire : un pas ne fait que poser des textures prêtes.
+## Des genres qui n'arrivent pas (service absent ou en panne) laissent les titres sans filets, et
+## se redemandent plus tard (flag_retry_ms) ; arrivés, ils complètent les textures déjà posées.
+## Des titres arrivés en retard entrent en fondu (TITLE_APPEAR). La dorure est éclairée comme le
+## cuir (part réelle et part du nuanceur) ; son reflet, que les vraies lampes ne portent pas, vient
+## du nuanceur seul, pour toutes les lampes du réseau.
 
 const GalleryScript := preload("res://scripts/gallery.gd")
 const BookSpineScript := preload("res://scripts/book_spine.gd")
@@ -113,12 +123,23 @@ const FAR_FADE_END := 90.0
 # LIT ↔ FULL ne change rien aux livres (même matériau, mêmes titres).
 const GOLD := Color(0.86, 0.66, 0.30)         # dorure, sRGB
 const GOLD_METALLIC := 0.75
+## Lisibilité de la dorure sur les cuirs clairs (fauve, ocre) : un liseré sombre autour des lettres
+## (le cuir assombri de HALO_DARKEN sous le halo des glyphes, BookSpine.glyph_halo), comme le
+## creux d'un fer de reliure, et une dorure un peu plus claire à la lumière diffuse (GILT_DIFFUSE de
+## la couleur de l'or, au lieu de 1 − GOLD_METALLIC) ; le reflet de l'or ne change pas.
+const HALO_DARKEN := 0.55
+## Sur les cuirs les plus clairs (luminance linéaire de PALE_BEGIN à PALE_END), le liseré fonce
+## jusqu'à HALO_DARKEN_PALE : l'or s'y détache autant que sur un cuir sombre.
+const HALO_DARKEN_PALE := 0.85
+const PALE_BEGIN := 0.12
+const PALE_END := 0.32
+const GILT_DIFFUSE := 0.4
 const GOLD_ROUGHNESS := 0.45
 const TITLE_FADE_BEGIN := 24.0
 const TITLE_FADE_END := 32.0
 const TITLE_APPEAR := 0.5            # s : fondu d'arrivée des titres calculés en retard
 const TITLE_CACHE_SIZE := 160        # galeries dont les titres restent en mémoire (7,5 Ko chacune)
-const TITLE_JOBS := 4                # calculs de titres en cours au plus, sur les fils du moteur
+const TITLE_JOBS := 2                # galeries confiées au fil d'arrière-plan à la fois (il les traite l'une après l'autre)
 
 const LEATHER: Array[Color] = [
 	Color(0.42, 0.12, 0.08), Color(0.30, 0.18, 0.10), Color(0.16, 0.24, 0.14),
@@ -204,6 +225,7 @@ varying flat vec3 book_albedo;
 // titles_alpha : 0 tant que la galerie n'a pas ses titres, puis 1 (fondu à leur arrivée).
 uniform sampler2D titles : hint_default_black, filter_nearest, repeat_disable;
 uniform sampler2D glyph_atlas : hint_default_transparent, filter_linear_mipmap, repeat_disable;
+uniform sampler2D glyph_halo : hint_default_transparent, filter_linear_mipmap, repeat_disable;
 uniform float titles_alpha = 0.0;
 
 const int MAX_SYMBOLS = 16;
@@ -221,6 +243,11 @@ const float TITLE_CENTER_EM = {TITLE_CENTER_EM};
 const vec3 GOLD_LINEAR = {GOLD_LINEAR};
 const float GOLD_METALLIC = {GOLD_METALLIC};
 const float GOLD_ROUGHNESS = {GOLD_ROUGHNESS};
+const float HALO_DARKEN = {HALO_DARKEN};
+const float HALO_DARKEN_PALE = {HALO_DARKEN_PALE};
+const float PALE_BEGIN = {PALE_BEGIN};
+const float PALE_END = {PALE_END};
+const float GILT_DIFFUSE = {GILT_DIFFUSE};
 const float TITLE_FADE_BEGIN = {TITLE_FADE_BEGIN};
 const float TITLE_FADE_END = {TITLE_FADE_END};
 
@@ -257,9 +284,11 @@ uvec4 title_codes(int book) {
 			b.b | (b.a << 8u) | (c.r << 16u), c.g | (c.b << 8u) | (c.a << 16u));
 }
 
-// Encre dorée du dos au point `p` (mètres depuis le centre du dos) : titre et filets.
-float spine_ink(vec2 p, vec2 atlas_dx, vec2 atlas_dy, float end_aa) {
+// Encre dorée du dos au point `p` (mètres depuis le centre du dos) : titre et filets (x), et halo
+// des lettres (y : leur couverture élargie, où le cuir s'assombrit autour de l'or).
+vec2 spine_ink(vec2 p, vec2 atlas_dx, vec2 atlas_dy, float end_aa) {
 	float ink = 0.0;
+	float halo = 0.0;
 	float from_end = 0.5 * spine_height - abs(p.y);   // distance à la tête ou au pied
 	// Livre d'images : double filet doré en tête et en pied.
 	if (((spine_codes.x >> 20u) & 1u) == 1u) {
@@ -287,13 +316,14 @@ float spine_ink(vec2 p, vec2 atlas_dx, vec2 atlas_dy, float end_aa) {
 			vec2 cell = vec2(float(glyph % ATLAS_COLUMNS), float(glyph / ATLAS_COLUMNS));
 			vec2 uv = (cell * ATLAS_CELL_EM + in_cell) / atlas_em;
 			ink = max(ink, textureGrad(glyph_atlas, uv, atlas_dx / atlas_em, atlas_dy / atlas_em).a);
+			halo = max(halo, textureGrad(glyph_halo, uv, atlas_dx / atlas_em, atlas_dy / atlas_em).a);
 		}
 		pen += GLYPH_ADVANCE[glyph] + TRACKING_EM;
 		if (pen - ATLAS_ORIGIN_EM.x > t.x) {
 			break;
 		}
 	}
-	return ink;
+	return vec2(ink, halo);
 }
 #endif
 
@@ -434,15 +464,20 @@ void fragment() {
 	vec2 atlas_dy = dFdy(vec2(p.y, -p.x) / em);
 	float end_aa = fwidth(p.y);
 	float gilt = titles_alpha * (1.0 - smoothstep(TITLE_FADE_BEGIN, TITLE_FADE_END, d));
+	float shade = 0.0;
 	if (spine_face > 0.5 && gilt > 0.0) {
-		gilt *= spine_ink(p, atlas_dx, atlas_dy, end_aa);
+		vec2 inked = spine_ink(p, atlas_dx, atlas_dy, end_aa);
+		shade = gilt * max(inked.y - inked.x, 0.0);
+		gilt *= inked.x;
 	} else {
 		gilt = 0.0;
 	}
 	if (gilt > 0.0) {
 		sheen = gilt * LAMP_LIGHT * gold_sheen(world, normal, CAMERA_POSITION_WORLD);
 	}
-	albedo = mix(albedo, GOLD_LINEAR * (1.0 - GOLD_METALLIC), gilt);
+	float pale = smoothstep(PALE_BEGIN, PALE_END, dot(albedo, vec3(0.2126, 0.7152, 0.0722)));
+	albedo *= 1.0 - mix(HALO_DARKEN, HALO_DARKEN_PALE, pale) * shade;
+	albedo = mix(albedo, GOLD_LINEAR * GILT_DIFFUSE, gilt);
 #endif
 #ifdef FACES
 	albedo = painted(UV);
@@ -465,13 +500,22 @@ static var _ring_mesh: ArrayMesh         # l'anneau du puits d'un niveau lointai
 static var _structure_boxes: Array = []  # [Transform3D, Vector3] : collisionneurs des murs et du sol
 static var _pool: Dictionary = {}        # nom d'enfant → enfants détachés, prêts à resservir
 static var _glyph_texture: ImageTexture  # atlas des glyphes de Lora (BookSpine), commun
-static var _title_cache: Dictionary = {} # "hexagone|niveau" → octets de la texture des titres (du plus ancien au plus récent)
-static var _title_queue: Array = []      # [clé, hexagone, niveau] à calculer, urgentes d'abord
-static var _title_jobs: Array = []       # [tâche de WorkerThreadPool, travail {key, hexagon, level, flags, bytes}]
+static var _halo_texture: ImageTexture   # halo des glyphes (BookSpine.glyph_halo), commun
+static var _title_cache: Dictionary = {} # clé de galerie → octets de la texture des titres (du plus ancien au plus récent)
+static var _title_queue: Array = []      # adresses (place) à calculer, urgentes d'abord
+static var _title_jobs: Array = []       # travaux en cours {key, place, ticket} (fil d'arrière-plan)
 static var _title_waiting: Array = []    # galeries LIT ou FULL qui attendent leurs titres
+static var _flag_retry: Dictionary = {}  # clé → {place, at, ticket, delay} : genres à redemander
+static var _shown: Array = []            # galeries dont la texture porte des titres (pour les compléter)
+## Temps passé par le dernier pump_titles sur le fil principal, en µs (mesures des tests).
+static var last_pump_usec := 0
+## Attente avant de redemander des genres de livres qui ne sont pas arrivés (doublée ensuite).
+static var flag_retry_ms := 5000
 
 var hexagon: int
 var level: int
+## La vraie galerie : {key, hexagon, dh, level, dl} (voir place_of).
+var place: Dictionary = {}
 var detail: Detail = Detail.DISTANT
 var _book_heights := PackedFloat32Array()   # calculées à la demande (book_heights)
 var _book_material: ShaderMaterial          # livres un à un : graine de l'adresse, titres
@@ -483,22 +527,49 @@ var _titles_tween: Tween
 var _speaker: AmbientSpeakerScript          # haut-parleur d'ambiance du vestibule (set_speaker)
 
 
-static func create(p_hexagon: int, p_level: int, p_detail: Detail = Detail.FULL) -> GalleryScript:
+## Une galerie au repère local (p_hexagon, p_level), à la vraie adresse `p_place` (place_of) ;
+## sans `p_place`, le repère local est la vraie adresse.
+static func create(p_hexagon: int, p_level: int, p_detail: Detail = Detail.FULL, p_place: Dictionary = {}) -> GalleryScript:
 	var gallery := GalleryScript.new()
 	gallery.hexagon = p_hexagon
 	gallery.level = p_level
+	gallery.place = p_place if not p_place.is_empty() else place_of_ints(p_hexagon, p_level)
 	gallery.name = _node_name(p_hexagon, p_level)
 	gallery.set_detail(p_detail)
 	return gallery
 
 
-## Donne à la galerie une nouvelle adresse et un degré de détail : seule la graine
-## des livres change, les maillages partagés restent.
-func readdress(p_hexagon: int, p_level: int, p_detail: Detail) -> void:
+## La vraie adresse d'une galerie : hexagone = hexagon_base + dh, niveau = level_base + dl (bases
+## en base 25, de toute taille, partagées sans copie entre les galeries d'un même pas ; décalages
+## petits), et sa clé `key` (BookText.gallery_key de ces coordonnées).
+static func place_of(hexagon_base: String, dh: int, level_base: String, dl: int, key: String) -> Dictionary:
+	return {"key": key, "hexagon": hexagon_base, "dh": dh, "level": level_base, "dl": dl}
+
+
+## La vraie adresse d'une galerie de coordonnées int.
+static func place_of_ints(p_hexagon: int, p_level: int) -> Dictionary:
+	return place_of(BookTextScript.b25_from_int(p_hexagon), 0, BookTextScript.b25_from_int(p_level), 0,
+		BookTextScript.gallery_key(p_hexagon, p_level))
+
+
+## Hexagone et niveau de la vraie galerie, en base 25 (une copie de la coordonnée).
+func true_coordinates() -> Array:
+	return [BookTextScript.b25_add_small(place.hexagon, place.dh), BookTextScript.b25_add_small(place.level, place.dl)]
+
+
+## Donne à la galerie une nouvelle adresse (repère local et vraie adresse, place_of ; sans
+## `p_place`, le repère local) et un degré de détail : seules la graine des livres et la texture
+## des titres changent, les maillages partagés restent. Même clé : seule la description de la vraie
+## adresse se met à jour (nouvelles bases d'un pas).
+func readdress(p_hexagon: int, p_level: int, p_detail: Detail, p_place: Dictionary = {}) -> void:
+	var new_place := p_place if not p_place.is_empty() else place_of_ints(p_hexagon, p_level)
 	if p_hexagon != hexagon or p_level != level:
 		hexagon = p_hexagon
 		level = p_level
 		name = _node_name(p_hexagon, p_level)
+	var same: bool = new_place.key == place.key
+	place = new_place
+	if not same:
 		_book_heights = PackedFloat32Array()
 		var shader_seed := _signed32(book_seed())
 		if _book_material != null:
@@ -548,7 +619,7 @@ static func title_weight(d: float) -> float:
 
 ## Vrai quand la texture des titres porte ceux de l'adresse de la galerie.
 func titles_ready() -> bool:
-	return detail >= Detail.LIT and _titles_key == _title_key(hexagon, level)
+	return detail >= Detail.LIT and _titles_key == place.key
 
 
 ## Opacité des titres dans le nuanceur : 0 en attente, 1 une fois arrivés (après un fondu).
@@ -562,22 +633,26 @@ func titles_texture() -> ImageTexture:
 
 
 ## Calcule tout de suite les titres de la galerie s'ils manquent (démonstration, tests) :
-## une requête au service et ~4 ms de hachage, sur le fil principal.
+## une requête au service (fil principal) et ~4 ms de hachage.
 func load_titles_now() -> void:
 	if detail < Detail.LIT or titles_ready():
 		return
-	var key := _title_key(hexagon, level)
+	var key: String = place.key
 	if not _title_cache.has(key):
-		_store_titles(key, BookSpineScript.gallery_title_bytes(hexagon, level,
-			BookTextScript.gallery_image_books(hexagon, level)))
+		var coordinates := true_coordinates()
+		var bytes := BookSpineScript.gallery_title_bytes(key)
+		var flags := BookTextScript.gallery_image_books(coordinates[0], coordinates[1])
+		if flags.size() == BookSpineScript.WALLS * BookSpineScript.SHELVES * BookSpineScript.BOOKS:
+			BookSpineScript.set_image_flags(bytes, flags)
+		_store_titles(key, bytes)
 	_want_titles()
 
 
 ## Prépare les titres des galeries qui deviendront LIT ou FULL au prochain pas : les cases
-## `cells` (à vraies lampes, relatives à l'origine `origin_hexagon`, `origin_level`), décalées
-## d'un pas dans chacune des quatre directions. Les galeries en attente passent d'abord, de la
-## plus proche à la plus lointaine.
-static func prefetch_titles(origin_hexagon: int, origin_level: int, cells: Array) -> void:
+## `cells` (à vraies lampes, relatives à l'origine), décalées d'un pas dans chacune des quatre
+## directions ; `place_at(case)` rend la vraie adresse d'une case (place_of). Les galeries en
+## attente passent d'abord, de la plus proche à la plus lointaine.
+static func prefetch_titles(place_at: Callable, cells: Array) -> void:
 	var queue: Array = []
 	var queued := {}
 	_title_waiting = _title_waiting.filter(func(g: Variant) -> bool:
@@ -585,10 +660,9 @@ static func prefetch_titles(origin_hexagon: int, origin_level: int, cells: Array
 	_title_waiting.sort_custom(func(a: Node3D, b: Node3D) -> bool:
 		return a.position.length_squared() < b.position.length_squared())
 	for gallery: GalleryScript in _title_waiting:
-		var key := _title_key(gallery.hexagon, gallery.level)
-		if not queued.has(key):
-			queued[key] = true
-			queue.append([key, gallery.hexagon, gallery.level])
+		if not queued.has(gallery.place.key):
+			queued[gallery.place.key] = true
+			queue.append(gallery.place)
 	var lit := {}
 	for cell: Vector2i in cells:
 		lit[cell] = true
@@ -597,49 +671,109 @@ static func prefetch_titles(origin_hexagon: int, origin_level: int, cells: Array
 			var next: Vector2i = cell + move
 			if lit.has(next):
 				continue
-			var key := _title_key(origin_hexagon + next.x, origin_level + next.y)
-			if not queued.has(key) and not _title_cache.has(key):
-				queued[key] = true
-				queue.append([key, origin_hexagon + next.x, origin_level + next.y])
+			var next_place: Dictionary = place_at.call(next)
+			if not queued.has(next_place.key) and not _title_cache.has(next_place.key):
+				queued[next_place.key] = true
+				queue.append(next_place)
 	_title_queue = queue
 
 
-## Fait avancer les titres, une fois par image : range les calculs finis (et les donne aux
-## galeries qui les attendent), puis lance au plus un calcul : la requête des livres d'images
-## au service (une par galerie, sur ce fil), et le hachage des 640 titres sur un fil du moteur.
+## Fait avancer les titres, une fois par image, sans rien attendre : relève les calculs de titres
+## finis (fils du moteur) et les genres des livres arrivés (service d'arrière-plan), range les
+## galeries complètes (et les donne aux galeries qui les attendent), redemande les genres qui
+## manquent, puis lance les galeries suivantes (TITLE_JOBS en cours au plus).
 static func pump_titles() -> void:
+	var started := Time.get_ticks_usec()
+	var now := Time.get_ticks_msec()
 	for i in range(_title_jobs.size() - 1, -1, -1):
-		var task: int = _title_jobs[i][0]
-		if WorkerThreadPool.is_task_completed(task):
-			WorkerThreadPool.wait_for_task_completion(task)
-			var job: Dictionary = _title_jobs[i][1]
-			_title_jobs.remove_at(i)
-			_store_titles(job["key"], job["bytes"])
-	while not _title_queue.is_empty() and _title_jobs.size() < TITLE_JOBS:
-		var entry: Array = _title_queue.pop_front()
-		if _title_cache.has(entry[0]) or _title_running(entry[0]):
+		var job: Dictionary = _title_jobs[i]
+		var response: Variant = BookTextScript.take(job.ticket)
+		if response == null:
 			continue
-		var job := {"key": entry[0], "hexagon": entry[1], "level": entry[2],
-			"flags": BookTextScript.gallery_image_books(entry[1], entry[2]), "bytes": PackedByteArray()}
-		var task := WorkerThreadPool.add_task(func() -> void:
-			job["bytes"] = BookSpineScript.gallery_title_bytes(job["hexagon"], job["level"], job["flags"]),
-			false, "titres des dos")
-		_title_jobs.append([task, job])
-		break
+		_title_jobs.remove_at(i)
+		var bytes: Variant = response.get("title_bytes") if response is Dictionary else null
+		if not bytes is PackedByteArray:   # service arrêté avant le calcul : la galerie se redemande
+			_title_queue.push_front(job.place)
+			continue
+		if response.get("flags_ok") != true:
+			_flag_retry[job.key] = {"place": job.place, "at": now + flag_retry_ms, "ticket": -1, "delay": flag_retry_ms}
+		_store_titles(job.key, bytes)
+	_pump_retries(now)
+	while not _title_queue.is_empty() and _title_jobs.size() < TITLE_JOBS:
+		var entry: Dictionary = _title_queue.pop_front()
+		if _title_cache.has(entry.key) or _title_running(entry.key):
+			continue
+		var key: String = entry.key
+		# Titres (SHA-256 des 640 adresses) et genres, tout sur le fil d'arrière-plan.
+		var ticket := BookTextScript.submit_gallery_flags(entry.hexagon, entry.dh, entry.level, entry.dl,
+			GalleryScript._titles_of.bind(key))
+		_title_jobs.append({"key": key, "place": entry, "ticket": ticket})
+	last_pump_usec = Time.get_ticks_usec() - started
 
 
-## Vrai quand aucun titre ne reste à calculer.
+## Sur le fil d'arrière-plan : les titres de la galerie `key`, avec les genres de la réponse du
+## service (fonction statique, sans fermeture : rien n'est partagé avec le fil principal).
+static func _titles_of(flags_response: Dictionary, key: String) -> Dictionary:
+	var title_bytes := BookSpineScript.gallery_title_bytes(key)
+	var flags := _flags_of(flags_response)
+	if not flags.is_empty():
+		BookSpineScript.set_image_flags(title_bytes, flags)
+	return {"title_bytes": title_bytes, "flags_ok": not flags.is_empty()}
+
+
+## Les 640 genres d'une réponse du service, ou [] (erreur, réponse incomplète).
+static func _flags_of(response: Variant) -> Array:
+	var flags: Variant = response.get("is_image") if response is Dictionary else null
+	if flags is Array and flags.size() == BookSpineScript.WALLS * BookSpineScript.SHELVES * BookSpineScript.BOOKS:
+		return flags
+	return []
+
+
+## Genres manquants : redemandés à l'échéance ; arrivés, ils complètent les titres en mémoire et
+## les textures posées. Une galerie sortie de la mémoire des titres est oubliée.
+static func _pump_retries(now: int) -> void:
+	for key: String in _flag_retry.keys():
+		var retry: Dictionary = _flag_retry[key]
+		if not _title_cache.has(key):
+			if retry.ticket >= 0:
+				BookTextScript.cancel(retry.ticket)
+			_flag_retry.erase(key)
+		elif retry.ticket < 0:
+			if now >= retry.at:
+				retry.ticket = BookTextScript.submit_gallery_flags(retry.place.hexagon, retry.place.dh, retry.place.level, retry.place.dl)
+		else:
+			var response: Variant = BookTextScript.take(retry.ticket)
+			if response == null:
+				continue
+			retry.ticket = -1
+			var flags := _flags_of(response)
+			if flags.is_empty():
+				retry.delay = mini(retry.delay * 2, 60000)
+				retry.at = now + retry.delay
+				continue
+			_flag_retry.erase(key)
+			var bytes: PackedByteArray = _title_cache[key]
+			BookSpineScript.set_image_flags(bytes, flags)
+			_title_cache[key] = bytes
+			_shown = _shown.filter(func(g: Variant) -> bool: return is_instance_valid(g))
+			for gallery: GalleryScript in _shown:
+				if gallery._titles_key == key:
+					gallery._apply_titles(key, bytes, false)
+
+
+## Vrai quand aucun titre ne reste à calculer ni aucun genre à redemander.
 static func titles_idle() -> bool:
-	return _title_queue.is_empty() and _title_jobs.is_empty()
+	return _title_queue.is_empty() and _title_jobs.is_empty() and _flag_retry.is_empty()
 
 
-static func _title_key(p_hexagon: Variant, p_level: Variant) -> String:
-	return "%s|%s" % [str(p_hexagon), str(p_level)]
+## Les clés dont les genres des livres restent à redemander (service absent ou en panne).
+static func flags_pending() -> Array:
+	return _flag_retry.keys()
 
 
 static func _title_running(key: String) -> bool:
-	for running: Array in _title_jobs:
-		if running[1]["key"] == key:
+	for running: Dictionary in _title_jobs:
+		if running.key == key:
 			return true
 	return false
 
@@ -655,7 +789,7 @@ static func _store_titles(key: String, bytes: PackedByteArray) -> void:
 	for gallery: Variant in _title_waiting:   # une galerie libérée en attente : sautée
 		if not is_instance_valid(gallery) or gallery.detail < Detail.LIT or gallery.titles_ready():
 			continue
-		if _title_key(gallery.hexagon, gallery.level) == key:
+		if gallery.place.key == key:
 			gallery._apply_titles(key, bytes, true)
 		else:
 			still.append(gallery)
@@ -664,7 +798,7 @@ static func _store_titles(key: String, bytes: PackedByteArray) -> void:
 
 ## Les titres de l'adresse : de la mémoire tout de suite, sinon en attente du calcul.
 func _want_titles() -> void:
-	var key := _title_key(hexagon, level)
+	var key: String = place.key
 	if _titles_key == key:
 		return
 	var bytes: Variant = _title_cache.get(key)
@@ -676,8 +810,8 @@ func _want_titles() -> void:
 	_set_titles_alpha(0.0)
 	if not _title_waiting.has(self):
 		_title_waiting.append(self)
-	if not _title_running(key) and not _title_queue.any(func(e: Array) -> bool: return e[0] == key):
-		_title_queue.push_front([key, hexagon, level])
+	if not _title_running(key) and not _title_queue.any(func(e: Dictionary) -> bool: return e.key == key):
+		_title_queue.push_front(place)
 
 
 func _apply_titles(key: String, bytes: PackedByteArray, fade: bool) -> void:
@@ -688,6 +822,8 @@ func _apply_titles(key: String, bytes: PackedByteArray, fade: bool) -> void:
 	_titles_texture = ImageTexture.create_from_image(image)
 	_book_material.set_shader_parameter("titles", _titles_texture)
 	_titles_key = key
+	if not _shown.has(self):
+		_shown.append(self)
 	if fade and is_inside_tree():
 		_set_titles_alpha(0.0)
 		_titles_tween = create_tween()
@@ -751,9 +887,15 @@ func book_heights() -> PackedFloat32Array:
 	return _book_heights
 
 
-## Graine des livres de la galerie, sur 32 bits.
+## Graine des livres de la galerie, sur 32 bits : les 4 premiers octets du SHA-256 de sa clé
+## (vraies coordonnées seules, voir place).
 func book_seed() -> int:
-	return hash([hexagon, level]) & 0xFFFFFFFF
+	return seed_of(place.key)
+
+
+## Graine des livres de la galerie de clé `key`.
+static func seed_of(key: String) -> int:
+	return ("graine|" + key).sha256_buffer().decode_u32(0)
 
 
 ## Hauteur du livre `book` pour la graine `book_seed_value` (jumeau de book_height du nuanceur).
@@ -857,7 +999,9 @@ func _fit(node: Node) -> void:
 			_book_material = _seeded_material("BOOKS")
 			if _glyph_texture == null:
 				_glyph_texture = ImageTexture.create_from_image(BookSpineScript.glyph_atlas())
+				_halo_texture = ImageTexture.create_from_image(BookSpineScript.glyph_halo())
 			_book_material.set_shader_parameter("glyph_atlas", _glyph_texture)
+			_book_material.set_shader_parameter("glyph_halo", _halo_texture)
 		node.material_override = _book_material
 	elif node.name == "Faces":
 		if _face_material == null:
@@ -871,11 +1015,16 @@ static func release_pool() -> void:
 		for node: Node in pool:
 			node.free()
 	_pool.clear()
-	for running: Array in _title_jobs:
-		WorkerThreadPool.wait_for_task_completion(running[0])
+	for running: Dictionary in _title_jobs:
+		BookTextScript.cancel(running.ticket)
+	for retry: Dictionary in _flag_retry.values():
+		if retry.ticket >= 0:
+			BookTextScript.cancel(retry.ticket)
 	_title_jobs.clear()
 	_title_queue.clear()
 	_title_waiting.clear()
+	_flag_retry.clear()
+	_shown.clear()
 
 
 func _new_interior() -> Node:
@@ -1316,6 +1465,8 @@ static func _shader(variant: String) -> Shader:
 		"TITLE_CENTER_EM": _float(BookSpineScript.TITLE_CENTER_EM),
 		"GOLD_LINEAR": _vec3(_linear(GOLD)), "GOLD_METALLIC": _float(GOLD_METALLIC),
 		"GOLD_ROUGHNESS": _float(GOLD_ROUGHNESS),
+		"HALO_DARKEN": _float(HALO_DARKEN), "GILT_DIFFUSE": _float(GILT_DIFFUSE),
+		"HALO_DARKEN_PALE": _float(HALO_DARKEN_PALE), "PALE_BEGIN": _float(PALE_BEGIN), "PALE_END": _float(PALE_END),
 		"TITLE_FADE_BEGIN": _float(TITLE_FADE_BEGIN), "TITLE_FADE_END": _float(TITLE_FADE_END),
 	})
 	_shaders[variant] = shader

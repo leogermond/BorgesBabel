@@ -24,18 +24,23 @@ func _initialize() -> void:
 	_check_layout()
 	_check_shader()
 	_check_gallery_bytes()
+	_check_flag_retry()
+	BookTextScript.shutdown()
 	print("test_book_spine : %s" % ("OK" if _failures == 0 else "%d échec(s)" % _failures))
 	quit(1 if _failures else 0)
 
 
 func _check_titles() -> void:
 	_check(BookSpineScript.ALPHABET == BookTextScript.ALPHABET, "alphabet identique à BookText.ALPHABET")
-	var far := BookSpineScript.title(INT_MAX, INT_MIN, 3, 4, 31)
-	_check(far == BookSpineScript.title(INT_MAX, INT_MIN, 3, 4, 31), "même adresse → même titre (« %s »)" % far)
-	_check(BookSpineScript.title(7, -2, 1, 3, 12) == BookSpineScript.title_at(BookTextScript.address(7, -2, 1, 3, 12, 99)),
-		"title et title_at s'accordent (la page est ignorée)")
+	var far := BookSpineScript.title(_key(INT_MAX, INT_MIN), 3, 4, 31)
+	_check(far == BookSpineScript.title(_key(INT_MAX, INT_MIN), 3, 4, 31), "même adresse → même titre (« %s »)" % far)
+	_check(BookSpineScript.display_title(BookSpineScript.title(_key(7, -2), 1, 3, 12)) == BookTextScript.title_at(BookTextScript.address(7, -2, 1, 3, 12, 99)),
+		"BookSpine.title et BookText.title_at s'accordent (la page est ignorée)")
+	_check(_key(7, -2) == BookTextScript.gallery_key("7", "-2") and _key(INT_MAX, 3) == BookTextScript.gallery_key(BookTextScript.b25(INT_MAX), "3")
+			and _key(0, 1) != _key(1, 0) and _key(0, 0) != _key(152587890624, 0) and _key(1, 0) != _key(-1, 0),
+		"clé de galerie : la même pour un int et sa chaîne base 25, distincte d'une galerie voisine")
 	# Valeurs figées : le titre ne dépend que de SHA-256, identique sur toute machine.
-	print("    titres de référence : « %s », « %s »" % [BookSpineScript.title(0, 0, 0, 0, 0), BookSpineScript.title(1, 1, 1, 1, 1)])
+	print("    titres de référence : « %s », « %s »" % [BookSpineScript.title(_key(0, 0), 0, 0, 0), BookSpineScript.title(_key(1, 1), 1, 1, 1)])
 	var oracle_rng := RandomNumberGenerator.new()
 	oracle_rng.seed = 1899   # naissance de Borges
 	var mismatches := 0
@@ -44,8 +49,8 @@ func _check_titles() -> void:
 			oracle_rng.randi_range(0, 3), oracle_rng.randi_range(0, 4), oracle_rng.randi_range(0, 31)]
 		if n == 0:
 			parts = [0, 0, 0, 0, 0]
-		var key := "dos|%d|%d|%d|%d|%d" % parts
-		if BookSpineScript.title(parts[0], parts[1], parts[2], parts[3], parts[4]) != _expected_title(key):
+		var key := "dos|%s|%d|%d|%d" % [_key(parts[0], parts[1]), parts[2], parts[3], parts[4]]
+		if BookSpineScript.title(_key(parts[0], parts[1]), parts[2], parts[3], parts[4]) != _expected_title(key):
 			mismatches += 1
 	_check(mismatches == 0, "titres recalculés indépendamment depuis le condensat, 2000 adresses (écarts : %d)" % mismatches)
 
@@ -63,7 +68,7 @@ func _check_titles() -> void:
 	for n in SAMPLES:
 		var hexagon: int = extremes[n] if n < extremes.size() else rng.randi() << 32 | rng.randi()
 		var level: int = extremes[n % extremes.size()] if n % 97 == 0 else rng.randi_range(-1000000, 1000000)
-		var text := BookSpineScript.title(hexagon, level, rng.randi_range(0, 3), rng.randi_range(0, 4), rng.randi_range(0, 31))
+		var text := BookSpineScript.title(_key(hexagon, level), rng.randi_range(0, 3), rng.randi_range(0, 4), rng.randi_range(0, 31))
 		distinct[text] = true
 		lengths[text.length()] = lengths.get(text.length(), 0) + 1
 		if text != text.strip_edges():
@@ -170,7 +175,7 @@ func _check_capitals() -> void:
 	var same_text := 0
 	for n in 2000:
 		var parts := [rng.randi() << 32 | rng.randi(), rng.randi_range(-99999, 99999), rng.randi_range(0, 3), rng.randi_range(0, 4), rng.randi_range(0, 31)]
-		var raw := BookSpineScript.title(parts[0], parts[1], parts[2], parts[3], parts[4])
+		var raw := BookSpineScript.title(_key(parts[0], parts[1]), parts[2], parts[3], parts[4])
 		var shown := BookSpineScript.display_title(raw)
 		var spelled := ""
 		for g in BookSpineScript.title_glyphs(raw):
@@ -200,7 +205,7 @@ func _check_layout() -> void:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 2026
 	for n in 3000:
-		titles.append(BookSpineScript.title(rng.randi(), rng.randi(), rng.randi_range(0, 3), rng.randi_range(0, 4), rng.randi_range(0, 31)))
+		titles.append(BookSpineScript.title(_key(rng.randi(), rng.randi()), rng.randi_range(0, 3), rng.randi_range(0, 4), rng.randi_range(0, 31)))
 	var worst_along := 0.0
 	var worst_across := 0.0
 	var worst_offset := 0.0
@@ -245,8 +250,25 @@ func _check_shader() -> void:
 	var shader := material.shader
 	var uniforms := shader.get_shader_uniform_list().map(func(u: Dictionary) -> String: return u.name)
 	_check(not uniforms.is_empty(), "le nuanceur des livres se compile (uniformes : %d)" % uniforms.size())
-	for name in ["titles", "glyph_atlas", "titles_alpha", "seed"]:
+	for name in ["titles", "glyph_atlas", "glyph_halo", "titles_alpha", "seed"]:
 		_check(uniforms.has(name), "uniforme %s présent" % name)
+	# Halo des lettres (liseré sombre sur les cuirs clairs) : il couvre chaque glyphe, et déborde autour.
+	var atlas := BookSpineScript.glyph_atlas()
+	var halo := BookSpineScript.glyph_halo()
+	var inside := 0
+	var covered := 0
+	var wider := 0
+	for y in range(0, atlas.get_height(), 3):
+		for x in range(0, atlas.get_width(), 3):
+			var a := atlas.get_pixel(x, y).a
+			var h := halo.get_pixel(x, y).a
+			if a > 0.5:
+				inside += 1
+				covered += int(h >= a - 0.01)
+			elif h > 0.5:
+				wider += 1
+	_check(inside > 0 and covered == inside and wider > inside / 4 and material.get_shader_parameter("glyph_halo") is Texture2D,
+		"halo des glyphes : couvre les %d points encrés, déborde sur %d autres, branché sur le matériau" % [inside, wider])
 	var forced := Shader.new()
 	forced.code = shader.code.replace("#if CURRENT_RENDERER == RENDERER_COMPATIBILITY", "#if 1")
 	_check(forced.code != shader.code and forced.get_shader_uniform_list().size() == uniforms.size(),
@@ -274,28 +296,77 @@ func _check_shader() -> void:
 
 func _check_gallery_bytes() -> void:
 	var t0 := Time.get_ticks_usec()
-	var bytes := BookSpineScript.gallery_title_bytes(INT_MAX, -3)
+	var bytes := BookSpineScript.gallery_title_bytes(_key(INT_MAX, -3))
 	var elapsed := (Time.get_ticks_usec() - t0) / 1000.0
 	print("    titres des 640 livres d'une galerie : %.2f ms" % elapsed)
 	_check(bytes.size() == 640 * BookSpineScript.BYTES_PER_BOOK
 			and bytes.size() == BookSpineScript.TEXTURE_WIDTH * BookSpineScript.TEXTURE_HEIGHT * 4,
 		"640 titres de 12 octets : une texture RGBA8 de 96 × 20")
-	_check(BookSpineScript.decode_title(bytes, (2 * 5 + 3) * 32 + 17) == BookSpineScript.title(INT_MAX, -3, 2, 3, 17), "rang (mur·5 + étagère)·32 + livre")
-	_check(BookSpineScript.gallery_title_bytes(7, -2) == BookSpineScript.gallery_title_bytes("7", "-2"),
-		"hexagone et niveau en entiers ou en décimaux : mêmes titres")
+	_check(BookSpineScript.decode_title(bytes, (2 * 5 + 3) * 32 + 17) == BookSpineScript.title(_key(INT_MAX, -3), 2, 3, 17), "rang (mur·5 + étagère)·32 + livre")
 	var flags := []
 	flags.resize(640)
 	flags.fill(false)
 	flags[50] = true
-	var flagged := BookSpineScript.gallery_title_bytes(INT_MAX, -3, flags)
+	var flagged := BookSpineScript.gallery_title_bytes(_key(INT_MAX, -3), flags)
+	var patched := bytes.duplicate()
+	BookSpineScript.set_image_flags(patched, flags)
+	_check(patched == flagged, "set_image_flags sur des titres déjà calculés = titres calculés avec les drapeaux")
 	_check(BookSpineScript.decode_image_flag(flagged, 50) and not BookSpineScript.decode_image_flag(flagged, 49)
 			and BookSpineScript.decode_title(flagged, 50) == BookSpineScript.decode_title(bytes, 50),
 		"drapeau d'image transmis au bon livre, titre intact")
 	# Même calcul sur un fil du moteur (comme Gallery.pump_titles).
 	var out := {}
-	var task := WorkerThreadPool.add_task(func() -> void: out["bytes"] = BookSpineScript.gallery_title_bytes(INT_MAX, -3))
+	var task := WorkerThreadPool.add_task(func() -> void: out["bytes"] = BookSpineScript.gallery_title_bytes(_key(INT_MAX, -3)))
 	WorkerThreadPool.wait_for_task_completion(task)
 	_check(out.get("bytes") == bytes, "calcul identique sur un fil de WorkerThreadPool")
+
+
+## Genres des livres manquants (service absent) : les titres se posent sans filets, puis, le
+## service revenu, les genres se redemandent et complètent la texture déjà posée.
+func _check_flag_retry() -> void:
+	var saved_retry := GalleryScript.flag_retry_ms
+	GalleryScript.flag_retry_ms = 200
+	print("  (erreurs attendues ci-dessous : interpréteur volontairement introuvable)")
+	ProjectSettings.set_setting(BookTextScript.PYTHON_SETTING, "/chemin/introuvable/python3")
+	BookTextScript.restart()
+	var gallery := GalleryScript.create(17, -3, GalleryScript.Detail.LIT)
+	_pump_until(func() -> bool: return gallery.titles_ready(), 10000)
+	var key: String = gallery.place.key
+	var bytes := gallery.titles_texture().get_image().get_data() if gallery.titles_ready() else PackedByteArray()
+	var flagged := 0
+	for i in 640:
+		flagged += int(BookSpineScript.decode_image_flag(bytes, i))
+	_check(gallery.titles_ready() and flagged == 0 and GalleryScript.flags_pending().has(key),
+		"service absent : titres posés sans filets, genres à redemander")
+	ProjectSettings.set_setting(BookTextScript.PYTHON_SETTING, "")
+	BookTextScript.restart()
+	_pump_until(func() -> bool: return GalleryScript.flags_pending().is_empty(), 20000)
+	var flags := BookTextScript.gallery_image_books(17, -3)
+	bytes = gallery.titles_texture().get_image().get_data()
+	var wrong := 0
+	flagged = 0
+	for i in 640:
+		var flag := BookSpineScript.decode_image_flag(bytes, i)
+		flagged += int(flag)
+		if flag != (i < flags.size() and flags[i] == true):
+			wrong += 1
+	_check(GalleryScript.flags_pending().is_empty() and flags.size() == 640 and flagged > 0 and wrong == 0,
+		"service revenu : les genres redemandés complètent la texture posée (%d livres d'images, écarts : %d)" % [flagged, wrong])
+	_check(BookSpineScript.decode_title(bytes, 77) == BookSpineScript.title(key, 0, 2, 13), "les titres restent")
+	GalleryScript.flag_retry_ms = saved_retry
+	gallery.free()
+	GalleryScript.release_pool()
+
+
+func _pump_until(done: Callable, limit_msec: int) -> void:
+	var t0 := Time.get_ticks_msec()
+	while not done.call() and Time.get_ticks_msec() - t0 < limit_msec:
+		GalleryScript.pump_titles()
+		OS.delay_msec(10)
+
+
+func _key(hexagon: Variant, level: Variant) -> String:
+	return BookTextScript.gallery_key(hexagon, level)
 
 
 ## Titre recalculé à part, d'après la règle documentée de BookSpine._indices écrite autrement :

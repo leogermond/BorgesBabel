@@ -53,11 +53,27 @@ var origin_hexagon_b25 := "0"
 var origin_level_b25 := "0"
 ## Repère local des galeries (Gallery.hexagon et Gallery.level, noms des nœuds) : des int qui
 ## suivent l'origine pas à pas. Ils valent la vraie coordonnée tant qu'elle tient dans un int —
-## c'est le cas du départ, tiré au hasard dans la plage des int comme avant ; après place_origin
-## sur une coordonnée plus grande, ils partent d'un petit entier tiré de la coordonnée (la graine
-## des hauteurs et des cuirs des livres en dépend, pas le texte des livres).
+## c'est le cas du départ, tiré au hasard dans la plage des int ; après place_origin sur une
+## coordonnée plus grande, ils partent d'un petit entier tiré de la coordonnée. Rien de ce qui se
+## voit n'en dépend : graine des livres et titres des dos se tirent de la clé de chaque galerie.
 var origin_hexagon: int
 var origin_level: int
+## Empreintes des vraies coordonnées de l'origine (BookText.b25_print) et leur contexte
+## (BookText.print_context) : elles suivent les pas (print_at) et donnent la clé de chaque galerie
+## (Gallery.place), celle qu'on obtiendrait en relisant la coordonnée entière : même galerie, même
+## aspect, quel que soit le chemin.
+var origin_hexagon_print := PackedInt64Array([1, 0, 0])
+var origin_level_print := PackedInt64Array([1, 0, 0])
+var _hexagon_context: Dictionary = {}
+var _level_context: Dictionary = {}
+var _hexagon_parts: Dictionary = {}   # décalage → part de clé (_key_part), pour le pas en cours
+var _level_parts: Dictionary = {}
+## Pas préparés d'avance, par axe (« hexagon », « level ») : pas (±1) → coordonnée voisine prête
+## (String), ou calcul en cours sur un fil du moteur ({task, holder}). Le pas en arrière est la
+## coordonnée d'où l'on vient ; le pas en avant ne se prépare que lorsqu'une retenue doit traverser
+## une longue suite de chiffres (BookText.long_carry) : le pas lui-même ne copie alors rien.
+var _prepared := {"hexagon": {}, "level": {}}
+var _orphans: Array[int] = []        # calculs préparés devenus inutiles, à relever
 
 var player: PlayerScript
 var hud: HudScript
@@ -86,6 +102,7 @@ func _ready() -> void:
 	origin_level = rng.randi() - (1 << 31)
 	origin_hexagon_b25 = BookTextScript.b25_from_int(origin_hexagon)
 	origin_level_b25 = BookTextScript.b25_from_int(origin_level)
+	_set_prints(BookTextScript.b25_print(origin_hexagon_b25), BookTextScript.b25_print(origin_level_b25))
 	_update_galleries()
 
 	player = PlayerScript.new()
@@ -117,11 +134,20 @@ func _ready() -> void:
 
 func _exit_tree() -> void:
 	GalleryScript.release_pool()
+	for axis: String in _prepared:
+		_drop_prepared(axis)
+	for task in _orphans:
+		WorkerThreadPool.wait_for_task_completion(task)
+	_orphans.clear()
 
 
 func _process(_delta: float) -> void:
 	_update_lamps()
 	GalleryScript.pump_titles()
+	for i in range(_orphans.size() - 1, -1, -1):
+		if WorkerThreadPool.is_task_completed(_orphans[i]):
+			WorkerThreadPool.wait_for_task_completion(_orphans[i])
+			_orphans.remove_at(i)
 
 
 func _physics_process(_delta: float) -> void:
@@ -226,6 +252,11 @@ func place_origin(hexagon: Variant, level: Variant) -> bool:
 	origin_level_b25 = l
 	origin_hexagon = _local_coordinate(h)
 	origin_level = _local_coordinate(l)
+	_set_prints(BookTextScript.b25_print(h), BookTextScript.b25_print(l))
+	for axis: String in _prepared:
+		_drop_prepared(axis)
+		for step: int in [1, -1]:
+			_prepare(axis, h if axis == "hexagon" else l, step)
 	_update_galleries(Vector2i.ZERO, true)
 	if hud != null:
 		hud.set_address(origin_hexagon_b25, origin_level_b25)
@@ -245,7 +276,10 @@ static func _local_coordinate(coordinate: String) -> int:
 ## Fait de la galerie voisine (+1 ou −1 le long du vestibule) la nouvelle origine.
 func _shift(step: int) -> void:
 	origin_hexagon += step
-	origin_hexagon_b25 = BookTextScript.b25_add_small(origin_hexagon_b25, step)
+	origin_hexagon_b25 = _stepped("hexagon", origin_hexagon_b25, step)
+	_hexagon_context = BookTextScript.print_context_step(_hexagon_context, step, origin_hexagon_b25)
+	_hexagon_parts = {}
+	origin_hexagon_print = _print_of(_hexagon_context)
 	player.position.z -= step * GalleryScript.PITCH
 	_update_galleries(Vector2i(step, 0))
 	hud.set_address(origin_hexagon_b25, origin_level_b25, Vector2i(step, 0))
@@ -254,10 +288,49 @@ func _shift(step: int) -> void:
 ## Fait du niveau voisin (+1 au-dessus, −1 au-dessous) la nouvelle origine.
 func _shift_level(step: int) -> void:
 	origin_level += step
-	origin_level_b25 = BookTextScript.b25_add_small(origin_level_b25, step)
+	origin_level_b25 = _stepped("level", origin_level_b25, step)
+	_level_context = BookTextScript.print_context_step(_level_context, step, origin_level_b25)
+	_level_parts = {}
+	origin_level_print = _print_of(_level_context)
 	player.position.y -= step * GalleryScript.LEVEL_PITCH
 	_update_galleries(Vector2i(0, step))
 	hud.set_address(origin_hexagon_b25, origin_level_b25, Vector2i(0, step))
+
+
+## La coordonnée `current` (de l'axe `axis`) ± 1 : préparée d'avance si elle l'est, sinon
+## calculée (BookText.b25_add_small) ; puis le pas suivant se prépare (voir _prepared).
+func _stepped(axis: String, current: String, step: int) -> String:
+	var ready: Variant = _prepared[axis].get(step)
+	var next: String
+	if ready is String:
+		next = ready
+	elif ready is Dictionary:
+		WorkerThreadPool.wait_for_task_completion(ready.task)   # d'ordinaire déjà fini
+		next = ready.holder.result
+		_prepared[axis].erase(step)
+	else:
+		next = BookTextScript.b25_add_small(current, step)
+	_drop_prepared(axis)
+	_prepared[axis][-step] = current
+	_prepare(axis, next, step)
+	return next
+
+
+## Lance sur un fil du moteur le calcul de `coordinate` + step quand il demande une longue retenue.
+func _prepare(axis: String, coordinate: String, step: int) -> void:
+	if not BookTextScript.long_carry(coordinate, step):
+		return
+	var holder := {"result": ""}
+	var task := WorkerThreadPool.add_task(func() -> void:
+		holder.result = BookTextScript.b25_add_small(coordinate, step), false, "pas préparé")
+	_prepared[axis][step] = {"task": task, "holder": holder}
+
+
+func _drop_prepared(axis: String) -> void:
+	for ready: Variant in _prepared[axis].values():
+		if ready is Dictionary:
+			_orphans.append(ready.task)
+	_prepared[axis] = {}
 
 
 ## Degré de détail de la galerie décalée de (dz, dy) par rapport à l'origine, ou −1
@@ -331,13 +404,16 @@ func _update_galleries(moved := Vector2i.ZERO, readdress_all := false) -> void:
 		if gallery == null:
 			gallery = _take_spare(spares, detail)
 			if gallery == null:
-				gallery = GalleryScript.create(origin_hexagon + cell.x, origin_level + cell.y, detail as GalleryScript.Detail)
+				gallery = GalleryScript.create(origin_hexagon + cell.x, origin_level + cell.y, detail as GalleryScript.Detail, place_at(cell))
 				add_child(gallery)
 			else:
-				gallery.readdress(origin_hexagon + cell.x, origin_level + cell.y, detail as GalleryScript.Detail)
+				gallery.readdress(origin_hexagon + cell.x, origin_level + cell.y, detail as GalleryScript.Detail, place_at(cell))
 			placed[cell] = gallery
-		elif gallery.detail != detail:
-			gallery.set_detail(detail as GalleryScript.Detail)
+		else:
+			# Même galerie, même clé : seule sa description passe aux chaînes de la nouvelle origine.
+			gallery.place = GalleryScript.place_of(origin_hexagon_b25, cell.x, origin_level_b25, cell.y, gallery.place.key)
+			if gallery.detail != detail:
+				gallery.set_detail(detail as GalleryScript.Detail)
 		gallery.position = Vector3(0.0, cell.y * GalleryScript.LEVEL_PITCH, cell.x * GalleryScript.PITCH)
 		gallery.set_speaker(AmbientSpeakerScript.has_speaker(cell))   # musique : vestibules du niveau, ±30 m
 	for pool: Array in spares:
@@ -347,8 +423,40 @@ func _update_galleries(moved := Vector2i.ZERO, readdress_all := false) -> void:
 	_lit.clear()
 	for cell: Vector2i in lit_cells():
 		_lit.append(placed[cell])
-	GalleryScript.prefetch_titles(origin_hexagon, origin_level, lit_cells())   # titres du prochain pas
+	GalleryScript.prefetch_titles(place_at, lit_cells())   # titres du prochain pas
 	_update_lamps()
+
+
+## La vraie adresse de la galerie de la case `cell` (dz, dy) relative à l'origine (Gallery.place_of) :
+## les chaînes de l'origine, partagées sans copie, le décalage, et la clé tirée des empreintes.
+func place_at(cell: Vector2i) -> Dictionary:
+	return GalleryScript.place_of(origin_hexagon_b25, cell.x, origin_level_b25, cell.y,
+		_key_part(_hexagon_parts, _hexagon_context, cell.x) + "|" + _key_part(_level_parts, _level_context, cell.y))
+
+
+## La part d'un axe dans la clé d'une galerie (BookText.print_text de l'empreinte à `delta` de
+## l'origine), calculée une fois par pas pour toutes les galeries de la même rangée.
+static func _key_part(parts: Dictionary, context: Dictionary, delta: int) -> String:
+	var part: Variant = parts.get(delta)
+	if part == null:
+		part = BookTextScript.print_text(BookTextScript.print_at(context, delta))
+		parts[delta] = part
+	return part
+
+
+## Empreintes de l'origine après un saut (les chaînes origin_*_b25 sont déjà à jour) et leur
+## contexte pour les galeries voisines ; un pas les fait suivre par BookText.print_context_step.
+func _set_prints(hexagon_print: PackedInt64Array, level_print: PackedInt64Array) -> void:
+	_hexagon_context = BookTextScript.print_context(origin_hexagon_b25, hexagon_print)
+	_level_context = BookTextScript.print_context(origin_level_b25, level_print)
+	_hexagon_parts = {}
+	_level_parts = {}
+	origin_hexagon_print = hexagon_print
+	origin_level_print = level_print
+
+
+static func _print_of(context: Dictionary) -> PackedInt64Array:
+	return BookTextScript.print_at(context, 0)
 
 
 ## Part réelle de chaque vraie lampe, selon sa distance à l'œil (voir Gallery.real_weight).

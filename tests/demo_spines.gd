@@ -33,7 +33,7 @@ func _initialize() -> void:
 	var flags: Array = BookTextScript.gallery_image_books(hexagon, level)
 	for book in GalleryScript.BOOKS_PER_SHELF:
 		var i: int = SHELF * GalleryScript.BOOKS_PER_SHELF + book
-		var image := i < flags.size() and bool(flags[i])
+		var image: bool = i < flags.size() and flags[i] == true
 		print("  livre %2d : « %s »%s" % [book + 1, BookTextScript.title(hexagon, level, 0, SHELF, book),
 			"  (livre d'images)" if image else ""])
 

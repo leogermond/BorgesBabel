@@ -24,14 +24,22 @@ extends RefCounted
 ##
 ## Délais : la lecture du tube est bloquante, mais un chien de garde (un fil) arrête le service
 ## s'il ne répond pas dans le délai (timeout_ms pour une page, search_timeout_ms pour une
-## recherche, start_timeout_ms au lancement) ; la lecture bloquée finit alors aussitôt, l'appel
-## rend une erreur (last_error) et le service est relancé à la requête suivante.
+## recherche, start_timeout_ms au lancement), lui et tous ses descendants (un interpréteur lancé
+## par un lanceur tient le même tube) ; la lecture bloquée finit alors aussitôt, l'appel rend une
+## erreur (last_error) et le service est relancé à la requête suivante. Un lancement trop lent est
+## réessayé après start_retry_ms (doublé à chaque nouvel échec) ; seul un Python absent est un
+## échec durable (« Python introuvable », jusqu'à restart()).
 ##
 ## Interpréteur : le réglage de projet `babel/python_command` (par exemple `py -3` ou un chemin
 ## entre guillemets) ; à défaut `py -3`, `python`, puis `python3` sous Windows, `python3` ailleurs.
+## Sous Windows, le lanceur `py` est remplacé par le python.exe qu'il choisit (direct_command).
 ## Sans Python, les pages affichent le message d'erreur et le journal le reprend.
+##
+## Un second service, sur son propre fil, répond aux requêtes qui ne doivent pas coûter une image
+## au fil principal (submit, take : voir « Service d'arrière-plan »).
 
 const BookSpineScript := preload("res://scripts/book_spine.gd")
+const BookTextScript := preload("res://scripts/book_text.gd")
 
 ## 22 lettres (l'alphabet latin privé de k, q, w, y), l'espace, la virgule, le point.
 const ALPHABET := "abcdefghijlmnoprstuvxz ,."
@@ -58,11 +66,50 @@ const KEY_CACHE := 64
 const B25_POW12 := 59604644775390625
 const B25_POW11 := 2384185791015625
 const LOG10_25 := 1.3979400086720377
+## log₁₀ 25 = LOG10_25_HI + LOG10_25_LO, la part haute sur 31 bits (1501026655 / 2^30).
+const LOG10_25_HI := 1.3979400089010596
+const LOG10_25_LO := -2.2902201796043677e-10
+## Voisinage d'une puissance de dix (sur la partie fractionnaire de log₁₀) où le nombre de chiffres
+## décimaux se tranche exactement, et taille au plus (chiffres base 25) de ce calcul exact.
+const POW10_MARGIN := 1.0e-9
+const EXACT_DIGITS_LIMIT := 20000
+## Empreintes des coordonnées (b25_print) : hachage polynomial des tranches de 8 chiffres base 25,
+## modulo deux nombres premiers de 31 bits, à deux bases fixes (voir b25_print).
+const PRINT_P: Array[int] = [2147483647, 2147483629]
+const PRINT_B: Array[int] = [1859140973, 1210359923]
+const PRINT_CHUNK := 152587890625               # 25^8 : une tranche
+const PRINT_CHUNK_MOD: Array[int] = [116551688, 116552966]          # 25^8 mod P
+const PRINT_INV_B1: Array[int] = [1721314116, 2016755104]           # (B − 1)^−1 mod P
+const PRINT_CACHE := 8
+## Retenue « longue » (long_carry) : au-delà, main.gd prépare le pas d'avance, sur un fil.
+const LONG_CARRY := 1024
+## Résumés d'écran (coordinate_summary) : calcul local exact jusqu'à 30 chiffres base 25 (moins
+## de 10^42), pas à pas en int jusqu'à 2^62, 18 derniers chiffres suivis au-delà.
+const SMALL_SUMMARY_DIGITS := 30
+const SMALL_SUMMARY_DECIMALS := 41
+const INT_SUMMARY_LIMIT := 4611686018427387904
+const LOW_MODULUS := 1000000000000000000
+
+## Délai de relance au plus après des lancements trop lents (voir _start).
+const START_RETRY_MAX_MS := 60000
+## Délai de la question au lanceur Windows `py` (direct_command).
+const RESOLVE_TIMEOUT_MS := 5000
+## Descendants d'un processus relevés au plus (_kill_tree).
+const KILL_TREE_LIMIT := 64
+## Délai de pgrep (descendants d'un processus hors de Linux).
+const PGREP_TIMEOUT_MS := 1000
+## Service d'arrière-plan : priorité basse (nice) et période de son chien de garde.
+const BACKGROUND_NICENESS := 10
+const BACKGROUND_POLL_USEC := 2000
 
 ## Délais de réponse du service, en millisecondes.
 static var timeout_ms := 3000
 static var search_timeout_ms := 10000
 static var start_timeout_ms := 20000
+## Attente avant de relancer un service qui ne s'est pas lancé à temps (doublée à chaque échec).
+static var start_retry_ms := 5000
+## Attente au plus du fil principal pendant un lancement (le reste se fait sur un fil).
+static var main_start_wait_ms := 2000
 
 ## Dernière erreur du service (vide quand tout va bien).
 static var last_error := ""
@@ -72,13 +119,41 @@ static var last_search: Dictionary = {}
 static var _stdio: FileAccess
 static var _stderr: FileAccess
 static var _pid := -1
-static var _unavailable := false
+static var _unavailable := false         # Python absent : jusqu'à restart()
+static var _unavailable_message := ""
+static var _start_failure := ""          # dernier lancement trop lent (réessayé après _retry_at_msec)
+static var _start_code := "unavailable"  # code d'erreur du dernier lancement manqué
+static var _retry_at_msec := 0
+static var _start_backoff_ms := 0
+static var _direct_commands: Dictionary = {}
+# Lancement du service du fil principal, sur un fil (voir _start).
+static var _launcher: Thread
+static var _launch_mutex := Mutex.new()
+static var _launch_done := false
+static var _launch_result: Dictionary = {}
+static var _launcher_pid := -1   # commande du lanceur `py` → python.exe (direct_command)
+# Service d'arrière-plan (voir submit) : état partagé avec son fil, sous _bg_mutex.
+static var _bg_mutex := Mutex.new()
+static var _bg_semaphore := Semaphore.new()
+static var _bg_thread: Thread
+static var _bg_jobs: Array = []          # [ticket, requête ou Callable, délai]
+static var _bg_results: Dictionary = {}  # ticket → réponse
+static var _bg_cancelled: Dictionary = {}
+static var _bg_quit := false
+static var _bg_pid := -1
+static var _bg_busy := 0
+static var _bg_next := 0
+static var _bg_commands: Array = []      # relevés sur le fil principal à la création du fil
+static var _bg_script := ""
+static var _bg_start_timeout := 20000
+static var _bg_timeout := 3000
 static var _palette := PackedByteArray()
 static var _keys: Dictionary = {}        # adresse de livre (Dictionary) → clé du service
 static var _b25_regex: RegEx
 static var _b25_regex_any_case: RegEx
 static var _b25_canonical: RegEx
 static var _int_limit := ""              # 2^62 en base 25 : au-delà, plus d'arithmétique int
+static var _print_cache: Dictionary = {} # coordonnée → empreinte (b25_print), les dernières
 
 
 # --- Adresses -------------------------------------------------------------------------------
@@ -119,16 +194,30 @@ static func display(target: Dictionary) -> String:
 
 
 ## Résumé d'une coordonnée pour l'écran : {sign, digits (chiffres décimaux), lead (4 premiers),
-## tail (4 derniers)}, et value (int) quand elle tient dans un int. Calcul local exact pour une
-## petite coordonnée ; pour une grande, la forme « display » du service. {} en cas d'erreur.
+## tail (4 derniers), low (18 derniers, complétés de zéros)}, et value (int) quand elle tient dans
+## un int. Calcul local exact jusqu'à SMALL_SUMMARY_DIGITS chiffres base 25 ; au-delà, la forme
+## « display » du service (requête sur le fil principal ; display_request pour l'arrière-plan).
+## {} en cas d'erreur.
 static func coordinate_summary(coordinate: String) -> Dictionary:
 	var value := b25(coordinate)
 	if value.is_empty():
 		return {}
 	if b25_fits_int(value):
 		return _int_summary(b25_to_int(value))
-	var response := _request({"op": "display", "address": {"hexagon": value, "level": "0", "wall": 0, "shelf": 0, "book": 0}})
-	return response.get("hexagon", {})
+	if value.length() - (1 if value.begins_with("-") else 0) <= SMALL_SUMMARY_DIGITS:
+		return _decimal_summary(b25_sign(value), _small_decimal(value.trim_prefix("-")))
+	return summary_of_display(_request(display_request(value)))
+
+
+## La requête « display » d'une coordonnée (canonique) : son résumé est celui de l'hexagone.
+static func display_request(coordinate: String) -> Dictionary:
+	return {"op": "display", "address": {"hexagon": coordinate, "level": "0", "wall": 0, "shelf": 0, "book": 0}}
+
+
+## Le résumé d'une réponse « display » (display_request), ou {} (erreur).
+static func summary_of_display(response: Variant) -> Dictionary:
+	var summary: Variant = response.get("hexagon") if response is Dictionary else null
+	return summary if summary is Dictionary and summary.has("low") else {}
 
 
 ## La coordonnée à l'écran : ses chiffres décimaux quand elle tient dans un int, sinon
@@ -138,27 +227,75 @@ static func summary_text(summary: Dictionary) -> String:
 		return "?"
 	if summary.has("value"):
 		return str(summary.value)
+	if str(summary.get("lead", "")).is_empty():   # provisoire (Hud) : le nombre de chiffres seul
+		return "%s… (%d chiffres)" % ["-" if int(summary.sign) < 0 else "", int(summary.digits)]
 	return "%s%s…%s (%d chiffres)" % ["-" if int(summary.sign) < 0 else "", summary.lead, summary.tail, int(summary.digits)]
 
 
 ## Le résumé de la coordonnée voisine (coordonnée + delta, |delta| petit), sans la relire : les
-## derniers chiffres suivent le pas ; {} quand ils débordent (retenue vers les chiffres de tête,
-## une fois tous les 10 000 pas au plus) ou que la valeur tient dans un int (recalcul exact).
+## 18 derniers chiffres (low) suivent le pas, le reste ne change pas tant qu'ils ne débordent pas
+## (une fois tous les 10^18 pas au plus). Rend {} quand il faut recalculer : petite coordonnée
+## (au plus SMALL_SUMMARY_DIGITS chiffres base 25, calcul local exact, en int au besoin), ou
+## débordement des 18 derniers chiffres (recalcul complet, voir Hud : en arrière-plan).
 static func summary_step(summary: Dictionary, delta: int) -> Dictionary:
-	if summary.is_empty() or summary.has("value") or absi(delta) >= 10000:
+	if summary.is_empty() or absi(delta) >= 1000000:
 		return {}
-	var magnitude_delta := delta if int(summary.sign) > 0 else -delta
-	var tail := int(summary.tail) + magnitude_delta
-	if tail < 0 or tail >= 10000:
+	if summary.has("value"):
+		var next: int = int(summary.value) + delta
+		return _int_summary(next) if absi(next) <= INT_SUMMARY_LIMIT else {}
+	if int(summary.digits) <= SMALL_SUMMARY_DECIMALS or not summary.has("low"):
+		return {}
+	var low := int(summary.low) + (delta if int(summary.sign) > 0 else -delta)
+	if low < 0 or low >= LOW_MODULUS:
 		return {}
 	var result := summary.duplicate()
-	result.tail = "%04d" % tail
+	result.low = "%018d" % low
+	result.tail = result.low.right(4)
+	return result
+
+
+## Le résumé provisoire après un pas qui fait déborder les 18 derniers chiffres : ceux-ci suivent
+## le pas (modulo 10^18), signe, chiffres de tête et nombre de chiffres restent ceux d'avant
+## jusqu'au recalcul (« pending »).
+static func summary_wrap(summary: Dictionary, delta: int) -> Dictionary:
+	var result := summary.duplicate()
+	var low := posmod(int(summary.get("low", "0")) + (delta if int(summary.sign) > 0 else -delta), LOW_MODULUS)
+	result.low = "%018d" % low
+	result.tail = result.low.right(4)
+	result.pending = true
 	return result
 
 
 static func _int_summary(value: int) -> Dictionary:
 	var digits := str(absi(value)) if value != -9223372036854775807 - 1 else "9223372036854775808"
-	return {"sign": signi(value), "digits": digits.length(), "lead": digits.left(4), "tail": digits.right(4), "value": value}
+	var summary := _decimal_summary(signi(value), digits)
+	summary.value = value
+	return summary
+
+
+static func _decimal_summary(sign: int, digits: String) -> Dictionary:
+	return {"sign": sign, "digits": digits.length(), "lead": digits.left(4), "tail": digits.right(4),
+		"low": digits.right(18).lpad(18, "0")}
+
+
+## L'écriture décimale exacte d'une petite valeur absolue (chiffres base 25 sans signe, au plus
+## SMALL_SUMMARY_DIGITS), par tranches de 10^12.
+static func _small_decimal(digits: String) -> String:
+	const LIMB := 1000000000000
+	var limbs := PackedInt64Array([0])
+	for i in digits.length():
+		var carry := _digit(digits, i)
+		for k in limbs.size():
+			var v := limbs[k] * 25 + carry
+			limbs[k] = v % LIMB
+			@warning_ignore("integer_division")
+			carry = v / LIMB
+		if carry > 0:
+			limbs.append(carry)
+	var text := str(limbs[limbs.size() - 1])
+	for k in range(limbs.size() - 2, -1, -1):
+		text += str(limbs[k]).lpad(12, "0")
+	return text
 
 
 # --- Arithmétique en base 25 ------------------------------------------------------------------
@@ -275,6 +412,8 @@ static func b25_add_small(text: String, delta: int) -> String:
 		var result := text
 		result[length - 1] = B25_DIGITS[last]
 		return result
+	if absi(step) == 1:
+		return _carry_one(text, start, step)
 	var width := 12
 	var tail := 0
 	for i in range(length - width, length):
@@ -292,11 +431,54 @@ static func b25_add_small(text: String, delta: int) -> String:
 	return ("-" if negative else "") + magnitude
 
 
+## Vrai quand coordonnée + step (step = ±1) fait traverser à la retenue au moins LONG_CARRY
+## chiffres (une suite de « o », ou de « 0 », en queue de la valeur absolue) : le calcul copie alors
+## la coordonnée entière, de quoi le préparer d'avance (main.gd). Coût : LONG_CARRY lectures au plus.
+static func long_carry(text: String, step: int) -> bool:
+	if b25_fits_int(text):
+		return false
+	var start := 1 if text.begins_with("-") else 0
+	var magnitude_step := -step if start == 1 else step
+	var run := 111 if magnitude_step > 0 else 48
+	var length := text.length()
+	if length - start <= LONG_CARRY:
+		return false
+	for k in LONG_CARRY:
+		if text.unicode_at(length - 1 - k) != run:
+			return false
+	return true
+
+
+## ±1 sur la valeur absolue avec retenue (pas d'un vestibule) : la suite de « o » (ou de « 0 ») de
+## queue devient « 0 » (ou « o »), le chiffre qui la précède gagne (ou perd) 1. Deux copies au plus
+## de la chaîne, même quand la retenue la traverse entière (« 1ooo…o » + 1) : la longueur de la
+## suite se compte par la fonction native rstrip au-delà de 64 chiffres.
+static func _carry_one(text: String, start: int, step: int) -> String:
+	var length := text.length()
+	var run := 111 if step > 0 else 48   # « o » ou « 0 »
+	var k := 0
+	while k < 64 and length - 1 - k >= start and text.unicode_at(length - 1 - k) == run:
+		k += 1
+	var p := length - 1 - k   # chiffre qui reçoit la retenue
+	if k == 64:
+		p = text.rstrip(char(run)).length() - 1
+		k = length - 1 - p
+	var fill := "0" if step > 0 else "o"
+	if p < start:   # que des « o » : 1 suivi de zéros
+		return text.left(start) + ("1" + fill.repeat(k))
+	var digit := _digit(text, p) + step
+	if digit == 0 and p == start:   # le chiffre de tête disparaît (1000… − 1)
+		return text.left(start) + fill.repeat(k)
+	return text.left(p) + (B25_DIGITS[digit] + fill.repeat(k))
+
+
 ## La différence a − b, résumée : {sign, exact: bool, value: int (valeur exacte quand exact),
 ## digits: chiffres décimaux de |a − b|, log10: log₁₀ |a − b| (0 pour 0)}. Exacte quand
 ## |a − b| < 25^12 ; sinon ordre de grandeur d'après les 12 chiffres base 25 de tête de la
-## différence (erreur relative < 10^−15). Coût : quelques copies et comparaisons natives ; une
-## boucle GDScript ne parcourt les chiffres qu'au-delà du premier chiffre qui diffère.
+## différence (erreur relative < 10^−15), et nombre de chiffres décimaux exact (voir
+## _digits_of_estimate : au ras d'une puissance de dix, comparaison exacte). Coût : quelques copies
+## et comparaisons natives ; une boucle GDScript ne parcourt les chiffres qu'au-delà du premier
+## chiffre qui diffère.
 static func b25_difference(a: String, b: String) -> Dictionary:
 	var short_a := a.length() - (1 if a.begins_with("-") else 0) <= 13
 	var short_b := b.length() - (1 if b.begins_with("-") else 0) <= 13
@@ -312,7 +494,8 @@ static func b25_difference(a: String, b: String) -> Dictionary:
 		# Signes opposés (zéro compté positif) : |a − b| = |a| + |b|, d'après les chiffres de tête alignés.
 		var width := maxi(la, lb)
 		var top := _top_window(a, oa, la, width) + _top_window(b, ob, lb, width)
-		return _approx_difference(-1 if na else 1, log(float(top)) / log(10.0) + (width - 12) * LOG10_25)
+		return _approx_difference(-1 if na else 1, top, width - 12, func() -> String:
+			return _add_magnitudes(a.substr(oa), b.substr(ob)) if width <= EXACT_DIGITS_LIMIT else "")
 	# Même signe : |a − b| = ||a| − |b||, du signe de la comparaison (inversé pour deux négatifs).
 	var order := _cmp_magnitude(a, oa, b, ob)
 	if order == 0:
@@ -332,17 +515,290 @@ static func b25_difference(a: String, b: String) -> Dictionary:
 			i += _borrow_run(x, y, i, length)   # « 1 000… − 0 ooo… » : la valeur reste 1
 	if i >= length:
 		return _exact_difference(value * sign)
-	return _approx_difference(sign, log(float(value)) / log(10.0) + (length - i) * LOG10_25)
+	return _approx_difference(sign, value, length - i, func() -> String:
+		return _sub_magnitudes(x.substr(p), y.substr(p)) if length - p <= EXACT_DIGITS_LIMIT else "")
 
 
-## Nombre de chiffres décimaux de |coordonnée| (1 pour zéro) : exact pour une petite valeur,
-## d'après le logarithme des chiffres de tête au-delà.
+## Empreinte d'une coordonnée canonique : [signe, H₀, H₁], où H_j = Σ t_c · B_j^c mod P_j, t_c étant
+## les tranches de 8 chiffres base 25 de la valeur absolue (t₀ les 8 derniers chiffres, t₁ les 8
+## précédents…), B_j une base fixe et P_j un nombre premier de 31 bits. Fonction de la valeur
+## seule, elle distingue les positions (deux coordonnées qui ne diffèrent que par l'ordre de leurs
+## tranches, ou par des tranches nulles en tête, ont des empreintes différentes) ; deux coordonnées
+## distinctes n'ont la même qu'avec une probabilité de l'ordre de 2^−62. Elle se suit pas à pas
+## sans relire la coordonnée (print_context, print_at : seules la tranche t₀ et la retenue qui la
+## dépasse changent) et vaut, à l'arrivée, celle de la chaîne relue en entier — quel que soit le
+## chemin. Coût pour une grande coordonnée : les chiffres lus 8 par 8 dans des entiers de 64 bits
+## (to_int64_array), ~30 ms à 656 000 chiffres ; les dernières empreintes calculées restent en
+## mémoire (PRINT_CACHE).
+static func b25_print(text: String) -> PackedInt64Array:
+	if b25_fits_int(text):
+		return _print_of_int(b25_to_int(text))
+	if _print_cache.has(text):
+		return _print_cache[text]
+	var negative := text.begins_with("-")
+	var bytes := text.to_ascii_buffer()
+	var start := 1 if negative else 0
+	var head := (bytes.size() - start) % 8
+	var first := 0   # les chiffres de tête qui ne remplissent pas une tranche
+	for i in range(start, start + head):
+		var c := bytes[i]
+		first = first * 25 + (c - 48 if c <= 57 else c - 87)
+	var words := bytes.slice(start + head).to_int64_array()
+	var p0: int = PRINT_P[0]
+	var p1: int = PRINT_P[1]
+	var b0: int = PRINT_B[0]
+	var b1: int = PRINT_B[1]
+	var h0 := first % p0
+	var h1 := first % p1
+	for word in words:
+		# Chiffres d'un octet : '0'-'9' → 0-9, 'a'-'o' (bit 6) → 10-24 ; puis assemblage par paires
+		# (octet 0 = chiffre de poids fort, petit-boutiste) : la valeur de la tranche, < 25^8.
+		var v: int = (word & 0x0F0F0F0F0F0F0F0F) + 9 * ((word >> 6) & 0x0101010101010101)
+		v = (v & 0x00FF00FF00FF00FF) * 25 + ((v >> 8) & 0x00FF00FF00FF00FF)
+		v = (v & 0x0000FFFF0000FFFF) * 625 + ((v >> 16) & 0x0000FFFF0000FFFF)
+		v = (v & 0xFFFFFFFF) * 390625 + (v >> 32)
+		h0 = (h0 * b0 + v % p0) % p0
+		h1 = (h1 * b1 + v % p1) % p1
+	var result := PackedInt64Array([-1 if negative else 1, h0, h1])
+	if _print_cache.size() >= PRINT_CACHE:
+		_print_cache.erase(_print_cache.keys()[0])
+	_print_cache[text] = result
+	return result
+
+
+static func _print_of_int(value: int) -> PackedInt64Array:
+	var magnitude := absi(value) if value != -9223372036854775807 - 1 else 0
+	var chunks := PackedInt64Array()
+	while magnitude > 0:
+		chunks.append(magnitude % PRINT_CHUNK)
+		@warning_ignore("integer_division")
+		magnitude /= PRINT_CHUNK
+	var result := PackedInt64Array([signi(value), 0, 0])
+	for j in 2:
+		var h := 0
+		for c in range(chunks.size() - 1, -1, -1):
+			h = (h * PRINT_B[j] + chunks[c] % PRINT_P[j]) % PRINT_P[j]
+		result[j + 1] = h
+	return result
+
+
+## Ce qu'il faut savoir d'une coordonnée pour l'empreinte de ses voisines (print_at) : sa valeur
+## quand elle tient dans un int ; sinon son empreinte, sa tranche t₀ (8 derniers chiffres) et le
+## nombre de tranches entières de « o » (retenue) et de « 0 » (emprunt) juste au-dessus. Coût : 8
+## chiffres et quelques dizaines de lectures, sauf longue suite de « o » ou de « 0 » (rstrip natif).
+static func print_context(text: String, print: PackedInt64Array) -> Dictionary:
+	if b25_fits_int(text):
+		return {"value": b25_to_int(text)}
+	var length := text.length()
+	var tail := 0
+	for i in range(length - 8, length):
+		tail = tail * 25 + _digit(text, i)
+	return {"sign": print[0], "h": [print[1], print[2]], "tail": tail,
+		"run_o": _chunk_run(text, 111), "run_0": _chunk_run(text, 48)}
+
+
+## Le contexte de la coordonnée + delta (`text`, déjà calculée), d'après celui de la coordonnée :
+## sans débordement de t₀, les tranches au-dessus ne changent pas (aucune relecture) ; sinon, ou
+## pour une petite coordonnée, print_context.
+static func print_context_step(context: Dictionary, delta: int, text: String) -> Dictionary:
+	var print := print_at(context, delta)
+	if context.has("value") or b25_fits_int(text):
+		return print_context(text, print)
+	var t: int = int(context.tail) + delta * int(context.sign)
+	if t < 0 or t >= PRINT_CHUNK:
+		return print_context(text, print)
+	return {"sign": print[0], "h": [print[1], print[2]], "tail": t, "run_o": context.run_o, "run_0": context.run_0}
+
+
+## Tranches entières faites du seul chiffre `code` (« o » ou « 0 ») juste au-dessus de t₀.
+static func _chunk_run(text: String, code: int) -> int:
+	var top := text.length() - 8   # position (exclue) du haut de t₀
+	var start := 1 if text.begins_with("-") else 0
+	var run := 0
+	while run < 64 and top - 1 - run >= start and text.unicode_at(top - 1 - run) == code:
+		run += 1
+	if run == 64:
+		run = top - text.left(top).rstrip(char(code)).length()
+	@warning_ignore("integer_division")
+	return run / 8
+
+
+## L'empreinte de la coordonnée + delta (|delta| < 25^8), d'après le contexte de la coordonnée
+## (print_context) : t₀ change ; une retenue (ou un emprunt) passe aux tranches suivantes, dont les
+## r premières, toutes « oooooooo » (ou « 00000000 »), deviennent 0 (ou 25^8 − 1) et la suivante
+## gagne (ou perd) 1 : ΔH = Δt₀ ∓ (25^8 − 1)·Σ_{c=1..r} B^c ± B^(r+1).
+static func print_at(context: Dictionary, delta: int) -> PackedInt64Array:
+	if context.has("value"):
+		return _print_of_int(int(context.value) + delta)
+	if delta == 0:
+		return PackedInt64Array([context.sign, context.h[0], context.h[1]])
+	var step: int = delta * int(context.sign)   # sur la valeur absolue
+	var t: int = int(context.tail) + step
+	var result := PackedInt64Array([context.sign, 0, 0])
+	for j in 2:
+		var p: int = PRINT_P[j]
+		var change := 0
+		if t >= 0 and t < PRINT_CHUNK:
+			change = posmod(step, p)
+		elif t >= PRINT_CHUNK:
+			var r: int = context.run_o
+			change = posmod(step - PRINT_CHUNK, p)
+			change = (change + p - _mulmod(PRINT_CHUNK_MOD[j] - 1, _geometric(j, r), p) + _powmod(PRINT_B[j], r + 1, p)) % p
+		else:
+			var r: int = context.run_0
+			change = posmod(step + PRINT_CHUNK, p)
+			change = (change + _mulmod(PRINT_CHUNK_MOD[j] - 1, _geometric(j, r), p) + p - _powmod(PRINT_B[j], r + 1, p)) % p
+		result[j + 1] = (int(context.h[j]) + change) % p
+	return result
+
+
+## Σ_{c=1..r} B_j^c mod P_j.
+static func _geometric(j: int, r: int) -> int:
+	var p: int = PRINT_P[j]
+	var b: int = PRINT_B[j]
+	return _mulmod(_mulmod(b, (_powmod(b, r, p) + p - 1) % p, p), PRINT_INV_B1[j], p)
+
+
+static func _mulmod(a: int, b: int, p: int) -> int:
+	return (a % p) * (b % p) % p   # deux facteurs < 2^31 : produit < 2^62
+
+
+static func _powmod(b: int, e: int, p: int) -> int:
+	var result := 1
+	var base := b % p
+	while e > 0:
+		if e & 1:
+			result = result * base % p
+		base = base * base % p
+		e >>= 1
+	return result
+
+
+## Clé d'une galerie, d'après les empreintes de son hexagone et de son niveau : elle ne dépend que
+## des vraies coordonnées. Les titres des dos (BookSpine) et la graine des livres (Gallery) en
+## sont tirés.
+static func gallery_key_of(hexagon_print: PackedInt64Array, level_print: PackedInt64Array) -> String:
+	return print_text(hexagon_print) + "|" + print_text(level_print)
+
+
+## L'empreinte d'une coordonnée écrite pour une clé : « signe.H₀.H₁ » (H en hexadécimal).
+static func print_text(print: PackedInt64Array) -> String:
+	return "%d.%x.%x" % [print[0], print[1], print[2]]
+
+
+## Clé de la galerie (hexagone, niveau) : int ou chaînes base 25 de toute taille.
+static func gallery_key(hexagon: Variant, level: Variant) -> String:
+	return gallery_key_of(b25_print(b25(hexagon)), b25_print(b25(level)))
+
+
+## Nombre de chiffres décimaux de |coordonnée| (1 pour zéro) : calcul en int pour une petite
+## valeur ; au-delà, d'après le logarithme des chiffres de tête, et au ras d'une puissance de dix
+## par comparaison exacte (_digits_of_estimate).
 static func b25_decimal_digits(text: String) -> int:
 	if b25_fits_int(text):
 		return str(absi(b25_to_int(text))).length()
 	var start := 1 if text.begins_with("-") else 0
 	var length := text.length() - start
-	return int(floor(log(float(_top_window(text, start, length, length))) / log(10.0) + (length - 12) * LOG10_25)) + 1
+	var top := _top_window(text, start, length, length)
+	return _digits_of_estimate(top, length - 12, func() -> String:
+		return text.substr(start) if length <= EXACT_DIGITS_LIMIT else "")
+
+
+## Le nombre de chiffres décimaux d'un nombre X ≈ top·25^m (top : ses chiffres base 25 de tête, au
+## moins 25^11 ; X à moins de 2·25^−11 près en relatif). log₁₀ X se calcule en deux parts (entière,
+## et fraction précise à ~10^−14 : m·log₁₀ 25 avec log₁₀ 25 coupé en une part haute de 31 bits,
+## exacte en produit, et une part basse). Hors du voisinage d'une puissance de dix, le compte en
+## découle ; dans ce voisinage (POW10_MARGIN), il se tranche exactement : `exact` rend les chiffres
+## base 25 de X (ou "" quand X a plus de EXACT_DIGITS_LIMIT chiffres : le compte reste celui du
+## logarithme, juste sauf à moins de 10^−9 près en relatif d'une puissance de dix).
+static func _digits_of_estimate(top: int, m: int, exact: Callable) -> int:
+	var parts := _log10_parts(top, m)
+	var whole: int = parts[0]
+	var frac: float = parts[1]
+	if frac > POW10_MARGIN and frac < 1.0 - POW10_MARGIN:
+		return whole + 1
+	var power := whole if frac <= 0.5 else whole + 1   # la puissance de dix la plus proche
+	var x: String = exact.call()
+	if x.is_empty():
+		return whole + 1
+	return power + 1 if _at_least_pow10(x.lstrip("0"), power) else power
+
+
+## [partie entière, partie fractionnaire] de log₁₀(top·25^m), top > 0.
+static func _log10_parts(top: int, m: int) -> Array:
+	var high := m * LOG10_25_HI            # exact : m < 2^21, LOG10_25_HI sur 31 bits
+	var whole := floori(high)
+	var frac := (high - whole) + m * LOG10_25_LO + log(float(top)) / log(10.0)
+	var carry := floori(frac)
+	return [whole + carry, frac - carry]
+
+
+## Vrai quand le nombre de chiffres base 25 `x` (sans zéro de tête) vaut au moins 10^k, k ≥ 0.
+## 10^k = c·2^k·25^q, q = ⌊k/2⌋, c = 5 si k est impair, 1 sinon : x ≥ 10^k si et seulement si
+## ses chiffres au-dessus des q derniers (⌊x / 25^q⌋) font au moins c·2^k.
+static func _at_least_pow10(x: String, k: int) -> bool:
+	@warning_ignore("integer_division")
+	var q := k / 2
+	if x.length() <= q:
+		return false
+	var high := x.left(x.length() - q)
+	var bound := _pow2_b25(k, 5 if k % 2 == 1 else 1)
+	if high.length() != bound.length():
+		return high.length() > bound.length()
+	return high >= bound   # même longueur : l'ordre des codes ASCII est celui des chiffres
+
+
+## c·2^k en base 25 (chaîne canonique), par tranches de 25^5 multipliées par 2^30 à la fois.
+static func _pow2_b25(k: int, c: int) -> String:
+	const LIMB := 9765625   # 25^5
+	var limbs := PackedInt64Array([c])
+	var left := k
+	while left > 0:
+		var shift := mini(left, 30)
+		left -= shift
+		var carry := 0
+		for i in limbs.size():
+			var v := (limbs[i] << shift) + carry
+			limbs[i] = v % LIMB
+			@warning_ignore("integer_division")
+			carry = v / LIMB
+		while carry > 0:
+			limbs.append(carry % LIMB)
+			@warning_ignore("integer_division")
+			carry = carry / LIMB
+	var text := b25_from_int(limbs[limbs.size() - 1])
+	for i in range(limbs.size() - 2, -1, -1):
+		text += b25_from_int(limbs[i]).lpad(5, "0")
+	return text
+
+
+## |x| + |y| (chiffres base 25 sans signe), en chiffres base 25.
+static func _add_magnitudes(x: String, y: String) -> String:
+	var length := maxi(x.length(), y.length())
+	var a := x.lpad(length, "0")
+	var b := y.lpad(length, "0")
+	var out := PackedByteArray()
+	out.resize(length + 1)
+	var carry := 0
+	for i in range(length - 1, -1, -1):
+		var d := _digit(a, i) + _digit(b, i) + carry
+		carry = 1 if d >= 25 else 0
+		out[i + 1] = B25_DIGITS.unicode_at(d - 25 * carry)
+	out[0] = B25_DIGITS.unicode_at(carry)
+	return out.get_string_from_ascii().lstrip("0")
+
+
+## x − y pour x > y (chiffres base 25 sans signe, même longueur), en chiffres base 25.
+static func _sub_magnitudes(x: String, y: String) -> String:
+	var length := x.length()
+	var out := PackedByteArray()
+	out.resize(length)
+	var borrow := 0
+	for i in range(length - 1, -1, -1):
+		var d := _digit(x, i) - _digit(y, i) - borrow
+		borrow = 1 if d < 0 else 0
+		out[i] = B25_DIGITS.unicode_at(d + 25 * borrow)
+	return out.get_string_from_ascii().lstrip("0")
 
 
 ## Le résumé d'une différence connue en int : exacte sous 25^12, en ordre de grandeur au-delà
@@ -355,8 +811,12 @@ static func _exact_difference(value: int) -> Dictionary:
 	return {"sign": signi(value), "exact": true, "value": value, "digits": digits, "log10": log10}
 
 
-static func _approx_difference(sign: int, log10: float) -> Dictionary:
-	return {"sign": sign, "exact": false, "value": 0, "digits": int(floor(log10)) + 1, "log10": log10}
+## Le résumé d'une grande différence X ≈ top·25^m (voir _digits_of_estimate ; `exact` rend les
+## chiffres base 25 de X, ou "" s'ils sont trop nombreux).
+static func _approx_difference(sign: int, top: int, m: int, exact: Callable) -> Dictionary:
+	var parts := _log10_parts(top, m)
+	return {"sign": sign, "exact": false, "value": 0, "digits": _digits_of_estimate(top, m, exact),
+		"log10": parts[0] + parts[1]}
 
 
 ## Valeur du chiffre i de la chaîne.
@@ -503,21 +963,18 @@ static func gallery_image_books(hexagon: Variant, level: Variant) -> Array:
 	return response.get("is_image", [])
 
 
-## Le titre inscrit sur le dos du livre : quelques lettres tirées d'un condensat SHA-256 de son adresse.
+## Le titre inscrit sur le dos du livre, tel qu'il s'affiche : quelques lettres tirées d'un
+## condensat SHA-256 de son adresse (BookSpine.title, clé de galerie gallery_key). Hexagone et
+## niveau : int ou chaînes base 25 de toute taille.
 static func title(hexagon: Variant, level: Variant, wall: int, shelf: int, book: int) -> String:
-	if hexagon is int and level is int:
-		return BookSpineScript.display_title(BookSpineScript.title(hexagon, level, wall, shelf, book))
-	return title_at(address(hexagon, level, wall, shelf, book))
+	return BookSpineScript.display_title(BookSpineScript.title(gallery_key(hexagon, level), wall, shelf, book))
 
 
-## Le titre d'un livre désigné par son adresse. Coordonnées qui tiennent dans un int : la clé
-## décimale de BookSpine.title (celle des dos des galeries) ; au-delà, BookSpine.title_at sur
-## les chaînes base 25.
+## Le titre d'un livre désigné par son adresse (la page est ignorée) : celui de son dos dans la
+## galerie, quelle que soit la taille des coordonnées.
 static func title_at(target: Dictionary) -> String:
 	var a := book_of(target)
-	if b25_fits_int(a.hexagon) and b25_fits_int(a.level):
-		return BookSpineScript.display_title(BookSpineScript.title(b25_to_int(a.hexagon), b25_to_int(a.level), a.wall, a.shelf, a.book))
-	return BookSpineScript.display_title(BookSpineScript.title_at(a))
+	return BookSpineScript.display_title(BookSpineScript.title(gallery_key(a.hexagon, a.level), a.wall, a.shelf, a.book))
 
 
 static func _page_of(target: Dictionary, page: int) -> int:
@@ -557,6 +1014,7 @@ static func search_image(source: Image) -> Dictionary:
 
 static func _found(response: Dictionary) -> Dictionary:
 	if response.has("error") or not response.get("address") is Dictionary:
+		last_search = {}
 		return {}
 	var found := book_of(response.address)
 	last_search = response.duplicate()
@@ -655,20 +1113,28 @@ static func search_image_file(path: String) -> Dictionary:
 
 # --- Service --------------------------------------------------------------------------------
 
-## Arrête le service (appelé à la fermeture du jeu par l'autoload BabelService).
+## Arrête le service, et celui d'arrière-plan (appelé à la fermeture du jeu par l'autoload
+## BabelService). Toute la famille de processus du service est arrêtée (voir _kill_tree).
 static func shutdown() -> void:
+	_stop_launcher()
 	if _pid > 0:
-		OS.kill(_pid)
+		_kill_tree(_pid)
 	_pid = -1
 	_stdio = null
 	_stderr = null
 	_keys.clear()
+	_bg_stop()
 
 
-## Oublie un échec de lancement : le prochain appel relance la recherche de l'interpréteur.
+## Oublie tout échec de lancement (Python absent, délai de lancement) : le prochain appel relance
+## la recherche de l'interpréteur.
 static func restart() -> void:
 	shutdown()
 	_unavailable = false
+	_unavailable_message = ""
+	_start_failure = ""
+	_retry_at_msec = 0
+	_start_backoff_ms = 0
 
 
 ## Une requête sur un livre : par sa clé quand le service en a rendu une, sinon par son adresse ;
@@ -700,18 +1166,21 @@ static func _remember(book: Dictionary, key: String) -> void:
 	_keys[book] = key
 
 
+
+
 ## Une requête au service, sa réponse ; {"error": …} quand le service manque, refuse ou ne
-## répond pas dans le délai (`timeout`, en ms ; timeout_ms par défaut).
+## répond pas dans le délai (`timeout`, en ms ; timeout_ms par défaut). Fil principal seulement
+## (le fil d'arrière-plan a son propre processus : submit).
 static func _request(request: Dictionary, timeout := -1) -> Dictionary:
 	if _stdio == null and not _start():
-		return {"error": last_error, "code": "unavailable"}
+		return {"error": last_error, "code": _start_code}
 	var limit := timeout if timeout > 0 else timeout_ms
 	var watchdog := Watchdog.new()
 	watchdog.start(_pid, limit)
-	var response := _exchange(request)
+	var response := _exchange_on(_stdio, request)
 	if watchdog.finish():
 		_pid = -1   # déjà arrêté par le chien de garde
-		shutdown()
+		shutdown_main()
 		last_error = "le service Python n'a pas répondu en %.1f s à la requête « %s » : arrêté, il sera relancé à la prochaine requête" % [limit / 1000.0, request.get("op")]
 		push_error(last_error)
 		return {"error": last_error, "code": "timeout"}
@@ -731,6 +1200,16 @@ static func _request(request: Dictionary, timeout := -1) -> Dictionary:
 	return response
 
 
+## Arrête le service du fil principal seulement (le service d'arrière-plan continue).
+static func shutdown_main() -> void:
+	if _pid > 0:
+		_kill_tree(_pid)
+	_pid = -1
+	_stdio = null
+	_stderr = null
+	_keys.clear()
+
+
 ## Arrête le service et rend les dernières lignes de son erreur standard (une trace Python,
 ## par exemple), jointes par « | ». Le processus est attendu une seconde au plus, puis tué :
 ## une fois le processus fini, la lecture du tube atteint sa fin au lieu d'attendre.
@@ -741,10 +1220,10 @@ static func _stop_and_read_stderr() -> String:
 	while pid > 0 and OS.is_process_running(pid) and waited < STDERR_WAIT_MS:
 		OS.delay_msec(10)
 		waited += 10
-	if pid > 0 and OS.is_process_running(pid):
-		OS.kill(pid)
+	if pid > 0:
+		_kill_tree(pid)
 	_pid = -1
-	shutdown()
+	shutdown_main()
 	if err == null:
 		return ""
 	var lines := PackedStringArray()
@@ -757,44 +1236,141 @@ static func _stop_and_read_stderr() -> String:
 	return " | ".join(lines.slice(-STDERR_TAIL_LINES))
 
 
-static func _exchange(request: Dictionary) -> Dictionary:
-	_stdio.store_line(JSON.stringify(request))
-	_stdio.flush()
-	var line := _stdio.get_line()
+## Une requête (Dictionary, ou ligne JSON déjà écrite) et sa réponse, sur le tube `stdio`.
+static func _exchange_on(stdio: FileAccess, request: Variant) -> Dictionary:
+	stdio.store_line(request if request is String else JSON.stringify(request))
+	stdio.flush()
+	var line := stdio.get_line()
 	if line.is_empty():
 		return {}
 	var parsed: Variant = JSON.parse_string(line)
 	return parsed if parsed is Dictionary else {"error": "réponse illisible : %s" % line.left(200)}
 
 
+## Lance le service du fil principal. Trois issues :
+## - Python absent (aucune commande ne se lance, ou aucune ne répond au protocole) : échec durable,
+##   « Python introuvable », jusqu'à restart() ;
+## - lancement trop lent (le ping n'a pas répondu en start_timeout_ms : machine chargée, antivirus,
+##   lanceur qui attend…) : échec passager, la requête suivante réessaie après un délai
+##   (start_retry_ms, doublé à chaque nouvel échec jusqu'à START_RETRY_MAX_MS) ;
+## - succès : les délais repartent de zéro.
 static func _start() -> bool:
 	if _unavailable:
+		last_error = _unavailable_message
+		_start_code = "unavailable"
 		return false
-	var script := ProjectSettings.globalize_path(SCRIPT_PATH)
+	var now := Time.get_ticks_msec()
+	if now < _retry_at_msec:
+		last_error = "%s ; nouvel essai dans %.0f s" % [_start_failure, ceilf((_retry_at_msec - now) / 1000.0)]
+		_start_code = "start_timeout"
+		return false
+	# Le lancement (fork, interpréteur, ping) se fait sur un fil ; le fil principal l'attend au plus
+	# main_start_wait_ms, puis rend la main (« se lance ») : le lancement continue, la requête
+	# suivante le retrouve.
+	if _launcher == null:
+		_launch_done = false
+		_launch_result = {}
+		_launcher_pid = -1
+		var commands := _launch_commands()
+		var script := ProjectSettings.globalize_path(SCRIPT_PATH)
+		var timeout := start_timeout_ms
+		_launcher = Thread.new()
+		_launcher.start(func() -> void:
+			var result := BookTextScript._launch(commands, script, timeout, BookTextScript._publish_launcher_pid)
+			BookTextScript._launch_mutex.lock()
+			BookTextScript._launch_result = result
+			BookTextScript._launch_done = true
+			BookTextScript._launch_mutex.unlock())
+	var deadline := Time.get_ticks_msec() + main_start_wait_ms
+	while not _launched() and Time.get_ticks_msec() < deadline:
+		OS.delay_msec(2)
+	if not _launched():
+		last_error = "le service Python se lance encore (plus de %.1f s) : nouvel essai à la prochaine requête" % (main_start_wait_ms / 1000.0)
+		_start_code = "starting"
+		return false
+	_launcher.wait_to_finish()
+	_launcher = null
+	var launched := _launch_result
+	if launched.has("error"):
+		_start_code = launched.code
+		if launched.code == "start_timeout":
+			_start_backoff_ms = clampi(_start_backoff_ms * 2, start_retry_ms, maxi(start_retry_ms, START_RETRY_MAX_MS))
+			_retry_at_msec = Time.get_ticks_msec() + _start_backoff_ms
+			_start_failure = launched.error
+			last_error = "%s : nouvel essai à la prochaine requête, dans %.1f s au plus tôt" % [launched.error, _start_backoff_ms / 1000.0]
+		else:
+			_unavailable = true
+			_unavailable_message = launched.error
+			last_error = launched.error
+		push_error(last_error)
+		return false
+	_stdio = launched.stdio
+	_stderr = launched.stderr
+	_pid = launched.pid
+	_start_backoff_ms = 0
+	_start_failure = ""
+	_retry_at_msec = 0
+	last_error = ""
+	return true
+
+
+static func _launched() -> bool:
+	_launch_mutex.lock()
+	var done := _launch_done
+	_launch_mutex.unlock()
+	return done
+
+
+static func _publish_launcher_pid(pid: int) -> void:
+	_launch_mutex.lock()
+	_launcher_pid = pid
+	_launch_mutex.unlock()
+
+
+## Arrête un lancement en cours (shutdown) : son processus et sa famille, puis le fil.
+static func _stop_launcher() -> void:
+	if _launcher == null:
+		return
+	_launch_mutex.lock()
+	var pid := _launcher_pid
+	_launch_mutex.unlock()
+	_kill_tree(pid)   # le ping en attente finit aussitôt
+	_launcher.wait_to_finish()
+	_launcher = null
+	var result := _launch_result
+	if result.has("pid") and OS.is_process_running(int(result.pid)):
+		_kill_tree(int(result.pid))
+
+
+## Lance `python … babel.py serve` avec la première commande qui répond au ping :
+## {stdio, stderr, pid}, ou {error, code} avec code « start_timeout » (une commande s'est lancée
+## mais n'a pas répondu dans `timeout` ms : réessayable, les suivantes ne sont pas essayées) ou
+## « unavailable » (aucune ne convient). `on_spawn(pid)`, facultatif, reçoit le processus dès
+## son lancement (le fil d'arrière-plan le publie pour qu'un arrêt l'atteigne pendant le ping).
+## Sans état partagé : sert au fil principal comme au fil d'arrière-plan.
+static func _launch(commands: Array, script: String, timeout: int, on_spawn := Callable()) -> Dictionary:
 	var tried := PackedStringArray()
-	for command in _interpreters():
+	for command: Array in commands:
 		var args := PackedStringArray(command.slice(1))
 		args.append_array(["-X", "utf8", "-u", script, "serve"])
 		tried.append(" ".join(command))
 		var process := OS.execute_with_pipe(command[0], args)
 		if process.is_empty():
 			continue
-		_stdio = process.stdio
-		_stderr = process.stderr
-		_pid = process.pid
+		if on_spawn.is_valid():
+			on_spawn.call(process.pid)
 		var watchdog := Watchdog.new()
-		watchdog.start(_pid, start_timeout_ms)
-		var answer := _exchange({"op": "ping"})
-		if watchdog.finish():
-			_pid = -1
-		if answer.get("protocol") == PROTOCOL:
-			last_error = ""
-			return true
-		shutdown()
-	_unavailable = true
-	last_error = "Python 3.10 ou plus est introuvable (essayé : %s). Installer Python, ou indiquer la commande dans le réglage de projet %s." % [", ".join(tried), PYTHON_SETTING]
-	push_error(last_error)
-	return false
+		watchdog.start(process.pid, timeout)
+		var answer := _exchange_on(process.stdio, {"op": "ping"})
+		var fired := watchdog.finish()
+		if not fired and answer.get("protocol") == PROTOCOL:
+			return process
+		_kill_tree(process.pid)
+		if on_spawn.is_valid():
+			on_spawn.call(-1)
+		if fired:
+			return {"code": "start_timeout", "error": "le service Python (« %s ») ne s'est pas lancé en %.1f s" % [" ".join(command), timeout / 1000.0]}
+	return {"code": "unavailable", "error": "Python 3.10 ou plus est introuvable (essayé : %s). Installer Python, ou indiquer la commande dans le réglage de projet %s." % [", ".join(tried), PYTHON_SETTING]}
 
 
 ## Les commandes candidates, chacune en tableau [exécutable, arguments…].
@@ -805,6 +1381,133 @@ static func _interpreters() -> Array:
 	if OS.get_name() == "Windows":
 		return [["py", "-3"], ["python"], ["python3"]]
 	return [["python3"]]
+
+
+## Les commandes à lancer : celles de _interpreters, le lanceur Windows `py` remplacé par le
+## python.exe qu'il choisit (direct_command) : le service n'a alors qu'un processus.
+static func _launch_commands() -> Array:
+	var commands := []
+	for command: Array in _interpreters():
+		commands.append(direct_command(command) if OS.get_name() == "Windows" else command)
+	return commands
+
+
+## Sous Windows, `py -3` lance python.exe dans un second processus : la commande devient le
+## chemin de cet interpréteur (sys.executable, demandé une fois au lanceur, sous un délai de
+## RESOLVE_TIMEOUT_MS), suivi des arguments qui ne sont pas des sélecteurs de version du lanceur
+## (-3, -3.12, -V:3.12…). Toute autre commande, ou un lanceur qui ne répond pas, reste telle quelle.
+static func direct_command(command: Array) -> Array:
+	if command.is_empty() or str(command[0]).get_file().get_basename().to_lower() != "py":
+		return command
+	var key := " ".join(command)
+	if _direct_commands.has(key):
+		return _direct_commands[key]
+	var resolved := command
+	var args := PackedStringArray(command.slice(1))
+	args.append_array(["-c", "import sys; print(sys.executable)"])
+	var process := OS.execute_with_pipe(command[0], args)
+	if not process.is_empty():
+		var watchdog := Watchdog.new()
+		watchdog.start(process.pid, RESOLVE_TIMEOUT_MS)
+		var path: String = process.stdio.get_line().strip_edges()
+		watchdog.finish()
+		if not path.is_empty() and FileAccess.file_exists(path):
+			resolved = [path]
+			for arg: String in command.slice(1):
+				if not launcher_selector(arg):
+					resolved.append(arg)
+	_direct_commands[key] = resolved
+	return resolved
+
+
+## Vrai pour un argument propre au lanceur `py` (choix de version : -3, -3.12, -3-64, -V:3.12).
+static func launcher_selector(arg: String) -> bool:
+	return arg.begins_with("-V:") or RegEx.create_from_string("^-[23](\\.[0-9]+)?(-(32|64))?$").search(arg) != null
+
+
+## Arrête un processus et tous ses descendants : un interpréteur lancé par un lanceur (`py -3`
+## sous Windows, `uv run` ailleurs) est un enfant du processus lancé et tient le même tube ; tant
+## qu'il vit, la lecture bloquée ne finit pas. Windows : `taskkill /T /F` (l'arbre entier). Linux :
+## les descendants relevés dans /proc (fichiers children, à défaut le parent de chaque processus),
+## macOS et autres : `pgrep -P` ; tous relevés avant le premier arrêt (un orphelin change de
+## parent), puis le processus et ses descendants arrêtés (SIGKILL). Rien n'attend sans borne : taskkill
+## se lance sans être attendu (OS.create_process), pgrep sous un chien de garde. Un processus déjà
+## fini (et attendu par le moteur) n'est pas visé : son numéro peut désigner un autre processus.
+static func _kill_tree(pid: int) -> void:
+	if pid <= 0 or not OS.is_process_running(pid):
+		return
+	if OS.get_name() == "Windows":
+		# /T suit les liens de parenté : le lanceur doit vivre encore quand taskkill les relève.
+		if OS.create_process("taskkill", ["/T", "/F", "/PID", str(pid)]) < 0:
+			OS.kill(pid)
+		return
+	var family := descendants(pid)
+	OS.kill(pid)
+	for child in family:
+		OS.kill(child)
+
+
+## Les descendants d'un processus (enfants, petits-enfants…), au plus KILL_TREE_LIMIT.
+static func descendants(pid: int) -> PackedInt64Array:
+	var found := PackedInt64Array()
+	var frontier: Array[int] = [pid]
+	while not frontier.is_empty() and found.size() < KILL_TREE_LIMIT:
+		for child in _children(frontier.pop_back()):
+			if child != pid and not found.has(child):
+				found.append(child)
+				frontier.append(child)
+	return found
+
+
+static func _children(pid: int) -> PackedInt64Array:
+	var children := PackedInt64Array()
+	var tasks := "/proc/%d/task" % pid
+	if DirAccess.dir_exists_absolute("/proc/self"):
+		var listed := false
+		if DirAccess.dir_exists_absolute(tasks):
+			for task in DirAccess.get_directories_at(tasks):
+				var path := "%s/%s/children" % [tasks, task]
+				if not FileAccess.file_exists(path):
+					continue
+				listed = true
+				for word in _read_proc(path).split(" ", false):
+					children.append(int(word))
+		if not listed:   # noyau sans fichiers children : le parent de chaque processus
+			for entry in DirAccess.get_directories_at("/proc"):
+				if entry.is_valid_int():
+					var stat := _read_proc("/proc/%s/stat" % entry)
+					var fields := stat.substr(stat.rfind(")") + 2).split(" ")
+					if fields.size() > 1 and int(fields[1]) == pid:
+						children.append(int(entry))
+		return children
+	var process := OS.execute_with_pipe("pgrep", ["-P", str(pid)])
+	if process.is_empty():
+		return children
+	var watchdog := Watchdog.new(Watchdog.POLL_USEC, false)   # pgrep seul, sans sa famille
+	watchdog.start(process.pid, PGREP_TIMEOUT_MS)
+	var pipe: FileAccess = process.stdio
+	while true:
+		var line := pipe.get_line().strip_edges()
+		if line.is_empty() and (pipe.eof_reached() or pipe.get_error() != OK):
+			break
+		if line.is_valid_int():
+			children.append(int(line))
+	watchdog.finish()
+	return children
+
+
+## Contenu d'un fichier de /proc (longueur annoncée nulle : lu ligne à ligne).
+static func _read_proc(path: String) -> String:
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		return ""
+	var text := ""
+	while not file.eof_reached():
+		var line := file.get_line()
+		text += line + " "
+		if text.length() > 65536:
+			break
+	return text.strip_edges()
 
 
 ## Découpe une commande aux espaces, en gardant entier ce qui est entre guillemets.
@@ -824,6 +1527,202 @@ static func _split_command(command: String) -> Array:
 	if not current.is_empty():
 		parts.append(current)
 	return parts
+
+
+# --- Service d'arrière-plan ---------------------------------------------------------------------
+# Un second processus `babel.py serve`, propre à un fil : le fil principal n'en attend jamais la
+# réponse. Il sert aux calculs qui ne doivent pas coûter une image (genres des livres d'une galerie
+# pour les titres des dos, résumé d'une coordonnée pour l'adresse affichée). submit() met une
+# requête en file et rend un ticket ; take(ticket) rend la réponse une fois arrivée (null avant).
+# Une requête peut être un Callable qui rend la requête : il s'appelle sur le fil (une coordonnée
+# de 656 000 chiffres s'y calcule et s'y sérialise, hors du fil principal). Le fil a ses propres
+# délais (chien de garde, relance après un lancement trop lent) ; shutdown() arrête son processus
+# (la lecture en cours finit aussitôt) et attend le fil ; les requêtes encore en file reçoivent
+# une erreur de code « stopped ».
+
+## Met une requête (Dictionary, ou Callable sans argument qui la rend, ou rend sa ligne JSON) en file pour le service
+## d'arrière-plan ; rend son ticket.
+## `after(réponse) -> Dictionary`, facultatif, s'appelle sur le fil avec la réponse (erreurs comprises)
+## et rend ce que take() rendra : un calcul qui ne doit pas non plus coûter au fil principal.
+static func submit(request: Variant, timeout := -1, after := Callable()) -> int:
+	b25_valid("0")   # expressions régulières créées ici, sur le fil principal
+	if _bg_thread == null:
+		_bg_commands = _background_commands(_launch_commands())
+		_bg_script = ProjectSettings.globalize_path(SCRIPT_PATH)
+		_bg_start_timeout = start_timeout_ms
+		_bg_timeout = timeout_ms
+		_bg_quit = false
+		_bg_thread = Thread.new()
+		_bg_thread.start(_bg_loop, Thread.PRIORITY_LOW)
+	_bg_mutex.lock()
+	_bg_next += 1
+	var ticket := _bg_next
+	_bg_jobs.append([ticket, request, timeout, after])
+	_bg_mutex.unlock()
+	_bg_semaphore.post()
+	return ticket
+
+
+## Lance le service d'arrière-plan s'il ne tourne pas encore (une requête « ping » dont la réponse
+## est jetée) : son lancement (un fork du moteur) a lieu tout de suite plutôt qu'au milieu d'un pas.
+static func warm_up() -> void:
+	if _bg_thread == null:
+		var ticket := submit({"op": "ping"})
+		_bg_mutex.lock()
+		_bg_cancelled[ticket] = true   # la requête part, sa réponse est jetée
+		_bg_mutex.unlock()
+
+
+## La réponse d'un ticket (retirée de la mémoire), ou null tant qu'elle n'est pas arrivée.
+static func take(ticket: int) -> Variant:
+	_bg_mutex.lock()
+	var response: Variant = _bg_results.get(ticket)
+	_bg_results.erase(ticket)
+	_bg_mutex.unlock()
+	return response
+
+
+## Oublie un ticket : retiré de la file s'il y attend, sa réponse jetée si elle arrive.
+static func cancel(ticket: int) -> void:
+	_bg_mutex.lock()
+	for i in range(_bg_jobs.size() - 1, -1, -1):
+		if _bg_jobs[i][0] == ticket:
+			_bg_jobs.remove_at(i)
+	if not _bg_results.erase(ticket):
+		_bg_cancelled[ticket] = true
+	_bg_mutex.unlock()
+
+
+## Requêtes en file ou en cours sur le fil d'arrière-plan.
+static func pending() -> int:
+	_bg_mutex.lock()
+	var count := _bg_jobs.size() + _bg_busy
+	_bg_mutex.unlock()
+	return count
+
+
+## Les genres des 640 livres de la galerie (hexagone, niveau) = (hexagon_base + dh, level_base +
+## dl), demandés au service d'arrière-plan (forme « gallery » de is_image_book) : rend un ticket ;
+## la réponse porte « is_image » (640 valeurs) ou « error ». Les coordonnées (base 25, toute
+## taille) se calculent sur le fil.
+static func submit_gallery_flags(hexagon_base: String, dh: int, level_base: String, dl: int, after := Callable()) -> int:
+	return submit(BookTextScript._gallery_flags_line.bind(hexagon_base, dh, level_base, dl), -1, after)
+
+
+## La ligne de la requête des genres d'une galerie (sur le fil d'arrière-plan) : écrite telle
+## quelle, les coordonnées n'ayant que des chiffres 0-9, a-o et « - », rien à échapper.
+static func _gallery_flags_line(hexagon_base: String, dh: int, level_base: String, dl: int) -> String:
+	return '{"op":"is_image_book","gallery":{"hexagon":"' + b25_add_small(hexagon_base, dh) \
+		+ '","level":"' + b25_add_small(level_base, dl) + '"}}'
+
+
+## Les commandes du service d'arrière-plan : hors de Windows, chacune d'abord précédée de `nice`
+## (priorité basse : son calcul ne prend pas le pas sur le jeu ; `nice` remplace son processus
+## par l'interpréteur, même PID), puis telle quelle si `nice` manque.
+static func _background_commands(commands: Array) -> Array:
+	if OS.get_name() == "Windows":
+		return commands
+	var result := []
+	for command: Array in commands:
+		result.append(["nice", "-n", str(BACKGROUND_NICENESS)] + command)
+	return result + commands
+
+
+static func _bg_stop() -> void:
+	if _bg_thread == null:
+		return
+	_bg_mutex.lock()
+	_bg_quit = true
+	var pid := _bg_pid
+	for job: Array in _bg_jobs:
+		_bg_store(job[0], {"error": "service d'arrière-plan arrêté", "code": "stopped"})
+	_bg_jobs.clear()
+	_bg_mutex.unlock()
+	_kill_tree(pid)   # la lecture en cours (s'il y en a une) finit aussitôt
+	_bg_semaphore.post()
+	_bg_thread.wait_to_finish()
+	_bg_thread = null
+	_bg_pid = -1
+	_bg_busy = 0
+	_bg_semaphore = Semaphore.new()
+
+
+## Range une réponse (mutex tenu).
+static func _bg_store(ticket: int, response: Dictionary) -> void:
+	if _bg_cancelled.erase(ticket):
+		return
+	_bg_results[ticket] = response
+
+
+static func _bg_publish_pid(pid: int) -> void:
+	_bg_mutex.lock()
+	_bg_pid = pid
+	var quitting := _bg_quit
+	_bg_mutex.unlock()
+	if quitting and pid > 0:
+		_kill_tree(pid)
+
+
+## Le fil d'arrière-plan : une requête après l'autre, sur son propre processus.
+static func _bg_loop() -> void:
+	var stdio: FileAccess = null
+	var pid := -1
+	var retry_at := 0
+	var backoff := 0
+	var failure := {}
+	while true:
+		_bg_semaphore.wait()
+		_bg_mutex.lock()
+		var quit := _bg_quit
+		var job: Array = [] if quit or _bg_jobs.is_empty() else _bg_jobs.pop_front()
+		_bg_busy = 0 if job.is_empty() else 1
+		_bg_mutex.unlock()
+		if quit:
+			break
+		if job.is_empty():
+			continue
+		var response := {}
+		if stdio == null:
+			if failure.get("code") == "unavailable":
+				response = failure
+			elif Time.get_ticks_msec() < retry_at:
+				response = failure
+			else:
+				var launched := _launch(_bg_commands, _bg_script, _bg_start_timeout, _bg_publish_pid)
+				if launched.has("error"):
+					failure = launched
+					if launched.code == "start_timeout":
+						backoff = clampi(backoff * 2, start_retry_ms, maxi(start_retry_ms, START_RETRY_MAX_MS))
+						retry_at = Time.get_ticks_msec() + backoff
+					response = failure
+				else:
+					stdio = launched.stdio
+					pid = launched.pid
+					backoff = 0
+					failure = {}
+		if response.is_empty():
+			var request: Variant = job[1].call() if job[1] is Callable else job[1]
+			var limit: int = job[2] if job[2] > 0 else _bg_timeout
+			var watchdog := Watchdog.new(BACKGROUND_POLL_USEC)
+			watchdog.start(pid, limit)
+			response = _exchange_on(stdio, request)
+			var fired := watchdog.finish()
+			if fired or response.is_empty():
+				if not fired:   # le chien de garde l'a déjà arrêté
+					_kill_tree(pid)
+				stdio = null
+				pid = -1
+				_bg_publish_pid(-1)
+				response = {"error": "le service d'arrière-plan n'a pas répondu en %.1f s" % (limit / 1000.0), "code": "timeout"} if fired \
+					else {"error": "le service d'arrière-plan s'est arrêté pendant la requête", "code": "stopped"}
+		if job[3].is_valid():
+			response = job[3].call(response)
+		_bg_mutex.lock()
+		_bg_store(job[0], response)
+		_bg_busy = 0
+		_bg_mutex.unlock()
+	if pid > 0:
+		_kill_tree(pid)
 
 
 ## La palette du service en octets RVB (25 × 3), chargée une fois.
@@ -857,8 +1756,8 @@ static func _error_lines(message: String) -> PackedStringArray:
 
 
 ## Chien de garde d'une requête : un fil qui arrête le processus du service si la requête n'est
-## pas finie à l'échéance. Arrêter le processus ferme ses tubes : l'écriture ou la lecture
-## bloquée du fil principal se termine aussitôt (fin de fichier).
+## pas finie à l'échéance. Arrêter le processus et ses descendants ferme ses tubes : l'écriture
+## ou la lecture bloquée du fil qui attend se termine aussitôt (fin de fichier).
 class Watchdog:
 	extends RefCounted
 
@@ -871,6 +1770,14 @@ class Watchdog:
 	var _fired := false
 	var _pid := -1
 	var _deadline := 0
+	var _poll_usec := POLL_USEC
+	var _tree := true
+
+	## `poll_usec` : période de surveillance (plus longue pour le service d'arrière-plan, que rien
+	## n'attend : moins de réveils) ; `tree` : arrêter aussi les descendants (_kill_tree).
+	func _init(poll_usec := POLL_USEC, tree := true) -> void:
+		_poll_usec = poll_usec
+		_tree = tree
 
 	func start(pid: int, timeout_ms: int) -> void:
 		_pid = pid
@@ -895,8 +1802,11 @@ class Watchdog:
 			var fire := _fired
 			_mutex.unlock()
 			if fire:
-				OS.kill(_pid)
+				if _tree:
+					BookTextScript._kill_tree(_pid)   # le processus et ses descendants (lanceur)
+				elif OS.is_process_running(_pid):
+					OS.kill(_pid)
 				return
 			if done:
 				return
-			OS.delay_usec(POLL_USEC)
+			OS.delay_usec(_poll_usec)

@@ -11,21 +11,29 @@ extends RefCounted
 ## grandeur décimal (« ≈ 10^N »). Un pas d'une galerie ou d'un niveau (paramètre `moved` de
 ## guidance) la met à jour sans relire les coordonnées.
 ##
-## Ce script lit aussi le catalogue data/quetes/catalogue.json (métadonnées, et pour chaque entrée
+## Ce script lit aussi le catalogue data/quetes/catalogue.bcat (métadonnées, et pour chaque entrée
 ## l'adresse de son livre et le SHA-256 de chacune de ses pages : aucun texte) et tient les
-## épingles du panneau de quête, enregistrées dans user://quetes_epinglees.json.
+## épingles du panneau de quête, enregistrées dans user://quetes_epinglees.json. Les deux fichiers
+## sont sous la forme compacte de tools/make_catalogue.py (_read_document, _write_document) : les
+## coordonnées, qui partagent presque tous leurs chiffres de tête, y sont écrites par différence,
+## et le tout compressé ; en mémoire, la structure JSON est la même. Un fichier JSON simple se lit
+## aussi (catalogues de test, épingles d'une version précédente).
 ##
 ## Repères du monde : l'hexagone h + 1 est à 12 m vers +Z, le niveau l + 1 à 3,4 m au-dessus.
 
 const QuestScript := preload("res://scripts/quest.gd")
 const BookTextScript := preload("res://scripts/book_text.gd")
 
-const CATALOGUE_PATH := "res://data/quetes/catalogue.json"
+const CATALOGUE_PATH := "res://data/quetes/catalogue.bcat"
 const CATALOGUE_VERSION := 2
 const PINS_PATH := "user://quetes_epinglees.json"
 ## Version 2 : adresses de livres en base 25 (les épingles de la version 1, adresses de pages en
 ## décimal, sont abandonnées : le fichier revient aux épingles d'office).
 const PINS_VERSION := 2
+## Forme compacte des fichiers (voir tools/make_catalogue.py) : en-tête, version, longueur du JSON.
+const COMPACT_MAGIC := "BCAT"
+const COMPACT_FORMAT := 1
+const COMPACT_LONG_STRING := 64
 ## Jusqu'à 15 chiffres, une distance s'écrit exactement ; au-delà, en ordre de grandeur.
 const EXACT_DIGITS := 15
 const KIND_CATALOGUE := "catalogue"
@@ -44,9 +52,12 @@ var author := ""
 var entry_id := ""
 ## Le livre de la quête, {hexagon, level: String (base 25), wall, shelf, book: int}.
 var book: Dictionary = {}
-## Les pages proposées, numéros 0 à 409 dans le livre (les pages du texte d'une entrée).
+## Les pages proposées, numéros 0 à 409 dans le livre (les pages du texte d'une entrée, ou
+## celles qu'occupe le texte d'une recherche).
 var pages: Array = []
 var page_index := 0
+## Avis du service sur la recherche (texte tronqué, livre d'images), vide sinon.
+var notice := ""
 var _guide_origin: Array = []      # [hexagone, niveau] du dernier guidage
 var _guide_dz: Dictionary = {}
 var _guide_dy: Dictionary = {}
@@ -57,6 +68,17 @@ static func from_address(target: Dictionary, quest_title := "", quest_author := 
 	if not is_valid_address(target):
 		return null
 	return from_book(target, [int(target.get("page", 0))], quest_title, quest_author)
+
+
+## La quête d'une recherche du joueur : le livre trouvé, les `page_count` pages qu'occupe le texte
+## (0, 1 …, au plus 410), la page choisie celle de l'adresse ; `search_notice`, l'avis du service.
+static func from_search(target: Dictionary, page_count: int, quest_title := "", search_notice := "") -> QuestScript:
+	var quest := from_book(target, range(clampi(page_count, 1, BookTextScript.PAGES)), quest_title)
+	if quest == null:
+		return null
+	quest.set_page(int(target.get("page", 0)))
+	quest.notice = search_notice
+	return quest
 
 
 ## Une quête sur un livre et quelques-unes de ses pages ; null si l'adresse ou une page est mal formée.
@@ -306,7 +328,8 @@ static func _valid_entry(raw: Variant, stolen: Array) -> Dictionary:
 # --- Épingles -----------------------------------------------------------------------------------
 # Une épingle : {id, kind, title, author, address}.
 #   catalogue : id « catalogue:<id de l'entrée> », livre et pages lus dans le catalogue ;
-#   recherche : id « recherche:<condensat de l'adresse> », titre et adresse seuls (jamais la source) ;
+#   recherche : id « recherche:<condensat de l'adresse> », titre, adresse et nombre de pages du texte
+#               (pages, facultatif, 1 par défaut) seuls (jamais la source) ;
 #   registre  : id « registre », le registre des livres manquants, tiré de stolen_books.
 # Ordre : les entrées du catalogue dans l'ordre du catalogue, puis les recherches, de la plus ancienne
 # à la plus récente, puis le registre.
@@ -316,13 +339,13 @@ static func catalogue_pin(entry: Dictionary) -> Dictionary:
 		"title": entry.title, "author": entry.author, "address": {}}
 
 
-static func search_pin(pin_title: String, target: Dictionary) -> Dictionary:
+static func search_pin(pin_title: String, target: Dictionary, page_count := 1) -> Dictionary:
 	var a := normalized_address(target)
 	if not a.has("page"):
 		a.page = 0
 	var key := BookTextScript.full_form(a).sha256_text().left(16)
 	return {"id": "%s:%s" % [KIND_SEARCH, key], "kind": KIND_SEARCH, "entry": "",
-		"title": pin_title.strip_edges(), "author": "", "address": a}
+		"title": pin_title.strip_edges(), "author": "", "address": a, "pages": clampi(page_count, 1, BookTextScript.PAGES)}
 
 
 static func register_pin() -> Dictionary:
@@ -361,7 +384,7 @@ static func from_pin(pin: Dictionary, entries: Array) -> QuestScript:
 	if pin.kind == KIND_CATALOGUE:
 		var entry := catalogue_entry(entries, pin.entry)
 		return null if entry.is_empty() else from_entry(entry)
-	return from_address(pin.address, pin.title, pin.author)
+	return from_search(pin.address, int(pin.get("pages", 1)), pin.title)
 
 
 ## Ajoute une épingle à sa place (une recherche après les autres, avant le registre), ou remplace
@@ -396,7 +419,7 @@ static func restore_catalogue(pins: Array, entries: Array) -> Array:
 ## Lit les épingles. Fichier absent, illisible ou d'un autre format → les épingles d'office ;
 ## épingles abîmées ou entrées disparues du catalogue écartées une à une.
 static func load_pins(entries: Array, path := PINS_PATH) -> Array:
-	var parsed: Variant = _read_json(path)
+	var parsed: Variant = _read_document(path)
 	if not parsed is Dictionary or parsed.get("version") != PINS_VERSION or not parsed.get("pins") is Array:
 		return default_pins(entries)
 	var pins := []
@@ -431,15 +454,10 @@ static func save_pins(pins: Array, path := PINS_PATH) -> bool:
 			KIND_CATALOGUE:
 				stored.append({"kind": KIND_CATALOGUE, "entry": p.entry})
 			KIND_SEARCH:
-				stored.append({"kind": KIND_SEARCH, "title": p.title, "address": p.address})
+				stored.append({"kind": KIND_SEARCH, "title": p.title, "address": p.address, "pages": int(p.get("pages", 1))})
 			KIND_REGISTER:
 				stored.append({"kind": KIND_REGISTER})
-	var file := FileAccess.open(path, FileAccess.WRITE)
-	if file == null:
-		return false
-	file.store_string(JSON.stringify({"version": PINS_VERSION, "pins": stored}, "\t"))
-	file.close()
-	return true
+	return _write_document(path, {"version": PINS_VERSION, "pins": stored})
 
 
 static func _restore_pin(raw: Variant, entries: Array) -> Dictionary:
@@ -456,27 +474,147 @@ static func _restore_pin(raw: Variant, entries: Array) -> Dictionary:
 				return {}
 			if not is_valid_address(raw.address):
 				return {}
-			return search_pin(raw.title, raw.address)
+			var count: Variant = raw.get("pages", 1)
+			return search_pin(raw.title, raw.address, int(count) if count is float or count is int else 1)
 		KIND_REGISTER:
 			return register_pin()
 	return {}
 
 
-## Le catalogue lu (une fois par chemin : 22 Mo de JSON, ~0,3 s), ou null s'il manque, est
-## illisible ou n'est pas de la version attendue.
+## Le catalogue lu (une fois par chemin : moins de 1 Mo, quelques dizaines de ms), ou null s'il
+## manque, est illisible ou n'est pas de la version attendue.
 static func _catalogue(path: String) -> Variant:
 	if not _catalogues.has(path):
-		var parsed: Variant = _read_json(path)
+		var parsed: Variant = _read_document(path)
 		if not parsed is Dictionary or parsed.get("version") != CATALOGUE_VERSION:
 			parsed = null
 		_catalogues[path] = parsed
 	return _catalogues[path]
 
 
-static func _read_json(path: String) -> Variant:
+## Un document JSON lu dans un fichier, sous la forme compacte (en-tête BCAT) ou en JSON simple ;
+## null s'il manque ou est illisible.
+static func _read_document(path: String) -> Variant:
 	if not FileAccess.file_exists(path):
 		return null
+	var raw := FileAccess.get_file_as_bytes(path)
+	if raw.size() >= 12 and raw.slice(0, 4).get_string_from_ascii() == COMPACT_MAGIC:
+		return _decode_compact(raw)
 	var json := JSON.new()
-	if json.parse(FileAccess.get_file_as_string(path)) != OK:
+	if json.parse(raw.get_string_from_utf8()) != OK:
 		return null
 	return json.data
+
+
+## Inverse de la forme compacte (tools/make_catalogue.py, encode_compact) ; null si illisible.
+static func _decode_compact(raw: PackedByteArray) -> Variant:
+	if raw.decode_u32(4) != COMPACT_FORMAT:
+		return null
+	var size := raw.decode_u32(8)
+	var payload := raw.slice(12).decompress(size, FileAccess.COMPRESSION_DEFLATE)
+	if payload.size() != size:
+		return null
+	var json := JSON.new()
+	if json.parse(payload.get_string_from_utf8()) != OK or not json.data is Dictionary:
+		return null
+	var compact: Dictionary = json.data
+	if not compact.get("strings") is Array or not compact.has("data"):
+		return null
+	var magnitudes := PackedStringArray()
+	var values := PackedStringArray()
+	for item: Variant in compact.strings:
+		if not item is Array or item.size() != 4 or not item[2] is String:
+			return null
+		var ref := int(item[0])
+		if ref >= magnitudes.size():
+			return null
+		var magnitude: String = (magnitudes[ref].left(int(item[1])) if ref >= 0 else "") + item[2]
+		magnitudes.append(magnitude)
+		values.append(("-" if item[3] == true else "") + magnitude)
+	return _resolve_strings(compact.data, values)
+
+
+static func _resolve_strings(node: Variant, values: PackedStringArray) -> Variant:
+	if node is Dictionary:
+		var out := {}
+		for key: Variant in node:
+			var value: Variant = node[key]
+			if (key == "hexagon" or key == "level") and value is String and value.begins_with("@"):
+				var i := int(value.substr(1))
+				out[key] = values[i] if i >= 0 and i < values.size() else ""
+			else:
+				out[key] = _resolve_strings(value, values)
+		return out
+	if node is Array:
+		return node.map(func(item: Variant) -> Variant: return _resolve_strings(item, values))
+	return node
+
+
+## Écrit un document JSON sous la forme compacte ; faux si le fichier ne s'ouvre pas en écriture.
+## Chaque longue coordonnée s'écrit par différence avec la précédente de même signe qui partage le
+## plus de chiffres de tête (parmi les COMPACT_CANDIDATES dernières).
+static func _write_document(path: String, document: Variant) -> bool:
+	var table := {"strings": [], "magnitudes": [], "index": {}}
+	var data: Variant = _compact_strings(document, table)
+	var payload := JSON.stringify({"compact": 1, "strings": table.strings, "data": data}).to_utf8_buffer()
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	if file == null:
+		return false
+	file.store_buffer(COMPACT_MAGIC.to_ascii_buffer())
+	file.store_32(COMPACT_FORMAT)
+	file.store_32(payload.size())
+	file.store_buffer(payload.compress(FileAccess.COMPRESSION_DEFLATE))
+	file.close()
+	return true
+
+
+const COMPACT_CANDIDATES := 4
+
+
+static func _compact_strings(node: Variant, table: Dictionary) -> Variant:
+	if node is Dictionary:
+		var out := {}
+		for key: Variant in node:
+			var value: Variant = node[key]
+			if (key == "hexagon" or key == "level") and value is String and value.length() > COMPACT_LONG_STRING:
+				out[key] = "@%d" % _compact_index(value, table)
+			else:
+				out[key] = _compact_strings(value, table)
+		return out
+	if node is Array:
+		return node.map(func(item: Variant) -> Variant: return _compact_strings(item, table))
+	return node
+
+
+static func _compact_index(value: String, table: Dictionary) -> int:
+	if table.index.has(value):
+		return table.index[value]
+	var negative := value.begins_with("-")
+	var bytes := (value.substr(1) if negative else value).to_ascii_buffer()
+	var ref := -1
+	var shared := 0
+	var count: int = table.magnitudes.size()
+	for i in range(count - 1, maxi(count - COMPACT_CANDIDATES, 0) - 1, -1):
+		var common := _common_prefix(bytes, table.magnitudes[i])
+		if common > shared:
+			ref = i
+			shared = common
+	table.index[value] = table.strings.size()
+	table.strings.append([ref, shared, bytes.slice(shared).get_string_from_ascii(), negative])
+	table.magnitudes.append(bytes)
+	return table.index[value]
+
+
+## Longueur du préfixe commun de deux suites d'octets (dichotomie sur des tranches comparées
+## nativement).
+static func _common_prefix(a: PackedByteArray, b: PackedByteArray) -> int:
+	var lo := 0
+	var hi := mini(a.size(), b.size())
+	while lo < hi:
+		@warning_ignore("integer_division")
+		var mid := (lo + hi + 1) / 2
+		if a.slice(lo, mid) == b.slice(lo, mid):
+			lo = mid
+		else:
+			hi = mid - 1
+	return lo

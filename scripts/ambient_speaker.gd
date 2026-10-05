@@ -78,6 +78,13 @@ static var _resync_requested := false
 static var resync_count := 0            # recalages faits par resync_all (pour contrôle)
 static var _start_frame := -1
 static var _starts := 0
+## Toutes les lectures lancées (_play_from) que le serveur audio n'a pas encore rendues, en références
+## faibles (une référence forte retarderait leur remise) : retirées dès qu'elles n'existent plus. Une
+## lecture remplacée par un recalage (play) s'arrête d'elle-même et y reste jusqu'à sa remise.
+static var _stopped: Array[WeakRef] = []
+## Vrai après silence_all : un haut-parleur qui entre ensuite dans l'arbre (le monde tourne encore
+## pendant l'attente) reste muet.
+static var _silenced := false
 
 var start_position := 0.0               # position de départ réelle, pour contrôle
 var start_usec := 0
@@ -156,6 +163,55 @@ static func load_stream() -> AudioStream:
 	return _stream
 
 
+## Fait taire tous les haut-parleurs et attend que le serveur audio ait rendu leurs lectures : il
+## ne les libère qu'à une image du jeu (sa mise à jour sur le fil principal), après que son
+## mélangeur (son propre fil, à son rythme) les a vues arrêtées. La condition est observée sur les
+## lectures elles-mêmes (toutes rendues : _stopped vide), vérifiée à chaque image, sous une
+## échéance (`timeout_msec`) qui ne sert qu'en cas de panne du serveur audio. À appeler
+## avant de quitter (BabelService à la fermeture de la fenêtre ; les tests avant quit()) : rien ne
+## reste alors en vie à la sortie du moteur. Vrai si toutes les lectures sont rendues.
+static func silence_all(tree: SceneTree, timeout_msec := 5000) -> bool:
+	_silenced = true
+	for speaker: Variant in _speakers.duplicate():
+		if is_instance_valid(speaker):
+			speaker._retiring = true   # plus de départ ni de recalage
+			speaker._silence()
+	var deadline := Time.get_ticks_msec() + timeout_msec
+	_prune_stopped()
+	while not _stopped.is_empty() and Time.get_ticks_msec() < deadline:
+		await tree.process_frame
+		_prune_stopped()
+	return _stopped.is_empty()
+
+
+## Arrête la lecture et lâche le flux (la lecture, suivie dans _stopped, sera rendue à une image).
+func _silence() -> void:
+	stop()
+	stream = null
+
+
+## play(from), la lecture lancée suivie jusqu'à sa remise (voir _stopped, silence_all).
+func _play_from(from_position: float) -> void:
+	play(from_position)
+	if has_stream_playback():
+		_stopped.append(weakref(get_stream_playback()))
+
+
+static func _prune_stopped() -> void:
+	if not _stopped.is_empty():
+		_stopped = _stopped.filter(func(playback: WeakRef) -> bool: return playback.get_ref() != null)
+
+
+## Oublie le flux partagé et l'état commun (à la sortie du jeu, par l'autoload BabelService).
+static func release_shared() -> void:
+	_stream = null
+	_stream_loaded = false
+	_reference = null
+	_speakers.clear()
+	_stopped.clear()
+	_silenced = false
+
+
 static func stream_path() -> String:
 	return CUSTOM_PATH if _open_exists(CUSTOM_PATH) else DEFAULT_PATH
 
@@ -219,13 +275,17 @@ func _start() -> void:
 	var fade := _fade_in > 0.0 and _audible_now()
 	if fade:
 		volume_db = -80.0
-	play(start_position)
+	_play_from(start_position)
 	if fade:
 		_fade_tween = create_tween()
 		_fade_tween.tween_method(_set_linear, 0.0, 1.0, _fade_in)
 
 
 func _enter_tree() -> void:
+	if _silenced:
+		_retiring = true
+		stream = null
+		return
 	if not _speakers.has(self):
 		_speakers.append(self)
 
@@ -234,6 +294,9 @@ func _exit_tree() -> void:
 	_speakers.erase(self)
 	if _reference == self:
 		_reference = null
+	# Hors de l'arbre (il n'y revient jamais : retiré, ou sa galerie libérée), il se tait et lâche le
+	# flux ; le serveur audio rend sa lecture à une image suivante (voir silence_all).
+	_silence()
 
 
 func _notification(what: int) -> void:
@@ -261,7 +324,7 @@ func _process(delta: float) -> void:
 		if absf(drift) > RESYNC_AFTER:
 			start_position = music_position()
 			start_usec = Time.get_ticks_usec()
-			play(start_position)
+			_play_from(start_position)
 
 
 ## Vrai si un départ tient encore dans le budget de l'image (STARTS_PER_FRAME).
@@ -283,6 +346,7 @@ static func _watch_clock() -> void:
 	if frame == _last_tick_frame:
 		return
 	_last_tick_frame = frame
+	_prune_stopped()
 	var now := Time.get_ticks_usec()
 	var stalled := _last_tick_usec >= 0 and now - _last_tick_usec > STALL_USEC
 	_last_tick_usec = now
@@ -315,7 +379,7 @@ static func resync_all() -> void:
 		if not s.playing:
 			continue
 		if s != reference and absf(_circular_diff(s.get_playback_position(), position)) > RESYNC_TOLERANCE:
-			s.play(position)
+			s._play_from(position)
 		s.start_position = s.get_playback_position() if s != reference else position
 		s.start_usec = now
 		s._since_check = 0.0

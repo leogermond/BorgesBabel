@@ -1,12 +1,25 @@
 #!/usr/bin/env python3
-"""Catalogue des quêtes : data/quetes/catalogue.json (version 2), outil de développement.
+"""Catalogue des quêtes : data/quetes/catalogue.bcat (version 2, forme compacte), outil de développement.
 
 Le catalogue ne contient aucun texte des œuvres. Chaque entrée désigne un LIVRE de la
 Bibliothèque (bijection exacte livre ↔ adresse de python/babel.py) : ses métadonnées (titre,
 auteur, année, langue, contexte, groupe, licence), l'adresse du livre (hexagone et niveau en
 base 25, ~656 000 chiffres chacun), le nombre de pages qu'occupe le texte et, pour chacune, son
 numéro et le SHA-256 de ses 3200 symboles. Le texte se lit seulement en ouvrant le livre, dans
-le jeu. Une adresse pèse ~1,3 Mo : le fichier fait ~22 Mo.
+le jeu.
+
+Forme compacte (catalogue.bcat) : une adresse pèse ~1,3 Mo, et le JSON entier ~22 Mo ; mais les
+coordonnées des livres trouvés par la recherche partagent presque toutes leurs chiffres de tête
+(~650 000 sur 656 000 : les pages blanches qui suivent le texte font le haut du rang). Le fichier
+est donc : b"BCAT", la version de la forme (u32, petit-boutiste), la longueur du JSON (u32), puis
+ce JSON en UTF-8 compressé par zlib (deflate, que Godot relit : PackedByteArray.decompress). Le
+JSON est {"compact": 1, "strings": [[ref, commun, reste, négatif], …], "data": le catalogue},
+chaque hexagone ou niveau de plus de 64 caractères du catalogue étant remplacé par « @i », renvoi
+à la chaîne i de "strings" : sa valeur absolue est les `commun` premiers chiffres de la valeur
+absolue de la chaîne `ref` (une chaîne précédente ; −1 : aucune) suivis de `reste`, précédée
+de « - » si `négatif`. Le jeu (scripts/quest.gd, _read_document) relit la même structure qu'avant
+en mémoire ; les épingles du joueur s'enregistrent sous la même forme. Le fichier passe de
+~22 Mo à moins de 1 Mo.
 
 Contenu des livres (texte normalisé par babel.normalize_all, coulé de page en page, puis des
 espaces jusqu'à la fin du livre ; c'est l'unique livre qui contient ce texte, babel.search_text) :
@@ -37,8 +50,15 @@ Les sources restent hors du dépôt. Elles arrivent par une liste de chemins, un
     python3 tools/make_catalogue.py --sources tools/.travail/sources.txt
 
 Clés attendues : SOURCES. L'outil n'affiche que des titres, des longueurs, des nombres de pages
-et des condensats ; il n'écrit que le JSON (et la copie de travail des textes à marques). Chaque
-livre est relu à son adresse (babel.Book.at) et comparé page à page à la source avant d'être écrit.
+et des condensats ; il n'écrit que le catalogue (et la copie de travail des textes à marques).
+Chaque livre est relu à son adresse (babel.Book.at) et comparé page à page à la source avant d'être
+écrit ; le fichier écrit est relu et comparé au catalogue (aller-retour de la forme compacte).
+
+Sans les sources, `--from catalogue.json` (ou .bcat) récrit un catalogue existant sous la forme
+compacte : chaque livre y est relu à son adresse et ses pages comparées aux condensats du
+catalogue (notices et carré SATOR compris), puis l'aller-retour vérifié de même :
+
+    python3 tools/make_catalogue.py --from data/quetes/catalogue.json
 """
 
 from __future__ import annotations
@@ -48,15 +68,17 @@ import hashlib
 import json
 import os
 import re
+import struct
 import sys
 import time
+import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "python"))
 
 import babel  # noqa: E402
 
-OUTPUT = os.path.join(ROOT, "data", "quetes", "catalogue.json")
+OUTPUT = os.path.join(ROOT, "data", "quetes", "catalogue.bcat")
 WORK_DIR = os.path.join(ROOT, "tools", ".travail")
 VERSION = 2
 
@@ -287,15 +309,155 @@ def book_record(label: str, content: str) -> dict:
     return {"address": found.address.to_json(), "page_count": count, "pages": pages}
 
 
+# --- Forme compacte -------------------------------------------------------------------------
+
+MAGIC = b"BCAT"
+COMPACT_FORMAT = 1
+LONG_STRING = 64                 # hexagone ou niveau au-delà : rangé dans la table des chaînes
+COORDINATE_KEYS = ("hexagon", "level")
+
+
+def _common_prefix(a: str, b: str) -> int:
+    lo, hi = 0, min(len(a), len(b))
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if a[:mid] == b[:mid]:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
+def encode_compact(document: dict) -> bytes:
+    """Le document (JSON) sous la forme compacte décrite en tête du module."""
+    strings: list[list] = []
+    magnitudes: list[str] = []
+    index: dict[str, int] = {}
+
+    def coordinate(value: str) -> str:
+        if value not in index:
+            negative = value.startswith("-")
+            magnitude = value[1:] if negative else value
+            ref, shared = -1, 0
+            for i, other in enumerate(magnitudes):
+                common = _common_prefix(magnitude, other)
+                if common > shared:
+                    ref, shared = i, common
+            index[value] = len(strings)
+            strings.append([ref, shared, magnitude[shared:], negative])
+            magnitudes.append(magnitude)
+        return f"@{index[value]}"
+
+    def walk(node):
+        if isinstance(node, dict):
+            return {key: (coordinate(value) if key in COORDINATE_KEYS and isinstance(value, str)
+                          and len(value) > LONG_STRING else walk(value)) for key, value in node.items()}
+        if isinstance(node, list):
+            return [walk(item) for item in node]
+        return node
+
+    data = walk(document)
+    payload = json.dumps({"compact": 1, "strings": strings, "data": data}, ensure_ascii=False,
+                         separators=(",", ":")).encode("utf-8")
+    return MAGIC + struct.pack("<II", COMPACT_FORMAT, len(payload)) + zlib.compress(payload, 9)
+
+
+def decode_compact(raw: bytes) -> dict:
+    """Inverse de encode_compact (comme scripts/quest.gd, _read_document)."""
+    if raw[:4] != MAGIC:
+        raise ValueError("pas un catalogue compact (en-tête BCAT attendu)")
+    version, size = struct.unpack("<II", raw[4:12])
+    if version != COMPACT_FORMAT:
+        raise ValueError(f"forme compacte {version} inconnue")
+    payload = zlib.decompress(raw[12:])
+    if len(payload) != size:
+        raise ValueError("longueur du JSON inattendue")
+    compact = json.loads(payload.decode("utf-8"))
+    magnitudes: list[str] = []
+    values: list[str] = []
+    for ref, shared, rest, negative in compact["strings"]:
+        magnitude = (magnitudes[ref][:shared] if ref >= 0 else "") + rest
+        magnitudes.append(magnitude)
+        values.append(("-" if negative else "") + magnitude)
+
+    def walk(node):
+        if isinstance(node, dict):
+            return {key: (values[int(value[1:])] if key in COORDINATE_KEYS and isinstance(value, str)
+                          and value.startswith("@") else walk(value)) for key, value in node.items()}
+        if isinstance(node, list):
+            return [walk(item) for item in node]
+        return node
+
+    return walk(compact["data"])
+
+
+def write_catalogue(document: dict, path: str) -> float:
+    """Écrit le catalogue sous la forme compacte, le relit et le compare (aller-retour) ; rend la
+    taille en Mo."""
+    raw = encode_compact(document)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(raw)
+    with open(path, "rb") as f:
+        if decode_compact(f.read()) != document:
+            raise SystemExit(f"{path} : la forme compacte relue ne redonne pas le catalogue")
+    return os.path.getsize(path) / 1e6
+
+
+def read_catalogue(path: str) -> dict:
+    with open(path, "rb") as f:
+        raw = f.read()
+    return decode_compact(raw) if raw[:4] == MAGIC else json.loads(raw.decode("utf-8"))
+
+
+def verify_book(label: str, address: dict, pages: list[dict]) -> None:
+    """Le livre relu à son adresse : chaque page du catalogue a son condensat, la suivante est blanche."""
+    book = babel.Book.at(babel.Address.from_json(address))
+    for page in pages:
+        if hashlib.sha256(book.text(page["page"]).encode("ascii")).hexdigest() != page["sha256"]:
+            raise SystemExit(f"{label} : la page {page['page'] + 1} relue à l'adresse n'a pas le condensat du catalogue")
+    after = max(p["page"] for p in pages) + 1
+    if after < babel.PAGES and book.text(after) != " " * babel.SYMBOLS:
+        raise SystemExit(f"{label} : la page qui suit le texte n'est pas blanche")
+
+
+def convert(source: str, output: str) -> int:
+    """Récrit un catalogue existant sous la forme compacte, livres relus et vérifiés."""
+    started = time.time()
+    document = read_catalogue(source)
+    if document.get("version") != VERSION:
+        raise SystemExit(f"{source} : catalogue de version {document.get('version')}, {VERSION} attendue")
+    stolen = document["stolen_books"]
+    for entry in document["entries"]:
+        verify_book(entry["title"], entry["address"], entry["pages"])
+        verify_book(f"notice de {entry['title']}", stolen[entry["notice_book"]],
+                    [{"page": 0, "sha256": entry["notice_hash"]}])
+        print(f"{entry['title']} — {entry['author']} : {entry['page_count']} page(s) relue(s) à l'adresse,"
+              f" sha256 {', '.join(p['sha256'][:12] for p in entry['pages'])}…")
+    sator = document["destinations"].get("sator")
+    if sator:
+        verify_book("carré SATOR", sator["address"], [{"page": sator["page"], "sha256": sator["sha256"]}])
+        print(f"destination sator : sha256 {sator['sha256'][:12]}… relue")
+    size = write_catalogue(document, output)
+    print(f"{len(document['entries'])} entrée(s), {len(stolen)} livre(s) volé(s) récrits dans"
+          f" {os.path.relpath(output, ROOT)} ({size:.2f} Mo, forme compacte vérifiée) en {time.time() - started:.0f} s")
+    return 0
+
+
 def notice_text(entry: dict) -> str:
     return "\n".join([entry["title"], entry["author"], entry["context"]])
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("--sources", required=True, help="liste de chemins : une ligne « clé chemin » par source")
+    parser.add_argument("--sources", help="liste de chemins : une ligne « clé chemin » par source")
+    parser.add_argument("--from", dest="source", help="catalogue existant (JSON ou forme compacte) à récrire")
     parser.add_argument("--output", default=OUTPUT)
     args = parser.parse_args(argv)
+    if args.source:
+        return convert(args.source, args.output)
+    if not args.sources:
+        parser.error("--sources ou --from attendu")
 
     paths = read_path_list(args.sources)
     missing = [key for key in SOURCES if key not in paths]
@@ -348,14 +510,10 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("carré SATOR : la page relue ne reproduit pas la source")
     print(f"destination sator : sha256 {destinations['sator']['sha256'][:12]}…")
 
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
-    with open(args.output, "w", encoding="utf-8") as f:
-        json.dump({"version": VERSION, "page_symbols": babel.SYMBOLS, "entries": entries, "stolen_books": stolen,
-                   "destinations": destinations}, f, ensure_ascii=False, indent="\t")
-        f.write("\n")
-    size = os.path.getsize(args.output) / 1e6
+    size = write_catalogue({"version": VERSION, "page_symbols": babel.SYMBOLS, "entries": entries,
+                            "stolen_books": stolen, "destinations": destinations}, args.output)
     print(f"{len(entries)} entrée(s), {len(stolen)} livre(s) volé(s), {len(destinations)} destination(s) écrits dans"
-          f" {os.path.relpath(args.output, ROOT)} ({size:.1f} Mo) en {time.time() - started:.0f} s")
+          f" {os.path.relpath(args.output, ROOT)} ({size:.2f} Mo, forme compacte vérifiée) en {time.time() - started:.0f} s")
     return 0
 
 

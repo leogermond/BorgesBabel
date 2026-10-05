@@ -136,7 +136,8 @@ Service JSON, protocole 3 (une requête par ligne, une réponse par ligne)
                    e = (mur·5 + étagère)·32 + livre
     display        "address" (page facultative) → {"short", "hexagon": résumé, "level": résumé} ;
                    résumé = {"sign": -1|0|1, "digits": chiffres décimaux, "lead": 4 premiers,
-                   "tail": 4 derniers} ; "full": true ajoute "full" (décimal complet, chemin lent)
+                   "tail": 4 derniers, "low": 18 derniers (complétés de zéros)} ; "full": true
+                   ajoute "full" (décimal complet, chemin lent)
     Un champ "id" facultatif revient tel quel. Toute erreur répond {"error": "…", "code": …} sur sa
     ligne, code parmi bad_request, unknown_op, unknown_key (clé oubliée : renvoyer l'adresse),
     empty_slot (adresse hors de la région habitée), internal ; le service continue.
@@ -457,6 +458,8 @@ def _parse_b25(text: str) -> tuple[bool, bytes]:
     """« -3k0 » → (négatif, chiffres de la valeur absolue, poids faible en premier, sans zéro de tête)."""
     if not isinstance(text, str):
         raise BabelError(f"coordonnée en base 25 attendue (chaîne) : {_clip(text)}")
+    if not text.isascii():    # avant lower() : « K » (U+212A, signe kelvin) deviendrait « k »
+        raise BabelError(f"coordonnée en base 25 attendue (chiffres ASCII 0-9, a-o) : {_clip(text)}")
     body = text.lower()
     negative = body.startswith("-")
     if body[:1] in ("-", "+"):
@@ -583,32 +586,64 @@ def decimal_to_b25(text: str) -> str:
     return _format_b25(negative, magnitude)
 
 
+LOW_DIGITS = 18
+_LOW_MOD5 = 5 ** LOW_DIGITS                     # = 25^9
+_LOW_BITS = (1 << LOW_DIGITS) - 1               # reste modulo 2^18
+_LOW_PERIOD = 1 << (LOW_DIGITS - 3)             # 25 ≡ 1 (mod 8) : ordre de 25 modulo 2^18 = 2^15
+_LOW_INVERSE = pow(_LOW_MOD5, -1, 1 << LOW_DIGITS)
+
+
+def _low_decimal(magnitude: bytes) -> int:
+    """|v| mod 10^18, d'après les chiffres base 25 (poids faible en premier), en temps linéaire :
+    modulo 5^18 = 25^9, les 9 derniers chiffres ; modulo 2^18, les chiffres pliés sur la période
+    2^15 de 25 (sommes de colonnes en un grand entier à mots de 16 bits, puis Horner sur la
+    période) ; puis le théorème chinois."""
+    mod5 = from_digits(magnitude[:9])
+    total = 0
+    for start in range(0, len(magnitude), _LOW_PERIOD):
+        row = magnitude[start:start + _LOW_PERIOD]
+        wide = bytearray(2 * len(row))
+        wide[0::2] = row
+        total += int.from_bytes(wide, "little")      # mots de 16 bits : ≤ 24 × 21 lignes
+    sums = total.to_bytes(2 * _LOW_PERIOD, "little")
+    mod2 = 0
+    for i in range(2 * min(len(magnitude), _LOW_PERIOD) - 2, -1, -2):
+        mod2 = (mod2 * 25 + sums[i] + 256 * sums[i + 1]) & _LOW_BITS
+    return mod5 + _LOW_MOD5 * (((mod2 - mod5) * _LOW_INVERSE) & _LOW_BITS)
+
+
 def coordinate_summary(text: str) -> dict:
-    """{"sign", "digits", "lead", "tail"} d'une coordonnée, sans conversion décimale complète :
-    nombre de chiffres et 4 premiers par logarithmes (bornes basse et haute de la valeur d'après
-    ses 40 chiffres base 25 de tête), 4 derniers par restes modulo 625 et 16 (théorème chinois)."""
+    """{"sign", "digits", "lead", "tail", "low"} d'une coordonnée, sans conversion décimale
+    complète : nombre de chiffres et 4 premiers par logarithmes (bornes basse et haute de la valeur
+    d'après ses 40 chiffres base 25 de tête, marge d'arrondi comprise ; calcul exact quand elles
+    ne s'accordent pas, au ras d'une puissance de dix), 4 derniers (tail) et 18 derniers (low,
+    complétés de zéros) par restes modulo 5^18 et 2^18 (théorème chinois)."""
     negative, magnitude = _parse_b25(text)
     sign = -1 if negative else (1 if magnitude else 0)
     if len(magnitude) <= 48:
         exact = str(from_digits(magnitude))
-        return {"sign": sign, "digits": len(exact), "lead": exact[:4], "tail": exact[-4:]}
+        return {"sign": sign, "digits": len(exact), "lead": exact[:4], "tail": exact[-4:],
+                "low": exact[-LOW_DIGITS:].rjust(LOW_DIGITS, "0")}
     keep = 40
     top = from_digits(magnitude[-keep:])
     estimates = []
     with decimal.localcontext() as ctx:
-        ctx.prec = 60
+        # La valeur est entre top·25^k et (top + 1)·25^k, à 25^−39 près en relatif (~10^−54) : les
+        # logarithmes se calculent sur 80 chiffres significatifs (au moins 72 après la virgule) et
+        # chaque borne s'écarte encore de 10^−66, bien au-delà de l'erreur d'arrondi. Deux bornes
+        # qui donnent le même nombre de chiffres et les mêmes 4 premiers encadrent donc la valeur.
+        ctx.prec = 80
+        margin = decimal.Decimal(10) ** -66
         base = (len(magnitude) - keep) * decimal.Decimal(25).log10()
-        for bound in (top, top + 1):
-            logarithm = decimal.Decimal(bound).log10() + base
+        for bound, nudge in ((top, -margin), (top + 1, margin)):
+            logarithm = decimal.Decimal(bound).log10() + base + nudge
             exponent = int(logarithm)
             estimates.append((exponent + 1, str(int(decimal.Decimal(10) ** (logarithm - exponent + 3)))))
     if estimates[0] != estimates[1]:    # valeur au ras d'une puissance de 10 : calcul exact (lent)
         exact = b25_to_decimal(_format_b25(False, magnitude))
         estimates[0] = (len(exact), exact[:4])
-    mod625 = magnitude[0] + 25 * magnitude[1]
-    mod16 = (sum(magnitude[0::2]) + 9 * sum(magnitude[1::2])) % 16      # 25 ≡ 9, 625 ≡ 1 (mod 16)
-    tail = mod625 + 625 * ((mod16 - mod625) % 16)                      # 625 ≡ 1 (mod 16)
-    return {"sign": sign, "digits": estimates[0][0], "lead": estimates[0][1], "tail": f"{tail:04d}"}
+    low = f"{_low_decimal(magnitude):0{LOW_DIGITS}d}"
+    return {"sign": sign, "digits": estimates[0][0], "lead": estimates[0][1], "tail": low[-4:], "low": low}
 
 
 def short_coordinate(text: str) -> str:

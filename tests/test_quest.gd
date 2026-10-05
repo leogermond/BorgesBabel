@@ -7,6 +7,7 @@ const QuestScript := preload("res://scripts/quest.gd")
 const HudScript := preload("res://scripts/hud.gd")
 const CarnetScript := preload("res://scripts/carnet.gd")
 const BookTextScript := preload("res://scripts/book_text.gd")
+const AmbientSpeakerScript := preload("res://scripts/ambient_speaker.gd")
 const PINS_TEST_PATH := "user://test_quete_epinglees.json"
 const ARITH_CASES_PATH := "user://test_quete_arith.json"
 const ARITH_SCRIPT_PATH := "user://test_quete_arith.py"
@@ -28,14 +29,33 @@ def digits10(x):
         p *= 10
         k += 1
     return k
+P, B = [2147483647, 2147483629], [1859140973, 1210359923]
+def fingerprint(text):
+    negative, magnitude = babel._parse_b25(text)
+    chunks = [babel.from_digits(magnitude[i:i + 8]) for i in range(0, len(magnitude), 8)]
+    sign = -1 if negative else (1 if magnitude else 0)
+    hashes = []
+    for p, b in zip(P, B):
+        h = 0
+        for c in reversed(chunks):
+            h = (h * b + c) % p
+        hashes.append(h)
+    return [sign] + hashes
 out = []
 for a, b, k in json.load(open(sys.argv[1], encoding='utf-8')):
-    x, y = babel.b25_to_int(a), babel.b25_to_int(b)
+    y = babel.b25_to_int(b)
+    if isinstance(a, dict):   # a = b ± (10^p + delta) : différence au ras d'une puissance de dix
+        x = y + a['sign'] * (10 ** a['pow10'] + a['delta'])
+    else:
+        x = babel.b25_to_int(a)
     d = x - y
     exact = abs(d) < 25 ** 12
-    out.append({'add': babel.int_to_b25(x + k), 'sign_diff': (d > 0) - (d < 0), 'exact': exact,
-                'value': str(d) if exact else '', 'digits_diff': digits10(d), 'cmp': (x > y) - (x < y),
-                'sign': (x > 0) - (x < 0), 'digits': digits10(x)})
+    a_text = babel.int_to_b25(x) if isinstance(a, dict) else a
+    add = babel.int_to_b25(x + k)
+    out.append({'a': a_text, 'add': add, 'sign_diff': (d > 0) - (d < 0),
+                'exact': exact, 'value': str(d) if exact else '', 'digits_diff': digits10(d),
+                'cmp': (x > y) - (x < y), 'sign': (x > 0) - (x < 0), 'digits': digits10(x),
+                'print': fingerprint(a_text), 'print_add': fingerprint(add)})
 print(json.dumps(out))
 """
 const ENTRY_KEYS := ["id", "title", "author", "year", "language", "context", "group", "licence", "protected", "address", "page_count", "pages", "notice_book", "notice_hash"]
@@ -58,6 +78,7 @@ func _initialize() -> void:
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(PINS_TEST_PATH))
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(ARITH_CASES_PATH))
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(ARITH_SCRIPT_PATH))
+	_check(await AmbientSpeakerScript.silence_all(self), "sortie : les haut-parleurs se taisent, le serveur audio rend leurs lectures")
 	print("test_quest : %s" % ("OK" if _failures == 0 else "%d échec(s)" % _failures))
 	BookTextScript.shutdown()
 	quit(1 if _failures else 0)
@@ -97,6 +118,12 @@ func _test_arithmetic() -> void:
 	for _i in 8:
 		cases.append([("-" if rng.randi() % 2 else "") + _b25_digits(rng, rng.randi_range(1, 2300)),
 			("-" if rng.randi() % 2 else "") + _b25_digits(rng, rng.randi_range(1, 2300)), rng.randi_range(-30, 30)])
+	# Au ras d'une puissance de dix, de 10^12 à 10^20000 : a − b = ±(10^p + δ), δ ∈ {−1, 0, 1}, b de
+	# toute taille (le nombre de chiffres de a − b, et de a quand b = 0, se tranche exactement).
+	for p: int in [12, 17, 18, 25, 100, 999, 4000, 12345, 20000]:
+		for delta: int in [-1, 0, 1]:
+			var base: String = ["0", _b25_digits(rng, 30), "-" + _b25_digits(rng, 5000), _b25_digits(rng, 20000)][(p + delta + 1) % 4]
+			cases.append([{"pow10": p, "delta": delta, "sign": 1 if (p + delta) % 3 else -1}, base, 1])
 	var file := FileAccess.open(ARITH_CASES_PATH, FileAccess.WRITE)
 	file.store_string(JSON.stringify(cases))
 	file.close()
@@ -115,11 +142,12 @@ func _test_arithmetic() -> void:
 		return
 	var mismatches := 0
 	var worst_usec := 0
+	var print_mismatches := 0
 	for i in cases.size():
-		var a: String = cases[i][0]
+		var want: Dictionary = expected[i]
+		var a: String = want.a
 		var b: String = cases[i][1]
 		var k: int = cases[i][2]
-		var want: Dictionary = expected[i]
 		var t := Time.get_ticks_usec()
 		var d := BookTextScript.b25_difference(a, b)
 		worst_usec = maxi(worst_usec, Time.get_ticks_usec() - t)
@@ -128,9 +156,62 @@ func _test_arithmetic() -> void:
 				or d.digits != int(want.digits_diff) or BookTextScript.b25_compare(a, b) != int(want.cmp) \
 				or BookTextScript.b25_sign(a) != int(want.sign) or BookTextScript.b25_decimal_digits(a) != int(want.digits):
 			mismatches += 1
-			print("    écart sur le cas %d (%d et %d chiffres) : %s / %s" % [i, a.length(), b.length(), d, {"sign": want.sign_diff, "exact": want.exact, "digits": want.digits_diff}])
-	_check(mismatches == 0, "±k, différence (signe, valeur exacte ou chiffres décimaux), comparaison, signe, chiffres : identiques à Python sur %d cas de 1 à 656 000 chiffres" % cases.size())
+			print("    écart sur le cas %d (%d et %d chiffres) : %s / %s ; chiffres de a : %d / %d" % [i, a.length(), b.length(), d,
+				{"sign": want.sign_diff, "exact": want.exact, "digits": want.digits_diff}, BookTextScript.b25_decimal_digits(a), int(want.digits)])
+		var print_a := BookTextScript.b25_print(a)
+		var want_print := PackedInt64Array(want.print)
+		var want_add := PackedInt64Array(want.print_add)
+		if print_a != want_print or BookTextScript.print_at(BookTextScript.print_context(a, print_a), k) != want_add \
+				or BookTextScript.b25_print(BookTextScript.b25_add_small(a, k)) != want_add:
+			print_mismatches += 1
+			print("    empreinte : écart sur le cas %d (%d chiffres) : %s, attendu %s" % [i, a.length(), print_a, want_print])
+	_check(mismatches == 0, "±k, différence (signe, valeur exacte ou chiffres décimaux), comparaison, signe, chiffres : identiques à Python sur %d cas de 1 à 656 000 chiffres, dont 27 au ras de 10^12 … 10^20000" % cases.size())
+	_check(print_mismatches == 0, "empreintes (hachage polynomial des tranches) : identiques à Python, et print_at(contexte, k) = empreinte de la coordonnée ± k, relue (%d cas)" % cases.size())
+	_test_print_collisions(rng, huge)
+	var t_print := Time.get_ticks_usec()
+	BookTextScript._print_cache.clear()
+	BookTextScript.b25_print(huge)
+	print("    empreinte d'une coordonnée de 656 000 chiffres : %.1f ms" % ((Time.get_ticks_usec() - t_print) / 1000.0))
 	print("    différence résumée la plus lente : %.1f ms" % (worst_usec / 1000.0))
+
+
+## Empreintes : des coordonnées que l'ancienne empreinte (somme des tranches) confondait sont
+## distinctes ; l'empreinte suivie pas à pas (print_at, ±1 à ±9, à travers des retenues et des emprunts
+## sur des suites de tranches) égale celle de la coordonnée relue.
+func _test_print_collisions(rng: RandomNumberGenerator, huge: String) -> void:
+	var big := _b25_digits(rng, 2000)
+	var pairs := [["1", "1" + "0".repeat(16)], ["0", "o".repeat(16)], ["5", "4" + "0".repeat(15) + "1"],
+		[big, big.substr(8, 8) + big.left(8) + big.substr(16)],          # deux tranches échangées
+		[big, big + "0".repeat(16)], ["1" + "0".repeat(32), "1" + "0".repeat(16)],
+		[big.left(-16) + "0000000100000000", big.left(-16) + "0000000000000001"],
+		[huge, huge.left(-8) + "0".repeat(8)], ["-" + big, big]]
+	# L'ancienne empreinte était la valeur modulo (25^16 − 1)/2 : x et x + k·(25^16 − 1)/2 se confondaient.
+	var half := "6".repeat(16)   # (25^16 − 1)/2 = « 666…6 » en base 25
+	for i in 4:
+		var x := _b25_digits(rng, 40 + i * 300)
+		pairs.append([x, _add_b25(x, half)])
+	var collisions := 0
+	for pair: Array in pairs:
+		if BookTextScript.gallery_key(pair[0], "0") == BookTextScript.gallery_key(pair[1], "0"):
+			collisions += 1
+			print("    collision : %d et %d chiffres" % [pair[0].length(), pair[1].length()])
+	_check(collisions == 0, "%d paires que l'ancienne empreinte confondait (tranches déplacées, zéros de tête, multiples de (25^16 − 1)/2) : clés distinctes" % pairs.size())
+	var starts := ["1" + "o".repeat(40), "2" + "0".repeat(40), big.left(-24) + "o".repeat(24), big.left(-25) + "1" + "0".repeat(24),
+		"-" + big.left(-17) + "o".repeat(17), "-" + big.left(-20) + "1" + "0".repeat(19), "o".repeat(30), BookTextScript.b25_from_int(1 << 62),
+		huge.left(-40) + "o".repeat(40)]
+	var wrong := 0
+	for start: String in starts:
+		var context := BookTextScript.print_context(start, BookTextScript.b25_print(start))
+		for delta in range(-9, 10):
+			var target := BookTextScript.b25_add_small(start, delta)
+			if BookTextScript.print_at(context, delta) != BookTextScript.b25_print(target):
+				wrong += 1
+	_check(wrong == 0, "empreinte suivie de −9 à +9 à travers retenues et emprunts = empreinte relue (%d coordonnées, écarts : %d)" % [starts.size(), wrong])
+
+
+## Somme de deux nombres base 25 positifs (chiffres), pour les tests.
+static func _add_b25(x: String, y: String) -> String:
+	return BookTextScript._add_magnitudes(x, y)
 
 
 ## Un nombre de `count` chiffres base 25, sans zéro de tête.
@@ -180,11 +261,18 @@ func _test_guidance() -> void:
 # --- Catalogue ----------------------------------------------------------------------------------
 
 func _test_catalogue() -> void:
+	QuestScript._catalogues.clear()
+	var t0 := Time.get_ticks_usec()
 	var entries := QuestScript.load_catalogue()
+	var load_ms := (Time.get_ticks_usec() - t0) / 1000.0
+	var size := FileAccess.get_file_as_bytes(QuestScript.CATALOGUE_PATH).size()
+	print("    catalogue : %.2f Mo sur disque, lu en %.0f ms" % [size / 1.0e6, load_ms])
+	_check(size <= 2_000_000 and load_ms <= 500.0 and not FileAccess.file_exists("res://data/quetes/catalogue.json"),
+		"catalogue sous forme compacte : %.2f Mo (≤ 2 Mo), lu en %.0f ms (≤ 0,5 s), l'ancien JSON retiré" % [size / 1.0e6, load_ms])
 	var titles := entries.map(func(e: Dictionary) -> String: return e.title)
 	_check(titles == ["La biblioteca de Babel", "El Aleph", "El Zahir", "Tlön, Uqbar, Orbis Tertius", "El Golem",
 		"Mode d'emploi de la Bibliothèque", "Sur la vertu", "Sur l'humour"], "catalogue : 8 entrées dans l'ordre (lu : %s)" % [titles])
-	var raw: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(QuestScript.CATALOGUE_PATH))
+	var raw: Dictionary = QuestScript._read_document(QuestScript.CATALOGUE_PATH)
 	_check(int(raw.version) == QuestScript.CATALOGUE_VERSION and raw.keys().size() == 5, "catalogue version %d : entries, stolen_books, destinations" % QuestScript.CATALOGUE_VERSION)
 	var extra := []
 	for entry: Dictionary in raw.entries:
@@ -269,9 +357,34 @@ func _test_pins() -> void:
 	_check(QuestScript.save_pins(pins, PINS_TEST_PATH), "épingles enregistrées")
 	var again := QuestScript.load_pins(entries, PINS_TEST_PATH)
 	_check(again.map(func(p: Dictionary) -> String: return p.id) == pins.map(func(p: Dictionary) -> String: return p.id), "épingles relues à l'identique")
-	var stored: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(PINS_TEST_PATH))
+	# Épingles de livres trouvés (~1,3 Mo d'adresse chacun) : forme compacte, relues à l'identique ;
+	# un fichier d'épingles en JSON simple (version précédente du jeu) se relit aussi.
+	var far_pins := pins.duplicate()
+	for i in 3:
+		var a: Dictionary = entries[i].address.merged({"page": i})
+		far_pins = QuestScript.add_pin(far_pins, QuestScript.search_pin("lointaine %d" % i, a, i + 1))
+	var t_save := Time.get_ticks_usec()
+	_check(QuestScript.save_pins(far_pins, PINS_TEST_PATH), "épingles lointaines enregistrées")
+	var save_ms := (Time.get_ticks_usec() - t_save) / 1000.0
+	var far_size := FileAccess.get_file_as_bytes(PINS_TEST_PATH).size()
+	var far_again := QuestScript.load_pins(entries, PINS_TEST_PATH)
+	var same_far := far_again.size() == far_pins.size()
+	for i in mini(far_again.size(), far_pins.size()):
+		same_far = same_far and far_again[i].id == far_pins[i].id and far_again[i].get("address") == far_pins[i].get("address") \
+			and far_again[i].get("pages") == far_pins[i].get("pages")
+	_check(same_far and far_size < 1_000_000, "3 épingles de 1,3 Mo d'adresse : %.2f Mo sur disque (enregistrées en %.0f ms), relues à l'identique" % [far_size / 1.0e6, save_ms])
+	var plain := FileAccess.open(PINS_TEST_PATH, FileAccess.WRITE)
+	plain.store_string(JSON.stringify({"version": QuestScript.PINS_VERSION, "pins": [{"kind": QuestScript.KIND_SEARCH, "title": "ancienne", "address": target}]}))
+	plain.close()
+	var legacy := QuestScript.load_pins(entries, PINS_TEST_PATH)
+	_check(legacy.size() == 1 and legacy[0].title == "ancienne" and legacy[0].pages == 1, "épingles en JSON simple (version précédente) relues")
+	QuestScript.save_pins(pins, PINS_TEST_PATH)
+	var stored: Dictionary = QuestScript._read_document(PINS_TEST_PATH)
 	var search_stored: Array = stored.pins.filter(func(p: Dictionary) -> bool: return p.kind == QuestScript.KIND_SEARCH)
-	_check(search_stored.size() == 1 and search_stored[0].keys().size() == 3, "une recherche s'enregistre en titre et adresse seuls")
+	var stored_keys: Array = search_stored[0].keys() if search_stored.size() == 1 else []
+	stored_keys.sort()
+	_check(search_stored.size() == 1 and stored_keys == ["address", "kind", "pages", "title"],
+		"une recherche s'enregistre en titre, adresse et nombre de pages seuls (lu : %s)" % [stored_keys])
 	var restored := QuestScript.restore_catalogue(again, entries)
 	_check(restored.size() == 10 and QuestScript.missing_catalogue(restored, entries).is_empty() and restored[2].entry == "borges-el-zahir",
 		"rétablir remet l'entrée désépinglée à sa place, la recherche reste")
@@ -359,7 +472,15 @@ func _test_hud() -> void:
 	# de chiffres) ; un pas avance les derniers chiffres et le guidage sans relire la coordonnée.
 	var huge: String = QuestScript.load_catalogue()[0].address.hexagon
 	var deep := "-" + huge
+	var t_jump := Time.get_ticks_usec()
 	hud.set_address(huge, deep)
+	var jump_ms := (Time.get_ticks_usec() - t_jump) / 1000.0
+	var provisional := hud._address.text
+	_check(hud.address_pending() and provisional.contains("… (9170") and provisional.contains("niveau -…"),
+		"saut à 917 000 chiffres : adresse provisoire (%s), résumé demandé en arrière-plan, sans requête au service sur le fil principal (%.2f ms, guidage compris)" % [provisional, jump_ms])
+	var t_wait := Time.get_ticks_msec()
+	while hud.address_pending() and Time.get_ticks_msec() - t_wait < 20000:
+		await process_frame
 	var shown := hud._address.text
 	var summary := BookTextScript.coordinate_summary(huge)
 	_check(shown == "Hexagone %s · niveau %s" % [BookTextScript.summary_text(summary), BookTextScript.summary_text(BookTextScript.coordinate_summary(deep))]
@@ -378,6 +499,7 @@ func _test_hud() -> void:
 	var recomputed := "Hexagone %s · niveau %s" % [BookTextScript.summary_text(BookTextScript.coordinate_summary(h)), BookTextScript.summary_text(BookTextScript.coordinate_summary(l))]
 	_check(after == recomputed and after != shown, "cinq pas : l'adresse affichée suit (%s), comme la relecture par le service" % after)
 	_check(worst < 8000, "un pas de l'encart à 917 000 chiffres : %.2f ms au pire (budget 8 ms)" % (worst / 1000.0))
+	await _test_address_steps(hud, huge, deep)
 	hud.set_address(8, -2)
 
 	# Carnet : touche cachée, mot écrit dans l'alphabet, invocation à l'espace.
@@ -440,9 +562,26 @@ func _test_hud() -> void:
 
 	_check(hud.search_typed("la bibliotheque de babel") and hud.quest.title == "texte saisi", "un texte tapé démarre une quête")
 	_check(hud.pin_current("babel tapé"), "la recherche s'épingle")
-	var stored := FileAccess.get_file_as_string(PINS_TEST_PATH)
+	var stored := JSON.stringify(QuestScript._read_document(PINS_TEST_PATH))
 	_check(stored.contains("babel tapé") and not stored.contains("la bibliotheque de babel"), "le fichier d'épingles garde le titre, jamais le texte")
 	_check(not hud.search_typed("   ") and hud.last_error == "texte vide", "texte vide refusé")
+	# Un texte de plusieurs pages : la quête propose les pages qu'il occupe, l'épingle les garde.
+	_check(hud.search_typed("la bibliotheque de babel ".repeat(280)) and hud.quest.pages == [0, 1, 2] and hud.quest.notice.is_empty(),
+		"un texte de 7000 symboles : la quête propose ses 3 pages (lu : %s)" % [hud.quest.pages])
+	hud.open_panel()
+	texts = _texts(hud)
+	_check(texts.has("page") and texts.has("1") and texts.has("2") and texts.has("3"), "le panneau offre le choix des 3 pages")
+	hud.set_quest_page(2)
+	_check(hud.quest.address().page == 2 and hud.pin_current("trois pages"), "page 3 choisie, la recherche s'épingle")
+	var reloaded := QuestScript.load_pins(hud.catalogue, PINS_TEST_PATH)
+	var three := reloaded.filter(func(p: Dictionary) -> bool: return p.title == "trois pages")
+	var from_pin: QuestScript = QuestScript.from_pin(three[0], hud.catalogue) if three.size() == 1 else null
+	_check(from_pin != null and from_pin.pages == [0, 1, 2] and from_pin.page() == 2, "l'épingle relue garde les 3 pages et la page choisie")
+	_check(hud.search_typed(".. la bibliotheque de babel") and hud.quest.notice.contains("livre d'images"), "avis du service gardé : %s" % hud.quest.notice)
+	texts = _texts(hud)
+	_check(texts.has(hud.quest.notice), "le panneau montre l'avis du service")
+	hud.close_panel()
+	hud.unpin(hud.pins.filter(func(p: Dictionary) -> bool: return p.title == "trois pages")[0].id)
 	hud.unpin(hud.pins[0].id)
 	_check(hud.pins.size() == 9, "désépingler depuis le Hud")
 	hud.restore_pins()
@@ -520,6 +659,67 @@ func _mouse(_hud: Hud) -> bool:
 	release.pressed = false
 	_push(release)
 	return handled
+
+
+## L'adresse affichée pas à pas : de part et d'autre de 2^62 (retour à l'écriture entière), et à
+## 917 000 chiffres quand les 4 derniers chiffres débordent (suivis sur place) ou les 18 derniers
+## (résumé provisoire, recalcul en arrière-plan) : chaque pas sous 8 ms, l'adresse finale égale à
+## la relecture complète.
+func _test_address_steps(hud: Hud, huge: String, deep: String) -> void:
+	# Le service d'arrière-plan tourne déjà dans le jeu (titres des dos dès la première image) : son
+	# lancement (un fork du moteur) ne doit pas tomber dans les pas mesurés.
+	BookTextScript.warm_up()
+	var t_warm := Time.get_ticks_msec()
+	while BookTextScript.pending() > 0 and Time.get_ticks_msec() - t_warm < 20000:
+		await process_frame
+	var limit := BookTextScript.b25_from_int(1 << 62)
+	var h := BookTextScript.b25_add_small(limit, -2)
+	hud.set_address(h, "3")
+	var above := ""
+	for step: int in [1, 1, 1, 1, 1, -1, -1, -1, -1, -1]:
+		h = BookTextScript.b25_add_small(h, step)
+		hud.set_address(h, "3", Vector2i(step, 0))
+		if above.is_empty() and not BookTextScript.b25_fits_int(h):
+			above = hud._address.text
+	_check(above == "Hexagone %s · niveau 3" % BookTextScript.summary_text(BookTextScript.coordinate_summary(BookTextScript.b25_add_small(limit, 1)))
+			and above.contains("4611…7905 (19 chiffres)"),
+		"au-delà de 2^62, l'adresse s'abrège (%s)" % above)
+	_check(hud._address.text == "Hexagone %d · niveau 3" % ((1 << 62) - 2),
+		"revenue sous 2^62, l'adresse s'écrit de nouveau en entier (%s)" % hud._address.text)
+
+	var summary := BookTextScript.coordinate_summary(huge)
+	var cases := {
+		"4 derniers chiffres": BookTextScript.b25_add_small(huge, 9998 - int(summary.tail)),
+		"18 derniers chiffres": _add_large(huge, 999999999999999998 - int(summary.low)),
+	}
+	for label: String in cases:
+		var start: String = cases[label]
+		hud.set_address(start, deep)
+		var worst := 0
+		var current := start
+		for _i in 4:
+			current = BookTextScript.b25_add_small(current, 1)
+			var t := Time.get_ticks_usec()
+			hud.set_address(current, deep, Vector2i(1, 0))
+			worst = maxi(worst, Time.get_ticks_usec() - t)
+		var t0 := Time.get_ticks_msec()
+		while hud.address_pending() and Time.get_ticks_msec() - t0 < 20000:
+			await process_frame
+		var expected := "Hexagone %s · niveau %s" % [BookTextScript.summary_text(BookTextScript.coordinate_summary(current)),
+			BookTextScript.summary_text(BookTextScript.coordinate_summary(deep))]
+		_check(worst < 8000 and hud._address.text == expected,
+			"917 000 chiffres, débordement des %s : pas de l'adresse en %.2f ms au pire (budget 8 ms), puis %s" % [label, worst / 1000.0, hud._address.text])
+
+
+## coordonnée + delta pour un delta jusqu'à ~10^18 (par tranches que b25_add_small accepte).
+static func _add_large(coordinate: String, delta: int) -> String:
+	const CHUNK := 50000000000000000
+	var result := coordinate
+	while delta != 0:
+		var part: int = clampi(delta, -CHUNK, CHUNK)
+		result = BookTextScript.b25_add_small(result, part)
+		delta -= part
+	return result
 
 
 # --- Flèche de direction -----------------------------------------------------------------------

@@ -123,6 +123,12 @@ const FAR_FADE_END := 90.0
 # LIT ↔ FULL ne change rien aux livres (même matériau, mêmes titres).
 const GOLD := Color(0.86, 0.66, 0.30)         # dorure, sRGB
 const GOLD_METALLIC := 0.75
+## Lisibilité de la dorure sur les cuirs clairs (fauve, ocre) : un liseré sombre autour des lettres
+## (le cuir assombri de HALO_DARKEN sous le halo des glyphes, BookSpine.glyph_halo), comme le
+## creux d'un fer de reliure, et une dorure un peu plus claire à la lumière diffuse (GILT_DIFFUSE de
+## la couleur de l'or, au lieu de 1 − GOLD_METALLIC) ; le reflet de l'or ne change pas.
+const HALO_DARKEN := 0.55
+const GILT_DIFFUSE := 0.4
 const GOLD_ROUGHNESS := 0.45
 const TITLE_FADE_BEGIN := 24.0
 const TITLE_FADE_END := 32.0
@@ -214,6 +220,7 @@ varying flat vec3 book_albedo;
 // titles_alpha : 0 tant que la galerie n'a pas ses titres, puis 1 (fondu à leur arrivée).
 uniform sampler2D titles : hint_default_black, filter_nearest, repeat_disable;
 uniform sampler2D glyph_atlas : hint_default_transparent, filter_linear_mipmap, repeat_disable;
+uniform sampler2D glyph_halo : hint_default_transparent, filter_linear_mipmap, repeat_disable;
 uniform float titles_alpha = 0.0;
 
 const int MAX_SYMBOLS = 16;
@@ -231,6 +238,8 @@ const float TITLE_CENTER_EM = {TITLE_CENTER_EM};
 const vec3 GOLD_LINEAR = {GOLD_LINEAR};
 const float GOLD_METALLIC = {GOLD_METALLIC};
 const float GOLD_ROUGHNESS = {GOLD_ROUGHNESS};
+const float HALO_DARKEN = {HALO_DARKEN};
+const float GILT_DIFFUSE = {GILT_DIFFUSE};
 const float TITLE_FADE_BEGIN = {TITLE_FADE_BEGIN};
 const float TITLE_FADE_END = {TITLE_FADE_END};
 
@@ -267,9 +276,11 @@ uvec4 title_codes(int book) {
 			b.b | (b.a << 8u) | (c.r << 16u), c.g | (c.b << 8u) | (c.a << 16u));
 }
 
-// Encre dorée du dos au point `p` (mètres depuis le centre du dos) : titre et filets.
-float spine_ink(vec2 p, vec2 atlas_dx, vec2 atlas_dy, float end_aa) {
+// Encre dorée du dos au point `p` (mètres depuis le centre du dos) : titre et filets (x), et halo
+// des lettres (y : leur couverture élargie, où le cuir s'assombrit autour de l'or).
+vec2 spine_ink(vec2 p, vec2 atlas_dx, vec2 atlas_dy, float end_aa) {
 	float ink = 0.0;
+	float halo = 0.0;
 	float from_end = 0.5 * spine_height - abs(p.y);   // distance à la tête ou au pied
 	// Livre d'images : double filet doré en tête et en pied.
 	if (((spine_codes.x >> 20u) & 1u) == 1u) {
@@ -297,13 +308,14 @@ float spine_ink(vec2 p, vec2 atlas_dx, vec2 atlas_dy, float end_aa) {
 			vec2 cell = vec2(float(glyph % ATLAS_COLUMNS), float(glyph / ATLAS_COLUMNS));
 			vec2 uv = (cell * ATLAS_CELL_EM + in_cell) / atlas_em;
 			ink = max(ink, textureGrad(glyph_atlas, uv, atlas_dx / atlas_em, atlas_dy / atlas_em).a);
+			halo = max(halo, textureGrad(glyph_halo, uv, atlas_dx / atlas_em, atlas_dy / atlas_em).a);
 		}
 		pen += GLYPH_ADVANCE[glyph] + TRACKING_EM;
 		if (pen - ATLAS_ORIGIN_EM.x > t.x) {
 			break;
 		}
 	}
-	return ink;
+	return vec2(ink, halo);
 }
 #endif
 
@@ -444,15 +456,19 @@ void fragment() {
 	vec2 atlas_dy = dFdy(vec2(p.y, -p.x) / em);
 	float end_aa = fwidth(p.y);
 	float gilt = titles_alpha * (1.0 - smoothstep(TITLE_FADE_BEGIN, TITLE_FADE_END, d));
+	float shade = 0.0;
 	if (spine_face > 0.5 && gilt > 0.0) {
-		gilt *= spine_ink(p, atlas_dx, atlas_dy, end_aa);
+		vec2 inked = spine_ink(p, atlas_dx, atlas_dy, end_aa);
+		shade = gilt * max(inked.y - inked.x, 0.0);
+		gilt *= inked.x;
 	} else {
 		gilt = 0.0;
 	}
 	if (gilt > 0.0) {
 		sheen = gilt * LAMP_LIGHT * gold_sheen(world, normal, CAMERA_POSITION_WORLD);
 	}
-	albedo = mix(albedo, GOLD_LINEAR * (1.0 - GOLD_METALLIC), gilt);
+	albedo *= 1.0 - HALO_DARKEN * shade;
+	albedo = mix(albedo, GOLD_LINEAR * GILT_DIFFUSE, gilt);
 #endif
 #ifdef FACES
 	albedo = painted(UV);
@@ -475,6 +491,7 @@ static var _ring_mesh: ArrayMesh         # l'anneau du puits d'un niveau lointai
 static var _structure_boxes: Array = []  # [Transform3D, Vector3] : collisionneurs des murs et du sol
 static var _pool: Dictionary = {}        # nom d'enfant → enfants détachés, prêts à resservir
 static var _glyph_texture: ImageTexture  # atlas des glyphes de Lora (BookSpine), commun
+static var _halo_texture: ImageTexture   # halo des glyphes (BookSpine.glyph_halo), commun
 static var _title_cache: Dictionary = {} # clé de galerie → octets de la texture des titres (du plus ancien au plus récent)
 static var _title_queue: Array = []      # adresses (place) à calculer, urgentes d'abord
 static var _title_jobs: Array = []       # travaux {key, place, task, ticket, flags, failed, bytes}
@@ -969,7 +986,9 @@ func _fit(node: Node) -> void:
 			_book_material = _seeded_material("BOOKS")
 			if _glyph_texture == null:
 				_glyph_texture = ImageTexture.create_from_image(BookSpineScript.glyph_atlas())
+				_halo_texture = ImageTexture.create_from_image(BookSpineScript.glyph_halo())
 			_book_material.set_shader_parameter("glyph_atlas", _glyph_texture)
+			_book_material.set_shader_parameter("glyph_halo", _halo_texture)
 		node.material_override = _book_material
 	elif node.name == "Faces":
 		if _face_material == null:
@@ -1436,6 +1455,7 @@ static func _shader(variant: String) -> Shader:
 		"TITLE_CENTER_EM": _float(BookSpineScript.TITLE_CENTER_EM),
 		"GOLD_LINEAR": _vec3(_linear(GOLD)), "GOLD_METALLIC": _float(GOLD_METALLIC),
 		"GOLD_ROUGHNESS": _float(GOLD_ROUGHNESS),
+		"HALO_DARKEN": _float(HALO_DARKEN), "GILT_DIFFUSE": _float(GILT_DIFFUSE),
 		"TITLE_FADE_BEGIN": _float(TITLE_FADE_BEGIN), "TITLE_FADE_END": _float(TITLE_FADE_END),
 	})
 	_shaders[variant] = shader

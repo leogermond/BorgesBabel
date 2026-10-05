@@ -250,8 +250,25 @@ func _check_shader() -> void:
 	var shader := material.shader
 	var uniforms := shader.get_shader_uniform_list().map(func(u: Dictionary) -> String: return u.name)
 	_check(not uniforms.is_empty(), "le nuanceur des livres se compile (uniformes : %d)" % uniforms.size())
-	for name in ["titles", "glyph_atlas", "titles_alpha", "seed"]:
+	for name in ["titles", "glyph_atlas", "glyph_halo", "titles_alpha", "seed"]:
 		_check(uniforms.has(name), "uniforme %s présent" % name)
+	# Halo des lettres (liseré sombre sur les cuirs clairs) : il couvre chaque glyphe, et déborde autour.
+	var atlas := BookSpineScript.glyph_atlas()
+	var halo := BookSpineScript.glyph_halo()
+	var inside := 0
+	var covered := 0
+	var wider := 0
+	for y in range(0, atlas.get_height(), 3):
+		for x in range(0, atlas.get_width(), 3):
+			var a := atlas.get_pixel(x, y).a
+			var h := halo.get_pixel(x, y).a
+			if a > 0.5:
+				inside += 1
+				covered += int(h >= a - 0.01)
+			elif h > 0.5:
+				wider += 1
+	_check(inside > 0 and covered == inside and wider > inside / 4 and material.get_shader_parameter("glyph_halo") is Texture2D,
+		"halo des glyphes : couvre les %d points encrés, déborde sur %d autres, branché sur le matériau" % [inside, wider])
 	var forced := Shader.new()
 	forced.code = shader.code.replace("#if CURRENT_RENDERER == RENDERER_COMPATIBILITY", "#if 1")
 	_check(forced.code != shader.code and forced.get_shader_uniform_list().size() == uniforms.size(),

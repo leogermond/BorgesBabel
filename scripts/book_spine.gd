@@ -55,7 +55,12 @@ const TITLE_MARGIN := 0.035              # réserve en tête et en pied du dos, 
 const TITLE_SIZE_FRACTION := 0.42        # corps maximal (1 em) rapporté à l'épaisseur du dos
 const TITLE_CENTER_EM := 0.25            # milieu de l'œil des minuscules, au-dessus de la ligne de base
 
+## Halo des glyphes (glyph_halo) : la couverture de chaque glyphe élargie de HALO_PX pixels de
+## l'atlas (~0,05 em), par superposition de copies décalées.
+const HALO_PX := 3.0
+
 static var _atlas: Image
+static var _halo: Image
 static var _advances := PackedFloat32Array()
 
 
@@ -240,6 +245,28 @@ static func gallery_title_bytes(gallery_key: String, image_books: Array = []) ->
 
 
 # --- Atlas ---------------------------------------------------------------------------------
+
+## Le halo de l'atlas (même disposition) : couverture élargie de HALO_PX pixels dans toutes les
+## directions, union douce de copies décalées de l'atlas (blend_rect : opérations natives).
+static func glyph_halo() -> Image:
+	if _halo != null:
+		return _halo
+	var atlas := glyph_atlas()
+	var side := atlas.get_width()
+	var base := atlas.duplicate() as Image
+	base.clear_mipmaps()
+	var halo := Image.create(side, side, false, Image.FORMAT_RGBA8)
+	halo.fill(Color(1.0, 1.0, 1.0, 0.0))
+	var whole := Rect2i(0, 0, side, side)
+	for radius: float in [HALO_PX * 0.5, HALO_PX]:
+		for k in 12:
+			var angle := k * TAU / 12.0
+			halo.blend_rect(base, whole, Vector2i(roundi(radius * cos(angle)), roundi(radius * sin(angle))))
+	halo.blend_rect(base, whole, Vector2i.ZERO)
+	halo.generate_mipmaps()
+	_halo = halo
+	return _halo
+
 
 ## Chasse de chaque glyphe de GLYPHS, en em.
 static func glyph_advances() -> PackedFloat32Array:

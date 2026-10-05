@@ -1,12 +1,14 @@
 extends SceneTree
 ## Vérifie les dos de livres : titres (déterminisme, alphabet, longueurs, répartition), codage
-## pour le shader (aller-retour), capitales d'affichage, atlas de Lora et mise en page sur le dos,
-## compilation du shader, MultiMesh de démonstration.
+## pour le nuanceur (aller-retour, texture des titres d'une galerie), capitales d'affichage, atlas
+## de Lora et mise en page sur le dos, nuanceur des livres de Gallery (constantes de BookSpine).
 ## godot --headless --path . -s tests/test_book_spine.gd
-## Le shader se compile ici par l'analyseur du moteur sans écran ; aucune image n'est rendue.
+## Le nuanceur se compile ici par l'analyseur du moteur sans écran ; aucune image n'est rendue.
+## Les titres dans le monde (galeries, texture relue) : test_depth.
 
 const BookSpineScript := preload("res://scripts/book_spine.gd")
 const BookTextScript := preload("res://scripts/book_text.gd")
+const GalleryScript := preload("res://scripts/gallery.gd")
 const SAMPLES := 10000
 const INT_MIN := -9223372036854775807 - 1
 const INT_MAX := 9223372036854775807
@@ -21,7 +23,7 @@ func _initialize() -> void:
 	_check_atlas()
 	_check_layout()
 	_check_shader()
-	await _check_multimesh()
+	_check_gallery_bytes()
 	print("test_book_spine : %s" % ("OK" if _failures == 0 else "%d échec(s)" % _failures))
 	quit(1 if _failures else 0)
 
@@ -106,20 +108,22 @@ func _check_encoding() -> void:
 					text += symbols[(s + i * 7) % symbols.length()] if i != at else symbols[s]
 				for image in [false, true]:
 					var code := BookSpineScript.encode_title(text, image)
-					if BookSpineScript.decode_title(code) != text or BookSpineScript.decode_image_flag(code) != image:
+					if code.size() != BookSpineScript.BYTES_PER_BOOK or BookSpineScript.decode_title(code) != text \
+							or BookSpineScript.decode_image_flag(code) != image:
 						failures += 1
-					for value in [code.r, code.g, code.b, code.a]:
-						if value != floorf(value) or value < 8388608.0 or value >= 16777216.0 or float(int(value)) != value:
-							failures += 1
 	_check(failures == 0, "aller-retour encode/decode exact pour 0 à 16 symboles, chaque symbole à chaque place, drapeau d'image (%d écart(s))" % failures)
 	var code := BookSpineScript.encode_title("abcdefghijlmnoprstuvxz ,.")
 	_check(BookSpineScript.decode_title(code) == "abcdefghijlmnopr", "au-delà de 16 symboles, le titre est tronqué")
-	_check(BookSpineScript.decode_title(Color(0, 0, 0, 0)) == "" and not BookSpineScript.decode_image_flag(Color(0, 0, 0, 0)),
-		"donnée nulle → ni titre ni drapeau")
-	_check(BookSpineScript.decode_title(Color(INF, INF, 0, 0)) == "", "demi-flottants débordés (Compatibility) → pas de titre")
-	var packed := PackedFloat32Array([code.r, code.g, code.b, code.a])
-	var back := Color(packed[0], packed[1], packed[2], packed[3])
-	_check(back == code and BookSpineScript.decode_title(back) == "abcdefghijlmnopr", "le codage survit au passage en flottants 32 bits")
+	var zero := PackedByteArray()
+	zero.resize(BookSpineScript.BYTES_PER_BOOK)
+	_check(BookSpineScript.decode_title(zero) == "" and not BookSpineScript.decode_image_flag(zero),
+		"octets nuls (texture absente : hint_default_black) → ni titre ni drapeau")
+	_check(BookSpineScript.decode_title(PackedByteArray([1, 2, 3])) == "", "tampon trop court → pas de titre")
+	# 12 octets = 3 texels RGBA8 ; « z » (rang 21, code 22) partout : mots de 20 bits 22·(1 + 2⁵ + 2¹⁰ + 2¹⁵),
+	# le drapeau au bit 20 du premier ; valeurs calculées à part.
+	var full := BookSpineScript.encode_title("zzzzzzzzzzzzzzzz", true)
+	_check(full == PackedByteArray([214, 90, 27, 214, 90, 11, 214, 90, 11, 214, 90, 11]),
+		"octets petit-boutistes, 3 par mot, drapeau au bit 20 du premier mot (lu : %s)" % [full])
 
 
 func _check_atlas() -> void:
@@ -233,80 +237,65 @@ func _check_layout() -> void:
 	_check(worst_offset < 0.004, "titre centré le long du dos (écart maximal %.1f mm)" % (1000.0 * worst_offset))
 
 
+## Le nuanceur des livres de Gallery porte la mise en page de BookSpine et se compile, sous les
+## deux rendus ; son matériau reçoit l'atlas des glyphes et la texture des titres.
 func _check_shader() -> void:
-	var shader: Shader = load(BookSpineScript.SHADER_PATH)
+	var gallery := GalleryScript.create(1941, 0, GalleryScript.Detail.LIT)
+	var material: ShaderMaterial = gallery.get_node("Books").material_override
+	var shader := material.shader
 	var uniforms := shader.get_shader_uniform_list().map(func(u: Dictionary) -> String: return u.name)
-	_check(not uniforms.is_empty(), "le shader se compile (uniformes : %d)" % uniforms.size())
-	for name in ["glyph_atlas", "glyph_advance", "gold", "leather_roughness", "gold_roughness"]:
+	_check(not uniforms.is_empty(), "le nuanceur des livres se compile (uniformes : %d)" % uniforms.size())
+	for name in ["titles", "glyph_atlas", "titles_alpha", "seed"]:
 		_check(uniforms.has(name), "uniforme %s présent" % name)
-	var material := BookSpineScript.material()
-	_check(material == BookSpineScript.material(), "matériau partagé")
+	var forced := Shader.new()
+	forced.code = shader.code.replace("#if CURRENT_RENDERER == RENDERER_COMPATIBILITY", "#if 1")
+	_check(forced.code != shader.code and forced.get_shader_uniform_list().size() == uniforms.size(),
+		"la branche du rendu Compatibilité se compile aussi")
+	var advances := BookSpineScript.glyph_advances()
+	_check(shader.code.contains("float[47](%s, " % ("%.8f" % advances[0])) and shader.code.contains("%.8f" % advances[46]),
+		"les 47 chasses de l'atlas sont écrites dans le nuanceur")
+	_check(shader.code.contains("const float TRACKING_EM = %.8f;" % BookSpineScript.TRACKING_EM)
+			and shader.code.contains("const int ATLAS_COLUMNS = %d;" % BookSpineScript.ATLAS_COLUMNS),
+		"mise en page du nuanceur réglée depuis BookSpine")
 	_check(material.get_shader_parameter("glyph_atlas") is Texture2D, "atlas branché sur le matériau")
-	_check((material.get_shader_parameter("glyph_advance") as PackedFloat32Array).size() == 47, "47 chasses branchées sur le matériau")
-	_check(material.get_shader_parameter("atlas_columns") == 7 and is_equal_approx(material.get_shader_parameter("tracking_em"), BookSpineScript.TRACKING_EM),
-		"mise en page du shader réglée depuis BookSpine")
+	_check(not shader.code.contains("INSTANCE_CUSTOM") and not shader.code.contains("textureLod(titles"),
+		"titres lus au texel près (texelFetch), sans donnée personnalisée de MultiMesh")
+	gallery.load_titles_now()
+	var texture := gallery.titles_texture()
+	_check(texture != null and material.get_shader_parameter("titles") == texture and gallery.titles_alpha() == 1.0,
+		"texture des titres branchée, opacité 1 une fois chargée")
+	_check(texture != null and texture.get_width() == BookSpineScript.TEXTURE_WIDTH and texture.get_height() == BookSpineScript.TEXTURE_HEIGHT,
+		"texture de %d × %d texels" % [BookSpineScript.TEXTURE_WIDTH, BookSpineScript.TEXTURE_HEIGHT])
 	var code := BookSpineScript.encode_title("abc")
-	code.r += 26 << 15   # quatrième symbole : code 26, hors alphabet
-	_check(BookSpineScript.decode_title(code) == "abc", "codes 26 à 31 : fin du titre, comme dans le shader")
+	code[1] |= 26 << 7   # quatrième symbole (bits 15 à 19 du mot 0) : code 26, hors alphabet
+	_check(BookSpineScript.decode_title(code) == "abc", "codes 26 à 31 : fin du titre, comme dans le nuanceur")
+	gallery.free()
 
 
-func _check_multimesh() -> void:
+func _check_gallery_bytes() -> void:
 	var t0 := Time.get_ticks_usec()
-	var codes := BookSpineScript.gallery_codes(INT_MAX, -3)
+	var bytes := BookSpineScript.gallery_title_bytes(INT_MAX, -3)
 	var elapsed := (Time.get_ticks_usec() - t0) / 1000.0
-	print("    codes des 640 livres d'une galerie : %.2f ms" % elapsed)
-	_check(codes.size() == 640, "640 codes par galerie")
-	_check(BookSpineScript.decode_title(codes[(2 * 5 + 3) * 32 + 17]) == BookSpineScript.title(INT_MAX, -3, 2, 3, 17), "rang (mur·5 + étagère)·32 + livre")
+	print("    titres des 640 livres d'une galerie : %.2f ms" % elapsed)
+	_check(bytes.size() == 640 * BookSpineScript.BYTES_PER_BOOK
+			and bytes.size() == BookSpineScript.TEXTURE_WIDTH * BookSpineScript.TEXTURE_HEIGHT * 4,
+		"640 titres de 12 octets : une texture RGBA8 de 96 × 20")
+	_check(BookSpineScript.decode_title(bytes, (2 * 5 + 3) * 32 + 17) == BookSpineScript.title(INT_MAX, -3, 2, 3, 17), "rang (mur·5 + étagère)·32 + livre")
+	_check(BookSpineScript.gallery_title_bytes(7, -2) == BookSpineScript.gallery_title_bytes("7", "-2"),
+		"hexagone et niveau en entiers ou en décimaux : mêmes titres")
 	var flags := []
 	flags.resize(640)
 	flags.fill(false)
 	flags[50] = true
-	var flagged := BookSpineScript.gallery_codes(INT_MAX, -3, flags)
-	_check(BookSpineScript.decode_image_flag(flagged[50]) and not BookSpineScript.decode_image_flag(flagged[49]), "drapeau d'image transmis au bon livre")
-
-	t0 = Time.get_ticks_usec()
-	var buffer := PackedFloat32Array()
-	buffer.resize(640 * 20)
-	for i in 640:
-		var o := i * 20
-		buffer[o + 16] = codes[i].r
-		buffer[o + 17] = codes[i].g
-		buffer[o + 18] = codes[i].b
-		buffer[o + 19] = codes[i].a
-	print("    écriture des 640 codes dans un tampon de MultiMesh : %.2f ms" % ((Time.get_ticks_usec() - t0) / 1000.0))
-
-	# Démonstration : une étagère de 32 livres, tampon rempli d'un bloc comme dans gallery.gd
-	# (12 flottants de transformation, 4 de couleur, 4 de titre).
-	var shelf := PackedFloat32Array()
-	shelf.resize(32 * 20)
-	for book in 32:
-		var height := 0.28 + 0.0025 * book
-		var xform := Transform3D(Basis.from_scale(Vector3(0.13, height, 0.22)), Vector3(0.15 * book, height * 0.5, 0.0))
-		var row := [xform.basis.x.x, xform.basis.y.x, xform.basis.z.x, xform.origin.x,
-			xform.basis.x.y, xform.basis.y.y, xform.basis.z.y, xform.origin.y,
-			xform.basis.x.z, xform.basis.y.z, xform.basis.z.z, xform.origin.z,
-			0.42, 0.12, 0.08, 1.0, codes[book].r, codes[book].g, codes[book].b, codes[book].a]
-		for k in 20:
-			shelf[book * 20 + k] = row[k]
-	var mesh := BoxMesh.new()
-	mesh.size = Vector3.ONE
-	mesh.material = BookSpineScript.material()
-	var multimesh := MultiMesh.new()
-	multimesh.transform_format = MultiMesh.TRANSFORM_3D
-	multimesh.use_colors = true
-	multimesh.use_custom_data = true
-	multimesh.mesh = mesh
-	multimesh.instance_count = 32
-	multimesh.buffer = shelf
-	var instance := MultiMeshInstance3D.new()
-	instance.multimesh = multimesh
-	root.add_child(instance)
-	await process_frame
-	_check(instance.is_inside_tree() and multimesh.instance_count == 32, "MultiMesh de 32 livres titrés construit et ajouté à la scène")
-	# Le moteur sans écran ne fait que renvoyer le tampon : ce contrôle prouve que 32 × 20 flottants
-	# sont acceptés, pas la disposition (12 + 4 + 4), constatée seulement sous rendu réel (opengl3).
-	_check(multimesh.buffer.size() == 32 * 20, "tampon de 32 × 20 flottants accepté (disposition non vérifiable sans écran)")
-	instance.queue_free()
+	var flagged := BookSpineScript.gallery_title_bytes(INT_MAX, -3, flags)
+	_check(BookSpineScript.decode_image_flag(flagged, 50) and not BookSpineScript.decode_image_flag(flagged, 49)
+			and BookSpineScript.decode_title(flagged, 50) == BookSpineScript.decode_title(bytes, 50),
+		"drapeau d'image transmis au bon livre, titre intact")
+	# Même calcul sur un fil du moteur (comme Gallery.pump_titles).
+	var out := {}
+	var task := WorkerThreadPool.add_task(func() -> void: out["bytes"] = BookSpineScript.gallery_title_bytes(INT_MAX, -3))
+	WorkerThreadPool.wait_for_task_completion(task)
+	_check(out.get("bytes") == bytes, "calcul identique sur un fil de WorkerThreadPool")
 
 
 ## Titre recalculé à part, d'après la règle documentée de BookSpine._indices écrite autrement :

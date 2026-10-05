@@ -24,8 +24,22 @@ extends Node3D
 ## (deux par galerie, à chaque niveau), par la formule même de Godot pour une
 ## OmniLight3D sans ombre. Une galerie lointaine reçoit donc exactement la lumière
 ## d'une galerie proche ; une vraie lampe naît et meurt à poids nul.
+##
+## Les titres dorés (BookSpine) : le MultiMesh commun n'a pas de donnée par instance ; chaque
+## galerie LIT ou FULL donne à son matériau des livres une petite texture RGBA8 (96 × 20 texels,
+## 12 octets par livre) que le nuanceur lit au texel près selon INSTANCE_ID, sous Forward+ comme
+## sous Compatibility. Les titres d'une galerie (SHA-256 de 640 adresses, ~4 ms) se calculent sur
+## un fil du moteur, après la requête des livres d'images au service (pump_titles, une galerie par
+## image) ; ceux des galeries qui deviendront LIT au prochain pas sont préparés d'avance
+## (prefetch_titles) et gardés en mémoire : un pas ne fait que poser des textures prêtes. Des
+## titres arrivés en retard entrent en fondu (TITLE_APPEAR). La dorure est éclairée comme le cuir
+## (part réelle et part du nuanceur) ; son reflet, que les vraies lampes ne portent pas, vient du
+## nuanceur seul, pour toutes les lampes du réseau.
 
 const GalleryScript := preload("res://scripts/gallery.gd")
+const BookSpineScript := preload("res://scripts/book_spine.gd")
+const BookTextScript := preload("res://scripts/book_text.gd")
+const AmbientSpeakerScript := preload("res://scripts/ambient_speaker.gd")
 
 enum Detail { DISTANT, LIT, FULL }
 
@@ -87,6 +101,24 @@ const FOG_COLOR := Color(0.05, 0.035, 0.022)
 const FOG_DENSITY := 0.04      # reste de lumière : 38 % à 24 m, 15 % à 48 m, 6 % à 70 m
 const FAR_FADE_BEGIN := 70.0
 const FAR_FADE_END := 90.0
+
+# Les titres dorés des dos (BookSpine), dans les galeries LIT et FULL seulement : les façades
+# peintes des galeries DISTANT n'en portent pas. La dorure s'efface avec la distance à l'œil, de
+# TITLE_FADE_BEGIN à TITLE_FADE_END (title_weight), comme le suggère la règle « fondue avant la
+# frontière LIT ↔ DISTANT » : à 24 m une lettre de 2 cm couvre 0,7 pixel (champ de 75° sur 1080
+# lignes), le fondu ne retire qu'un éclat déjà mêlé au cuir par les mipmaps de l'atlas ; et à
+# chaque pas, test_depth vérifie qu'aucun dos en vue à moins de TITLE_FADE_END de l'œil ne
+# gagne ni ne perd ses titres (de fait, aucun dos d'une galerie DISTANT n'est en vue depuis la
+# galerie d'origine, vestibules et puits compris) : rien ne saute au passage LIT ↔ DISTANT.
+# LIT ↔ FULL ne change rien aux livres (même matériau, mêmes titres).
+const GOLD := Color(0.86, 0.66, 0.30)         # dorure, sRGB
+const GOLD_METALLIC := 0.75
+const GOLD_ROUGHNESS := 0.45
+const TITLE_FADE_BEGIN := 24.0
+const TITLE_FADE_END := 32.0
+const TITLE_APPEAR := 0.5            # s : fondu d'arrivée des titres calculés en retard
+const TITLE_CACHE_SIZE := 160        # galeries dont les titres restent en mémoire (7,5 Ko chacune)
+const TITLE_JOBS := 4                # calculs de titres en cours au plus, sur les fils du moteur
 
 const LEATHER: Array[Color] = [
 	Color(0.42, 0.12, 0.08), Color(0.30, 0.18, 0.10), Color(0.16, 0.24, 0.14),
@@ -165,6 +197,104 @@ vec3 book_color(int book) {
 
 #ifdef BOOKS
 varying flat vec3 book_albedo;
+
+// Titres dorés (BookSpine). La texture de la galerie porte 3 texels RGBA8 par livre : 4 mots
+// de 20 bits, 4 symboles de 5 bits chacun (0 : fin, 1 à 25 : rang + 1, 26 à 31 : fin aussi),
+// le bit 20 du premier mot marque un livre d'images (double filet doré en tête et en pied).
+// titles_alpha : 0 tant que la galerie n'a pas ses titres, puis 1 (fondu à leur arrivée).
+uniform sampler2D titles : hint_default_black, filter_nearest, repeat_disable;
+uniform sampler2D glyph_atlas : hint_default_transparent, filter_linear_mipmap, repeat_disable;
+uniform float titles_alpha = 0.0;
+
+const int MAX_SYMBOLS = 16;
+const int SYMBOLS = 25;
+const int LETTERS = 22;            // rangs 0 à 21 : les lettres ; 22 espace, 23 virgule, 24 point
+const int PERIOD = 24;
+const float GLYPH_ADVANCE[47] = float[47]({GLYPH_ADVANCE});   // chasses en em : 25 symboles, 22 capitales
+const float ATLAS_CELL_EM = {ATLAS_CELL_EM};
+const vec2 ATLAS_ORIGIN_EM = {ATLAS_ORIGIN_EM};
+const int ATLAS_COLUMNS = {ATLAS_COLUMNS};
+const float TRACKING_EM = {TRACKING_EM};
+const float TITLE_MARGIN = {TITLE_MARGIN};
+const float TITLE_SIZE_FRACTION = {TITLE_SIZE_FRACTION};
+const float TITLE_CENTER_EM = {TITLE_CENTER_EM};
+const vec3 GOLD_LINEAR = {GOLD_LINEAR};
+const float GOLD_METALLIC = {GOLD_METALLIC};
+const float GOLD_ROUGHNESS = {GOLD_ROUGHNESS};
+const float TITLE_FADE_BEGIN = {TITLE_FADE_BEGIN};
+const float TITLE_FADE_END = {TITLE_FADE_END};
+
+varying vec3 spine_local;          // position dans la boîte unité
+varying float spine_face;          // 1 sur le dos (face −Z locale, tournée vers la salle), 0 ailleurs
+varying flat float spine_height;   // hauteur du livre, en mètres
+varying flat uvec4 spine_codes;    // les 4 mots du titre
+varying flat vec2 spine_layout;    // corps du titre (m par em), longueur du titre (em)
+
+uint symbol_code(uvec4 codes, int i) {
+	return (codes[i >> 2] >> uint(5 * (i & 3))) & 31u;
+}
+
+// Le glyphe à dessiner pour le rang `symbol`, et la règle des capitales mise à jour.
+int glyph_for(int symbol, inout bool capital) {
+	if (symbol < LETTERS) {
+		int glyph = capital ? symbol + SYMBOLS : symbol;
+		capital = false;
+		return glyph;
+	}
+	if (symbol == PERIOD) {
+		capital = true;
+	}
+	return symbol;
+}
+
+// Les 4 mots du titre du livre `book` : 12 octets dans 3 texels de la ligne mur·5 + étagère.
+uvec4 title_codes(int book) {
+	ivec2 at = ivec2((book % BOOKS_PER_SHELF) * 3, book / BOOKS_PER_SHELF);
+	uvec4 a = uvec4(round(texelFetch(titles, at, 0) * 255.0));
+	uvec4 b = uvec4(round(texelFetch(titles, at + ivec2(1, 0), 0) * 255.0));
+	uvec4 c = uvec4(round(texelFetch(titles, at + ivec2(2, 0), 0) * 255.0));
+	return uvec4(a.r | (a.g << 8u) | (a.b << 16u), a.a | (b.r << 8u) | (b.g << 16u),
+			b.b | (b.a << 8u) | (c.r << 16u), c.g | (c.b << 8u) | (c.a << 16u));
+}
+
+// Encre dorée du dos au point `p` (mètres depuis le centre du dos) : titre et filets.
+float spine_ink(vec2 p, vec2 atlas_dx, vec2 atlas_dy, float end_aa) {
+	float ink = 0.0;
+	float from_end = 0.5 * spine_height - abs(p.y);   // distance à la tête ou au pied
+	// Livre d'images : double filet doré en tête et en pied.
+	if (((spine_codes.x >> 20u) & 1u) == 1u) {
+		float wide = smoothstep(0.012 - end_aa, 0.012 + end_aa, from_end)
+				- smoothstep(0.018 - end_aa, 0.018 + end_aa, from_end);
+		float thin = smoothstep(0.022 - end_aa, 0.022 + end_aa, from_end)
+				- smoothstep(0.0245 - end_aa, 0.0245 + end_aa, from_end);
+		ink = max(wide, thin);
+	}
+	// Le titre se lit de bas en haut, le haut des lettres vers +X local ; t en em : t.x le long
+	// de la ligne de base (du pied vers la tête), t.y vers le haut des lettres.
+	float em = max(spine_layout.x, 0.0001);
+	vec2 t = vec2(p.y / em + 0.5 * spine_layout.y, p.x / em + TITLE_CENTER_EM);
+	float atlas_em = ATLAS_CELL_EM * float(ATLAS_COLUMNS);
+	float pen = 0.0;
+	bool capital = true;
+	for (int i = 0; i < MAX_SYMBOLS; i++) {
+		uint code = symbol_code(spine_codes, i);
+		if (code == 0u || code > uint(SYMBOLS)) {
+			break;
+		}
+		int glyph = glyph_for(int(code) - 1, capital);
+		vec2 in_cell = ATLAS_ORIGIN_EM + vec2(t.x - pen, -t.y);
+		if (all(greaterThan(in_cell, vec2(0.0))) && all(lessThan(in_cell, vec2(ATLAS_CELL_EM)))) {
+			vec2 cell = vec2(float(glyph % ATLAS_COLUMNS), float(glyph / ATLAS_COLUMNS));
+			vec2 uv = (cell * ATLAS_CELL_EM + in_cell) / atlas_em;
+			ink = max(ink, textureGrad(glyph_atlas, uv, atlas_dx / atlas_em, atlas_dy / atlas_em).a);
+		}
+		pen += GLYPH_ADVANCE[glyph] + TRACKING_EM;
+		if (pen - ATLAS_ORIGIN_EM.x > t.x) {
+			break;
+		}
+	}
+	return ink;
+}
 #endif
 
 #ifdef FACES
@@ -185,8 +315,25 @@ vec3 painted(vec2 uv) {
 void vertex() {
 #ifdef BOOKS
 	// Boîte unité ; l'instance la pose sur sa planche, sa hauteur vient de la graine.
-	VERTEX.y = (VERTEX.y + 0.5) * book_height(INSTANCE_ID);
+	spine_local = VERTEX;
+	spine_face = step(0.5, -NORMAL.z);
+	spine_height = book_height(INSTANCE_ID);
+	VERTEX.y = (VERTEX.y + 0.5) * spine_height;
 	book_albedo = book_color(INSTANCE_ID);
+	// Le titre et sa mise en page (BookSpine.title_layout) : un corps qui tient dans le dos.
+	spine_codes = title_codes(INSTANCE_ID);
+	float width = 0.0;
+	bool capital = true;
+	for (int i = 0; i < MAX_SYMBOLS; i++) {
+		uint code = symbol_code(spine_codes, i);
+		if (code == 0u || code > uint(SYMBOLS)) {
+			break;
+		}
+		width += GLYPH_ADVANCE[glyph_for(int(code) - 1, capital)] + TRACKING_EM;
+	}
+	width = max(width - TRACKING_EM, 0.0);
+	float room = max(spine_height - 2.0 * TITLE_MARGIN, 0.0);
+	spine_layout = vec2(min(BOOK_THICK * TITLE_SIZE_FRACTION, room / max(width, 0.001)), width);
 #endif
 }
 
@@ -220,6 +367,47 @@ float virtual_light(vec3 p, vec3 n, vec3 eye) {
 	return sum;
 }
 
+#ifdef BOOKS
+// Reflet de la dorure (GGX, Smith corrélé, Schlick : le spéculaire de Godot pour un métal de
+// rugosité GOLD_ROUGHNESS), de TOUTES les lampes du réseau à poids entier. Les vraies lampes
+// n'ont pas de spéculaire (light_specular = 0, specular_disabled) : le nuanceur le porte seul,
+// sans dépendre de la part réelle, et rien ne saute quand une lampe devient réelle.
+vec3 gold_sheen(vec3 p, vec3 n, vec3 eye) {
+	vec3 v = normalize(eye - p);
+	float nv = max(dot(n, v), 0.0001);
+	float a = GOLD_ROUGHNESS * GOLD_ROUGHNESS;
+	float a2 = a * a;
+	vec3 f0 = mix(vec3(0.04), GOLD_LINEAR, GOLD_METALLIC);
+	float n0 = round(p.z / PITCH);
+	float k0 = floor((p.y - LAMP_Y) / LEVEL_PITCH);
+	vec3 sum = vec3(0.0);
+	for (int iz = -1; iz <= 1; iz++) {
+		float z = (n0 + float(iz)) * PITCH;
+		for (int iy = -2; iy <= 3; iy++) {
+			float y = LAMP_Y + (k0 + float(iy)) * LEVEL_PITCH;
+			for (int side = 0; side < 2; side++) {
+				vec3 to = vec3(side == 0 ? -LAMP_X : LAMP_X, y, z) - p;
+				float d = max(length(to), 0.0001);
+				vec3 l = to / d;
+				float nl = dot(n, l);
+				if (d < LAMP_RANGE && nl > 0.0) {
+					float nd = d / LAMP_RANGE;
+					nd = 1.0 - nd * nd * nd * nd;
+					vec3 h = normalize(l + v);
+					float nh = max(dot(n, h), 0.0);
+					float q = nh * nh * (a2 - 1.0) + 1.0;
+					float ggx = a2 / (PI * q * q);
+					float vis = 0.5 / (nl * (nv * (1.0 - a) + a) + nv * (nl * (1.0 - a) + a));
+					vec3 fresnel = f0 + (1.0 - f0) * pow(1.0 - max(dot(v, h), 0.0), 5.0);
+					sum += nd * nd / d * nl * PI * ggx * vis * fresnel;
+				}
+			}
+		}
+	}
+	return sum;
+}
+#endif
+
 // Le rendu Compatibilité tient ALBEDO et EMISSION pour du sRGB et les linéarise ensuite.
 vec3 encoded(vec3 c) {
 #if CURRENT_RENDERER == RENDERER_COMPATIBILITY
@@ -231,18 +419,37 @@ vec3 encoded(vec3 c) {
 
 void fragment() {
 	vec3 albedo = albedo_linear;
+	vec3 world = (INV_VIEW_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	vec3 normal = normalize((INV_VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz);
+	float d = length(VERTEX);
+	vec3 sheen = vec3(0.0);
 #ifdef BOOKS
 	albedo = book_albedo;
+	// La dorure, pondérée par title_weight(d) : entière jusqu'à TITLE_FADE_BEGIN de l'œil, nulle
+	// dès TITLE_FADE_END, en deçà de toute galerie sans titres qu'un œil de la galerie d'origine
+	// peut voir. Dérivées prises hors de toute branche, pour les mipmaps de l'atlas.
+	vec2 p = vec2(spine_local.x * BOOK_THICK, spine_local.y * spine_height);
+	float em = max(spine_layout.x, 0.0001);
+	vec2 atlas_dx = dFdx(vec2(p.y, -p.x) / em);
+	vec2 atlas_dy = dFdy(vec2(p.y, -p.x) / em);
+	float end_aa = fwidth(p.y);
+	float gilt = titles_alpha * (1.0 - smoothstep(TITLE_FADE_BEGIN, TITLE_FADE_END, d));
+	if (spine_face > 0.5 && gilt > 0.0) {
+		gilt *= spine_ink(p, atlas_dx, atlas_dy, end_aa);
+	} else {
+		gilt = 0.0;
+	}
+	if (gilt > 0.0) {
+		sheen = gilt * LAMP_LIGHT * gold_sheen(world, normal, CAMERA_POSITION_WORLD);
+	}
+	albedo = mix(albedo, GOLD_LINEAR * (1.0 - GOLD_METALLIC), gilt);
 #endif
 #ifdef FACES
 	albedo = painted(UV);
 #endif
-	vec3 world = (INV_VIEW_MATRIX * vec4(VERTEX, 1.0)).xyz;
-	vec3 normal = normalize((INV_VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz);
 	ALBEDO = encoded(albedo);
 	// Lumière des lampes en partie virtuelles : ajoutée comme l'est la lumière diffuse.
-	EMISSION = encoded(albedo * LAMP_LIGHT * virtual_light(world, normal, CAMERA_POSITION_WORLD) + emission_linear);
-	float d = length(VERTEX);
+	EMISSION = encoded(albedo * LAMP_LIGHT * virtual_light(world, normal, CAMERA_POSITION_WORLD) + emission_linear + sheen);
 	FOG = vec4(FOG_LINEAR, 1.0 - exp(-FOG_DENSITY * d) * (1.0 - smoothstep(FAR_FADE_BEGIN, FAR_FADE_END, d)));
 }
 """
@@ -257,14 +464,23 @@ static var _faces_mesh: ArrayMesh        # façades des quatre murs de livres, �
 static var _ring_mesh: ArrayMesh         # l'anneau du puits d'un niveau lointain
 static var _structure_boxes: Array = []  # [Transform3D, Vector3] : collisionneurs des murs et du sol
 static var _pool: Dictionary = {}        # nom d'enfant → enfants détachés, prêts à resservir
+static var _glyph_texture: ImageTexture  # atlas des glyphes de Lora (BookSpine), commun
+static var _title_cache: Dictionary = {} # "hexagone|niveau" → octets de la texture des titres (du plus ancien au plus récent)
+static var _title_queue: Array = []      # [clé, hexagone, niveau] à calculer, urgentes d'abord
+static var _title_jobs: Array = []       # [tâche de WorkerThreadPool, travail {key, hexagon, level, flags, bytes}]
+static var _title_waiting: Array = []    # galeries LIT ou FULL qui attendent leurs titres
 
 var hexagon: int
 var level: int
 var detail: Detail = Detail.DISTANT
 var _book_heights := PackedFloat32Array()   # calculées à la demande (book_heights)
-var _book_material: ShaderMaterial          # livres un à un : graine de l'adresse
+var _book_material: ShaderMaterial          # livres un à un : graine de l'adresse, titres
 var _face_material: ShaderMaterial          # façades peintes : même graine
 var _parts: Dictionary = {}                 # nom → enfant présent (voir _keep)
+var _titles_key := ""                       # adresse dont la texture des titres porte les titres
+var _titles_texture: ImageTexture           # titres des 640 livres (BookSpine.gallery_title_bytes)
+var _titles_tween: Tween
+var _speaker: AmbientSpeakerScript          # haut-parleur d'ambiance du vestibule (set_speaker)
 
 
 static func create(p_hexagon: int, p_level: int, p_detail: Detail = Detail.FULL) -> GalleryScript:
@@ -289,6 +505,8 @@ func readdress(p_hexagon: int, p_level: int, p_detail: Detail) -> void:
 			_book_material.set_shader_parameter("seed", shader_seed)
 		if _face_material != null:
 			_face_material.set_shader_parameter("seed", shader_seed)
+		_titles_key = ""
+		_set_titles_alpha(0.0)
 	set_detail(p_detail)
 
 
@@ -304,6 +522,186 @@ func set_detail(p_detail: Detail) -> void:
 		_keep("Structure", full, _new_structure)
 		for wall in WALLS:
 			_keep(BOOKCASES[wall], full, _new_bookcase.bind(wall))
+	if detail >= Detail.LIT:
+		_want_titles()
+
+
+## Donne ou retire au vestibule de la galerie (côté +Z, à z = APOTHEM + HALL_LENGTH / 2) son
+## haut-parleur d'ambiance ; à appeler une fois la galerie à sa place. Un haut-parleur retiré
+## s'éteint en fondu (AmbientSpeaker.retire) et n'appartient plus à la galerie.
+func set_speaker(wanted: bool) -> void:
+	if wanted and _speaker == null:
+		_speaker = AmbientSpeakerScript.create()
+		_speaker.position = Vector3(0.0, AmbientSpeakerScript.HEIGHT, APOTHEM + HALL_LENGTH * 0.5)
+		add_child(_speaker)
+	elif not wanted and _speaker != null:
+		_speaker.retire()
+		_speaker = null
+
+
+# --- Titres des dos --------------------------------------------------------------------------
+
+## Poids de la dorure à la distance `d` de l'œil (jumeau du fondu du nuanceur des livres).
+static func title_weight(d: float) -> float:
+	return 1.0 - smoothstep(TITLE_FADE_BEGIN, TITLE_FADE_END, d)
+
+
+## Vrai quand la texture des titres porte ceux de l'adresse de la galerie.
+func titles_ready() -> bool:
+	return detail >= Detail.LIT and _titles_key == _title_key(hexagon, level)
+
+
+## Opacité des titres dans le nuanceur : 0 en attente, 1 une fois arrivés (après un fondu).
+func titles_alpha() -> float:
+	return _book_material.get_shader_parameter("titles_alpha") if _book_material != null else 0.0
+
+
+## La texture des titres branchée sur le matériau des livres (null avant les premiers titres).
+func titles_texture() -> ImageTexture:
+	return _titles_texture
+
+
+## Calcule tout de suite les titres de la galerie s'ils manquent (démonstration, tests) :
+## une requête au service et ~4 ms de hachage, sur le fil principal.
+func load_titles_now() -> void:
+	if detail < Detail.LIT or titles_ready():
+		return
+	var key := _title_key(hexagon, level)
+	if not _title_cache.has(key):
+		_store_titles(key, BookSpineScript.gallery_title_bytes(hexagon, level,
+			BookTextScript.gallery_image_books(hexagon, level)))
+	_want_titles()
+
+
+## Prépare les titres des galeries qui deviendront LIT ou FULL au prochain pas : les cases
+## `cells` (à vraies lampes, relatives à l'origine `origin_hexagon`, `origin_level`), décalées
+## d'un pas dans chacune des quatre directions. Les galeries en attente passent d'abord, de la
+## plus proche à la plus lointaine.
+static func prefetch_titles(origin_hexagon: int, origin_level: int, cells: Array) -> void:
+	var queue: Array = []
+	var queued := {}
+	_title_waiting = _title_waiting.filter(func(g: Variant) -> bool:
+		return is_instance_valid(g) and g.detail >= Detail.LIT and not g.titles_ready())
+	_title_waiting.sort_custom(func(a: Node3D, b: Node3D) -> bool:
+		return a.position.length_squared() < b.position.length_squared())
+	for gallery: GalleryScript in _title_waiting:
+		var key := _title_key(gallery.hexagon, gallery.level)
+		if not queued.has(key):
+			queued[key] = true
+			queue.append([key, gallery.hexagon, gallery.level])
+	var lit := {}
+	for cell: Vector2i in cells:
+		lit[cell] = true
+	for move: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+		for cell: Vector2i in cells:
+			var next: Vector2i = cell + move
+			if lit.has(next):
+				continue
+			var key := _title_key(origin_hexagon + next.x, origin_level + next.y)
+			if not queued.has(key) and not _title_cache.has(key):
+				queued[key] = true
+				queue.append([key, origin_hexagon + next.x, origin_level + next.y])
+	_title_queue = queue
+
+
+## Fait avancer les titres, une fois par image : range les calculs finis (et les donne aux
+## galeries qui les attendent), puis lance au plus un calcul : la requête des livres d'images
+## au service (une par galerie, sur ce fil), et le hachage des 640 titres sur un fil du moteur.
+static func pump_titles() -> void:
+	for i in range(_title_jobs.size() - 1, -1, -1):
+		var task: int = _title_jobs[i][0]
+		if WorkerThreadPool.is_task_completed(task):
+			WorkerThreadPool.wait_for_task_completion(task)
+			var job: Dictionary = _title_jobs[i][1]
+			_title_jobs.remove_at(i)
+			_store_titles(job["key"], job["bytes"])
+	while not _title_queue.is_empty() and _title_jobs.size() < TITLE_JOBS:
+		var entry: Array = _title_queue.pop_front()
+		if _title_cache.has(entry[0]) or _title_running(entry[0]):
+			continue
+		var job := {"key": entry[0], "hexagon": entry[1], "level": entry[2],
+			"flags": BookTextScript.gallery_image_books(entry[1], entry[2]), "bytes": PackedByteArray()}
+		var task := WorkerThreadPool.add_task(func() -> void:
+			job["bytes"] = BookSpineScript.gallery_title_bytes(job["hexagon"], job["level"], job["flags"]),
+			false, "titres des dos")
+		_title_jobs.append([task, job])
+		break
+
+
+## Vrai quand aucun titre ne reste à calculer.
+static func titles_idle() -> bool:
+	return _title_queue.is_empty() and _title_jobs.is_empty()
+
+
+static func _title_key(p_hexagon: Variant, p_level: Variant) -> String:
+	return "%s|%s" % [str(p_hexagon), str(p_level)]
+
+
+static func _title_running(key: String) -> bool:
+	for running: Array in _title_jobs:
+		if running[1]["key"] == key:
+			return true
+	return false
+
+
+## Range des titres calculés (les plus anciens sortent au-delà de TITLE_CACHE_SIZE) et les
+## donne, en fondu, aux galeries qui les attendent.
+static func _store_titles(key: String, bytes: PackedByteArray) -> void:
+	_title_cache.erase(key)
+	_title_cache[key] = bytes
+	while _title_cache.size() > TITLE_CACHE_SIZE:
+		_title_cache.erase(_title_cache.keys()[0])
+	var still: Array = []
+	for gallery: Variant in _title_waiting:   # une galerie libérée en attente : sautée
+		if not is_instance_valid(gallery) or gallery.detail < Detail.LIT or gallery.titles_ready():
+			continue
+		if _title_key(gallery.hexagon, gallery.level) == key:
+			gallery._apply_titles(key, bytes, true)
+		else:
+			still.append(gallery)
+	_title_waiting = still
+
+
+## Les titres de l'adresse : de la mémoire tout de suite, sinon en attente du calcul.
+func _want_titles() -> void:
+	var key := _title_key(hexagon, level)
+	if _titles_key == key:
+		return
+	var bytes: Variant = _title_cache.get(key)
+	if bytes != null:
+		_title_cache.erase(key)   # le plus récent sort le dernier
+		_title_cache[key] = bytes
+		_apply_titles(key, bytes, false)
+		return
+	_set_titles_alpha(0.0)
+	if not _title_waiting.has(self):
+		_title_waiting.append(self)
+	if not _title_running(key) and not _title_queue.any(func(e: Array) -> bool: return e[0] == key):
+		_title_queue.push_front([key, hexagon, level])
+
+
+func _apply_titles(key: String, bytes: PackedByteArray, fade: bool) -> void:
+	var image := Image.create_from_data(BookSpineScript.TEXTURE_WIDTH, BookSpineScript.TEXTURE_HEIGHT,
+		false, Image.FORMAT_RGBA8, bytes)
+	# Une texture neuve (7,5 Ko) plutôt que update() : la texture branchée sur le matériau reste
+	# lisible telle quelle (le rendu factice des tests ne garde que l'image de création).
+	_titles_texture = ImageTexture.create_from_image(image)
+	_book_material.set_shader_parameter("titles", _titles_texture)
+	_titles_key = key
+	if fade and is_inside_tree():
+		_set_titles_alpha(0.0)
+		_titles_tween = create_tween()
+		_titles_tween.tween_property(_book_material, "shader_parameter/titles_alpha", 1.0, TITLE_APPEAR)
+	else:
+		_set_titles_alpha(1.0)
+
+
+func _set_titles_alpha(alpha: float) -> void:
+	if _titles_tween != null:
+		_titles_tween.kill()
+		_titles_tween = null
+	if _book_material != null:
+		_book_material.set_shader_parameter("titles_alpha", alpha)
 
 
 ## Règle la part réelle de chaque lampe de la galerie pour un œil en `eye` (repère du monde).
@@ -457,6 +855,9 @@ func _fit(node: Node) -> void:
 	if node is MultiMeshInstance3D:
 		if _book_material == null:
 			_book_material = _seeded_material("BOOKS")
+			if _glyph_texture == null:
+				_glyph_texture = ImageTexture.create_from_image(BookSpineScript.glyph_atlas())
+			_book_material.set_shader_parameter("glyph_atlas", _glyph_texture)
 		node.material_override = _book_material
 	elif node.name == "Faces":
 		if _face_material == null:
@@ -470,6 +871,11 @@ static func release_pool() -> void:
 		for node: Node in pool:
 			node.free()
 	_pool.clear()
+	for running: Array in _title_jobs:
+		WorkerThreadPool.wait_for_task_completion(running[0])
+	_title_jobs.clear()
+	_title_queue.clear()
+	_title_waiting.clear()
 
 
 func _new_interior() -> Node:
@@ -876,6 +1282,14 @@ static func _shader(variant: String) -> Shader:
 	var leather := PackedStringArray()
 	for color in LEATHER:
 		leather.append(_vec3(Vector3(color.r, color.g, color.b)))
+	# Chasses des glyphes de l'atlas, pour les seuls livres (rendu de l'atlas : ~10 ms, une fois).
+	var advances := PackedStringArray()
+	for advance in (BookSpineScript.glyph_advances() if variant == "BOOKS" else PackedFloat32Array()):
+		advances.append(_float(advance))
+	advances.resize(BookSpineScript.GLYPHS.length())
+	for i in advances.size():
+		if advances[i].is_empty():
+			advances[i] = _float(0.0)
 	var shader := Shader.new()
 	shader.code = LIBRARY_SHADER.format({
 		"VARIANT": variant,
@@ -892,6 +1306,17 @@ static func _shader(variant: String) -> Shader:
 		"BOOK_MAX_DARKEN": _float(BOOK_MAX_DARKEN),
 		"WOOD_LINEAR": _vec3(_linear(ALBEDO["wood"])),
 		"LEATHER": ", ".join(leather),
+		"GLYPH_ADVANCE": ", ".join(advances),
+		"ATLAS_CELL_EM": _float(float(BookSpineScript.CELL_PX) / BookSpineScript.FONT_PX),
+		"ATLAS_ORIGIN_EM": "vec2(%s, %s)" % [_float(float(BookSpineScript.PEN_PX.x) / BookSpineScript.FONT_PX),
+			_float(float(BookSpineScript.PEN_PX.y) / BookSpineScript.FONT_PX)],
+		"ATLAS_COLUMNS": str(BookSpineScript.ATLAS_COLUMNS),
+		"TRACKING_EM": _float(BookSpineScript.TRACKING_EM), "TITLE_MARGIN": _float(BookSpineScript.TITLE_MARGIN),
+		"TITLE_SIZE_FRACTION": _float(BookSpineScript.TITLE_SIZE_FRACTION),
+		"TITLE_CENTER_EM": _float(BookSpineScript.TITLE_CENTER_EM),
+		"GOLD_LINEAR": _vec3(_linear(GOLD)), "GOLD_METALLIC": _float(GOLD_METALLIC),
+		"GOLD_ROUGHNESS": _float(GOLD_ROUGHNESS),
+		"TITLE_FADE_BEGIN": _float(TITLE_FADE_BEGIN), "TITLE_FADE_END": _float(TITLE_FADE_END),
 	})
 	_shaders[variant] = shader
 	return shader

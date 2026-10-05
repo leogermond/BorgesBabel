@@ -527,6 +527,59 @@ static var _shown: Array = []            # galeries dont la texture porte des ti
 ## détail du flush (BookText.last_flush_parts).
 static var last_pump_usec := 0
 static var last_pump_parts := PackedInt32Array()
+
+## Chronomètres des pas (mesures des tests) : actifs seulement quand `prof_on` est vrai (les tests
+## l'allument) ; sinon chaque point de mesure ne coûte qu'un test de booléen. Un pas (Main._shift,
+## Main._shift_level) est découpé en parties de travail ; `prof_parts` donne le temps de chacune
+## en µs, SANS le temps des parties imbriquées (prof_begin dans une partie ouverte : le temps de la
+## fille est retiré de la mère), de sorte que leur somme (prof_work) est le travail mesuré du pas :
+## le temps passé hors de toute partie (boucles, appels, ordonnanceur de la machine) n'y figure pas.
+static var prof_on := false
+static var prof_parts: Dictionary = {}       # partie → µs (exclusif)
+static var _prof_names: Array[String] = []   # parties ouvertes
+static var _prof_starts := PackedInt64Array()
+static var _prof_children := PackedInt64Array()
+
+
+static func prof_reset() -> void:
+	prof_parts = {}
+	_prof_names.clear()
+	_prof_starts.clear()
+	_prof_children.clear()
+
+
+## Ouvre la partie `part` ; à appeler seulement sous `if prof_on` (voir les points de mesure).
+static func prof_begin(part: String) -> void:
+	_prof_names.append(part)
+	_prof_starts.append(Time.get_ticks_usec())
+	_prof_children.append(0)
+
+
+## Ferme la dernière partie ouverte.
+static func prof_end() -> void:
+	var spent := Time.get_ticks_usec() - _prof_starts[-1]
+	var part: String = _prof_names.pop_back()
+	prof_parts[part] = prof_parts.get(part, 0) + spent - _prof_children[-1]
+	_prof_starts.resize(_prof_starts.size() - 1)
+	_prof_children.resize(_prof_children.size() - 1)
+	if not _prof_children.is_empty():
+		_prof_children[-1] += spent
+
+
+## Ajoute `usec` µs à la partie `part` (mesure faite à la main, dans une boucle), comme une partie
+## fille de la partie ouverte s'il y en a une.
+static func prof_add(part: String, usec: int) -> void:
+	prof_parts[part] = prof_parts.get(part, 0) + usec
+	if not _prof_children.is_empty():
+		_prof_children[-1] += usec
+
+
+## Somme des parties mesurées depuis prof_reset, en µs.
+static func prof_work() -> int:
+	var total := 0
+	for part: String in prof_parts:
+		total += prof_parts[part]
+	return total
 ## Attente avant de redemander des genres de livres qui ne sont pas arrivés (doublée ensuite).
 static var flag_retry_ms := 5000
 ## Livres absents de leur étagère (volés : ceux du catalogue, celui que porte le bibliothécaire),
@@ -592,6 +645,8 @@ func true_coordinates() -> Array:
 ## des titres changent, les maillages partagés restent. Même clé : seule la description de la vraie
 ## adresse se met à jour (nouvelles bases d'un pas).
 func readdress(p_hexagon: int, p_level: int, p_detail: Detail, p_place: Dictionary = {}) -> void:
+	if prof_on:
+		prof_begin("readdress")
 	var new_place := p_place if not p_place.is_empty() else place_of_ints(p_hexagon, p_level)
 	if p_hexagon != hexagon or p_level != level:
 		hexagon = p_hexagon
@@ -610,11 +665,16 @@ func readdress(p_hexagon: int, p_level: int, p_detail: Detail, p_place: Dictiona
 		_set_titles_alpha(0.0)
 		_missing_books = _missing_in(place)
 		_show_missing_faces()
+	if prof_on:
+		prof_end()
 	set_detail(p_detail)
 
 
 ## Ajoute ou retire les éléments pour atteindre le degré de détail demandé.
 func set_detail(p_detail: Detail) -> void:
+	var prof := prof_on
+	if prof:
+		prof_begin("set_detail")
 	detail = p_detail
 	_keep("Interior", true, _new_interior)
 	_keep("Faces", detail == Detail.DISTANT, _new_faces)
@@ -625,14 +685,31 @@ func set_detail(p_detail: Detail) -> void:
 		_keep("Structure", full, _new_structure)
 		for wall in WALLS:
 			_keep(BOOKCASES[wall], full, _new_bookcase.bind(wall))
+	if prof:
+		prof_end()
 	if detail >= Detail.LIT:
+		if prof:
+			prof_begin("titles")
 		_want_titles()
+		if prof:
+			prof_end()
 
 
 ## Donne ou retire au vestibule de la galerie (côté +Z, à z = APOTHEM + HALL_LENGTH / 2) son
 ## haut-parleur d'ambiance ; à appeler une fois la galerie à sa place. Un haut-parleur retiré
 ## s'éteint en fondu (AmbientSpeaker.retire) et n'appartient plus à la galerie.
 func set_speaker(wanted: bool) -> void:
+	if wanted == (_speaker != null):
+		return
+	var prof := prof_on
+	if prof:
+		prof_begin("speaker")
+	_set_speaker(wanted)
+	if prof:
+		prof_end()
+
+
+func _set_speaker(wanted: bool) -> void:
 	if wanted and _speaker == null:
 		_speaker = AmbientSpeakerScript.create()
 		_speaker.position = Vector3(0.0, AmbientSpeakerScript.HEIGHT, APOTHEM + HALL_LENGTH * 0.5)
@@ -685,6 +762,14 @@ func load_titles_now() -> void:
 ## directions ; `place_at(case)` rend la vraie adresse d'une case (place_of). Les galeries en
 ## attente passent d'abord, de la plus proche à la plus lointaine.
 static func prefetch_titles(place_at: Callable, cells: Array) -> void:
+	if prof_on:
+		prof_begin("prefetch_titles")
+	_prefetch_titles(place_at, cells)
+	if prof_on:
+		prof_end()
+
+
+static func _prefetch_titles(place_at: Callable, cells: Array) -> void:
 	var queue: Array = []
 	var queued := {}
 	_title_waiting = _title_waiting.filter(func(g: Variant) -> bool:
@@ -884,6 +969,15 @@ func _apply_titles(key: String, bytes: PackedByteArray, fade: bool) -> void:
 ## Branche la texture des titres `bytes` (vide : pas de titres), les livres absents marqués (bit
 ## MISSING_BIT, sur une copie : les titres en mémoire restent sans marque).
 func _set_texture(bytes: PackedByteArray) -> void:
+	var prof := prof_on
+	if prof:
+		prof_begin("title_texture")
+	_set_texture_now(bytes)
+	if prof:
+		prof_end()
+
+
+func _set_texture_now(bytes: PackedByteArray) -> void:
 	var data := bytes
 	if not _missing_books.is_empty():
 		if data.is_empty():
@@ -1123,7 +1217,14 @@ func _keep(child: String, wanted: bool, factory: Callable) -> void:
 	var node: Node = _parts.get(child)
 	if wanted and node == null:
 		var pool: Array = _pool.get(child, [])
-		node = pool.pop_back() if not pool.is_empty() else factory.call()
+		if not pool.is_empty():
+			node = pool.pop_back()
+		else:
+			if prof_on:
+				prof_begin("build_" + child)   # un enfant à fabriquer : réserve vide
+			node = factory.call()
+			if prof_on:
+				prof_end()
 		node.name = child
 		_fit(node)
 		add_child(node)

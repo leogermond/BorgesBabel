@@ -537,29 +537,57 @@ static func _local_coordinate(coordinate: String) -> int:
 func _shift(step: int) -> void:
 	origin_hexagon += step
 	origin_hexagon_b25 = _stepped("hexagon", origin_hexagon_b25, step)
+	var prof := GalleryScript.prof_on
+	if prof:
+		GalleryScript.prof_begin("prints")
 	_hexagon_context = BookTextScript.print_context_step(_hexagon_context, step, origin_hexagon_b25)
 	_hexagon_parts = {}
 	origin_hexagon_print = _print_of(_hexagon_context)
+	if prof:
+		GalleryScript.prof_end()
 	player.position.z -= step * GalleryScript.PITCH
 	_update_galleries(Vector2i(step, 0))
+	if prof:
+		GalleryScript.prof_begin("hud")
 	hud.set_address(origin_hexagon_b25, origin_level_b25, Vector2i(step, 0))
+	if prof:
+		GalleryScript.prof_end()
 
 
 ## Fait du niveau voisin (+1 au-dessus, −1 au-dessous) la nouvelle origine.
 func _shift_level(step: int) -> void:
 	origin_level += step
 	origin_level_b25 = _stepped("level", origin_level_b25, step)
+	var prof := GalleryScript.prof_on
+	if prof:
+		GalleryScript.prof_begin("prints")
 	_level_context = BookTextScript.print_context_step(_level_context, step, origin_level_b25)
 	_level_parts = {}
 	origin_level_print = _print_of(_level_context)
+	if prof:
+		GalleryScript.prof_end()
 	player.position.y -= step * GalleryScript.LEVEL_PITCH
 	_update_galleries(Vector2i(0, step))
+	if prof:
+		GalleryScript.prof_begin("hud")
 	hud.set_address(origin_hexagon_b25, origin_level_b25, Vector2i(0, step))
+	if prof:
+		GalleryScript.prof_end()
 
 
 ## La coordonnée `current` (de l'axe `axis`) ± 1 : préparée d'avance si elle l'est, sinon
 ## calculée (BookText.b25_add_small) ; puis le pas suivant se prépare (voir _prepared).
 func _stepped(axis: String, current: String, step: int) -> String:
+	var prof := GalleryScript.prof_on
+	if prof:
+		GalleryScript.prof_begin("stepped")
+	var next := _stepped_now(axis, current, step)
+	if prof:
+		GalleryScript.prof_end()
+	return next
+
+
+func _stepped_now(axis: String, current: String, step: int) -> String:
 	var ready: Variant = _prepared[axis].get(step)
 	var next: String
 	if ready is String:
@@ -648,6 +676,7 @@ static func lit_cells() -> Array[Vector2i]:
 ## qui passent par la réserve de Gallery. `readdress_all` : l'origine a sauté (place_origin),
 ## toutes les galeries prennent une adresse nouvelle.
 func _update_galleries(moved := Vector2i.ZERO, readdress_all := false) -> void:
+	var prof := GalleryScript.prof_on   # chronomètres des tests (Gallery.prof_*), sinon rien
 	var cells := gallery_cells()
 	var placed: Dictionary = {}
 	var spares: Array = [[], [], []]   # par degré de détail
@@ -663,27 +692,42 @@ func _update_galleries(moved := Vector2i.ZERO, readdress_all := false) -> void:
 		var gallery: GalleryScript = placed.get(cell)
 		if gallery == null:
 			gallery = _take_spare(spares, detail)
+			var t_place := Time.get_ticks_usec() if prof else 0
+			var new_place := place_at(cell)
+			if prof:
+				GalleryScript.prof_add("place_at", Time.get_ticks_usec() - t_place)
 			if gallery == null:
-				gallery = GalleryScript.create(origin_hexagon + cell.x, origin_level + cell.y, detail as GalleryScript.Detail, place_at(cell))
+				if prof:
+					GalleryScript.prof_begin("create")
+				gallery = GalleryScript.create(origin_hexagon + cell.x, origin_level + cell.y, detail as GalleryScript.Detail, new_place)
 				add_child(gallery)
+				if prof:
+					GalleryScript.prof_end()
 			else:
-				gallery.readdress(origin_hexagon + cell.x, origin_level + cell.y, detail as GalleryScript.Detail, place_at(cell))
+				gallery.readdress(origin_hexagon + cell.x, origin_level + cell.y, detail as GalleryScript.Detail, new_place)   # mesuré dans Gallery
 			placed[cell] = gallery
 		else:
 			# Même galerie, même clé : seule sa description passe aux chaînes de la nouvelle origine.
+			var t_key := Time.get_ticks_usec() if prof else 0
 			gallery.place = GalleryScript.place_of(origin_hexagon_b25, cell.x, origin_level_b25, cell.y, gallery.place.key)
+			if prof:
+				GalleryScript.prof_add("rekey", Time.get_ticks_usec() - t_key)
 			if gallery.detail != detail:
-				gallery.set_detail(detail as GalleryScript.Detail)
+				gallery.set_detail(detail as GalleryScript.Detail)   # mesuré dans Gallery
 		gallery.position = Vector3(0.0, cell.y * GalleryScript.LEVEL_PITCH, cell.x * GalleryScript.PITCH)
-		gallery.set_speaker(AmbientSpeakerScript.has_speaker(cell))   # musique : vestibules du niveau, ±30 m
+		gallery.set_speaker(AmbientSpeakerScript.has_speaker(cell))   # musique : vestibules du niveau, ±30 m ; mesuré dans Gallery
+	if prof:
+		GalleryScript.prof_begin("free")
 	for pool: Array in spares:
 		for spare: GalleryScript in pool:
 			spare.queue_free()
+	if prof:
+		GalleryScript.prof_end()
 	_galleries = placed
 	_lit.clear()
 	for cell: Vector2i in lit_cells():
 		_lit.append(placed[cell])
-	GalleryScript.prefetch_titles(place_at, lit_cells())   # titres du prochain pas
+	GalleryScript.prefetch_titles(place_at, lit_cells())   # titres du prochain pas ; mesuré dans Gallery
 	_update_lamps()
 
 
@@ -721,11 +765,16 @@ static func _print_of(context: Dictionary) -> PackedInt64Array:
 
 ## Part réelle de chaque vraie lampe, selon sa distance à l'œil (voir Gallery.real_weight).
 func _update_lamps() -> void:
+	var prof := GalleryScript.prof_on
+	if prof:
+		GalleryScript.prof_begin("lamps")
 	var eye := Vector3(0.0, PlayerScript.EYE_HEIGHT, 3.2)
 	if player != null:
 		eye = player.camera.global_position
 	for gallery: GalleryScript in _lit:
 		gallery.update_lights(eye)
+	if prof:
+		GalleryScript.prof_end()
 
 
 ## Une galerie libérée, de préférence au même degré de détail, ou null.

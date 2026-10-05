@@ -128,6 +128,11 @@ const GOLD_METALLIC := 0.75
 ## creux d'un fer de reliure, et une dorure un peu plus claire à la lumière diffuse (GILT_DIFFUSE de
 ## la couleur de l'or, au lieu de 1 − GOLD_METALLIC) ; le reflet de l'or ne change pas.
 const HALO_DARKEN := 0.55
+## Sur les cuirs les plus clairs (luminance linéaire de PALE_BEGIN à PALE_END), le liseré fonce
+## jusqu'à HALO_DARKEN_PALE : l'or s'y détache autant que sur un cuir sombre.
+const HALO_DARKEN_PALE := 0.85
+const PALE_BEGIN := 0.12
+const PALE_END := 0.32
 const GILT_DIFFUSE := 0.4
 const GOLD_ROUGHNESS := 0.45
 const TITLE_FADE_BEGIN := 24.0
@@ -239,6 +244,9 @@ const vec3 GOLD_LINEAR = {GOLD_LINEAR};
 const float GOLD_METALLIC = {GOLD_METALLIC};
 const float GOLD_ROUGHNESS = {GOLD_ROUGHNESS};
 const float HALO_DARKEN = {HALO_DARKEN};
+const float HALO_DARKEN_PALE = {HALO_DARKEN_PALE};
+const float PALE_BEGIN = {PALE_BEGIN};
+const float PALE_END = {PALE_END};
 const float GILT_DIFFUSE = {GILT_DIFFUSE};
 const float TITLE_FADE_BEGIN = {TITLE_FADE_BEGIN};
 const float TITLE_FADE_END = {TITLE_FADE_END};
@@ -467,7 +475,8 @@ void fragment() {
 	if (gilt > 0.0) {
 		sheen = gilt * LAMP_LIGHT * gold_sheen(world, normal, CAMERA_POSITION_WORLD);
 	}
-	albedo *= 1.0 - HALO_DARKEN * shade;
+	float pale = smoothstep(PALE_BEGIN, PALE_END, dot(albedo, vec3(0.2126, 0.7152, 0.0722)));
+	albedo *= 1.0 - mix(HALO_DARKEN, HALO_DARKEN_PALE, pale) * shade;
 	albedo = mix(albedo, GOLD_LINEAR * GILT_DIFFUSE, gilt);
 #endif
 #ifdef FACES
@@ -1456,6 +1465,7 @@ static func _shader(variant: String) -> Shader:
 		"GOLD_LINEAR": _vec3(_linear(GOLD)), "GOLD_METALLIC": _float(GOLD_METALLIC),
 		"GOLD_ROUGHNESS": _float(GOLD_ROUGHNESS),
 		"HALO_DARKEN": _float(HALO_DARKEN), "GILT_DIFFUSE": _float(GILT_DIFFUSE),
+		"HALO_DARKEN_PALE": _float(HALO_DARKEN_PALE), "PALE_BEGIN": _float(PALE_BEGIN), "PALE_END": _float(PALE_END),
 		"TITLE_FADE_BEGIN": _float(TITLE_FADE_BEGIN), "TITLE_FADE_END": _float(TITLE_FADE_END),
 	})
 	_shaders[variant] = shader

@@ -637,6 +637,8 @@ static func _resolve_strings(node: Variant, values: PackedStringArray) -> Varian
 
 
 ## Écrit un document JSON sous la forme compacte ; faux si le fichier ne s'ouvre pas en écriture.
+## L'écriture va dans un fichier voisin, renommé ensuite : le fichier n'est jamais lu à moitié
+## écrit. Sans état partagé : se fait aussi sur un fil du moteur (livre emporté, main.gd).
 ## Chaque longue coordonnée s'écrit par différence avec la précédente de même signe qui partage le
 ## plus de chiffres de tête (parmi les COMPACT_CANDIDATES dernières).
 static func _write_document(path: String, document: Variant) -> bool:
@@ -645,7 +647,8 @@ static func _write_document(path: String, document: Variant) -> bool:
 	var payload := JSON.stringify({"compact": 1, "strings": table.strings, "data": data}).to_utf8_buffer()
 	if not DirAccess.dir_exists_absolute(path.get_base_dir()):
 		DirAccess.make_dir_recursive_absolute(path.get_base_dir())
-	var file := FileAccess.open(path, FileAccess.WRITE)
+	var partial := path + ".partiel"
+	var file := FileAccess.open(partial, FileAccess.WRITE)
 	if file == null:
 		return false
 	file.store_buffer(COMPACT_MAGIC.to_ascii_buffer())
@@ -653,7 +656,7 @@ static func _write_document(path: String, document: Variant) -> bool:
 	file.store_32(payload.size())
 	file.store_buffer(payload.compress(FileAccess.COMPRESSION_DEFLATE))
 	file.close()
-	return true
+	return DirAccess.rename_absolute(partial, path) == OK
 
 
 const COMPACT_CANDIDATES := 4

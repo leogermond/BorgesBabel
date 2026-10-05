@@ -1598,7 +1598,10 @@ static func _split_command(command: String) -> Array:
 ## d'arrière-plan ; rend son ticket.
 ## `after(réponse) -> Dictionary`, facultatif, s'appelle sur le fil avec la réponse (erreurs comprises)
 ## et rend ce que take() rendra : un calcul qui ne doit pas non plus coûter au fil principal.
-static func submit(request: Variant, timeout := -1, after := Callable()) -> int:
+## `wait` faux : si le fil d'arrière-plan tient la file à cet instant, rien n'est mis en file et
+## l'appel rend −1 (à refaire à l'image suivante) : le fil principal n'attend jamais un fil de
+## priorité basse qu'un autre processus a pu interrompre verrou tenu.
+static func submit(request: Variant, timeout := -1, after := Callable(), wait := true) -> int:
 	b25_valid("0")   # expressions régulières créées ici, sur le fil principal
 	if _bg_thread == null:
 		_bg_commands = _background_commands(_launch_commands())
@@ -1608,7 +1611,10 @@ static func submit(request: Variant, timeout := -1, after := Callable()) -> int:
 		_bg_quit = false
 		_bg_thread = Thread.new()
 		_bg_thread.start(_bg_loop, Thread.PRIORITY_LOW)
-	_bg_mutex.lock()
+	if wait:
+		_bg_mutex.lock()
+	elif not _bg_mutex.try_lock():
+		return -1
 	_bg_next += 1
 	var ticket := _bg_next
 	_bg_jobs.append([ticket, request, timeout, after])
@@ -1627,9 +1633,12 @@ static func warm_up() -> void:
 		_bg_mutex.unlock()
 
 
-## La réponse d'un ticket (retirée de la mémoire), ou null tant qu'elle n'est pas arrivée.
+## La réponse d'un ticket (retirée de la mémoire), ou null tant qu'elle n'est pas arrivée — ou
+## tant que le fil d'arrière-plan tient la file (verrou pris : on relira à l'image suivante, sans
+## attendre un fil de priorité basse).
 static func take(ticket: int) -> Variant:
-	_bg_mutex.lock()
+	if not _bg_mutex.try_lock():
+		return null
 	var response: Variant = _bg_results.get(ticket)
 	_bg_results.erase(ticket)
 	_bg_mutex.unlock()
@@ -1659,8 +1668,8 @@ static func pending() -> int:
 ## dl), demandés au service d'arrière-plan (forme « gallery » de is_image_book) : rend un ticket ;
 ## la réponse porte « is_image » (640 valeurs) ou « error ». Les coordonnées (base 25, toute
 ## taille) se calculent sur le fil.
-static func submit_gallery_flags(hexagon_base: String, dh: int, level_base: String, dl: int, after := Callable()) -> int:
-	return submit(BookTextScript._gallery_flags_line.bind(hexagon_base, dh, level_base, dl), -1, after)
+static func submit_gallery_flags(hexagon_base: String, dh: int, level_base: String, dl: int, after := Callable(), wait := true) -> int:
+	return submit(BookTextScript._gallery_flags_line.bind(hexagon_base, dh, level_base, dl), -1, after, wait)
 
 
 ## La ligne de la requête des genres d'une galerie (sur le fil d'arrière-plan) : écrite telle

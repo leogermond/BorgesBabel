@@ -78,7 +78,6 @@ var _guide: Dictionary = {}
 var _mouse_before := Input.MOUSE_MODE_VISIBLE
 ## Dernier mode de souris demandé par le panneau (le mode effectif reste VISIBLE sans fenêtre).
 var mouse_mode_requested := -1
-var _player_was_frozen := false
 
 
 func _ready() -> void:
@@ -122,7 +121,7 @@ func _ready() -> void:
 	carnet = CarnetScript.new()
 	carnet.can_invoke = can_invoke
 	carnet.invocation.connect(invocation.emit)
-	carnet.toggled.connect(_hold_player)
+	carnet.toggled.connect(_hold_player.bind("carnet"))
 	add_child(carnet)
 	_refresh_widget()
 
@@ -420,16 +419,12 @@ func handle_key(event: InputEvent) -> bool:
 	return false
 
 
-## Le bibliothécaire reste immobile tant que le panneau ou le carnet est ouvert.
-func _hold_player(hold: bool) -> void:
+## Le bibliothécaire reste immobile tant que le panneau ou le carnet est ouvert (raison
+## `reason` de Player.hold, levée à la fermeture quel que soit l'état des autres).
+func _hold_player(hold: bool, reason := "panneau") -> void:
 	var player := _player()
-	if player == null:
-		return
-	if hold:
-		_player_was_frozen = player.frozen
-		player.frozen = true
-	else:
-		player.frozen = _player_was_frozen
+	if player != null:
+		player.hold(reason, hold)
 
 
 func _typing() -> bool:

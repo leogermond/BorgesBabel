@@ -12,8 +12,13 @@ const EYE_HEIGHT := 1.6
 const RADIUS := 0.3
 const BODY_HEIGHT := 1.75
 
-## Vrai pendant la lecture : le bibliothécaire reste immobile.
-var frozen := false
+## Vrai tant qu'une raison le retient (hold) : lecteur ouvert, panneau de quête, carnet, saut.
+var frozen: bool:
+	get:
+		return not _holds.is_empty()
+## Raisons qui retiennent le bibliothécaire immobile ; chacune se pose et se lève seule, dans
+## n'importe quel ordre (un panneau ouvert pendant le fondu d'un saut, refermé avant ou après).
+var _holds: Dictionary = {}
 ## Livre visé : {gallery, hexagon, level, wall, shelf, book}, vide si aucun.
 var target: Dictionary = {}
 var camera: Camera3D
@@ -35,6 +40,19 @@ func _ready() -> void:
 	camera.fov = 75.0
 	camera.near = 0.05
 	add_child(camera)
+
+
+## Pose (vrai) ou lève (faux) la raison `reason` de rester immobile.
+func hold(reason: String, held: bool) -> void:
+	if held:
+		_holds[reason] = true
+	else:
+		_holds.erase(reason)
+
+
+## Les raisons qui le retiennent (pour les tests).
+func holds() -> Array:
+	return _holds.keys()
 
 
 ## Tourne le regard selon un déplacement relatif de la souris.

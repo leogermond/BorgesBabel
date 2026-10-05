@@ -734,7 +734,10 @@ static func pump_titles() -> void:
 		var key: String = entry.key
 		# Titres (SHA-256 des 640 adresses) et genres, tout sur le fil d'arrière-plan.
 		var ticket := BookTextScript.submit_gallery_flags(entry.hexagon, entry.dh, entry.level, entry.dl,
-			GalleryScript._titles_of.bind(key))
+			GalleryScript._titles_of.bind(key), false)
+		if ticket < 0:   # file tenue par le fil d'arrière-plan : à l'image suivante
+			_title_queue.push_front(entry)
+			break
 		_title_jobs.append({"key": key, "place": entry, "ticket": ticket})
 	last_pump_usec = Time.get_ticks_usec() - started
 

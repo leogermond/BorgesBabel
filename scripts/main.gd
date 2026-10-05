@@ -117,6 +117,9 @@ var carried_path := QuestScript.user_path(QuestScript.CARRIED_FILE)
 ## galeries, livre ouvert), en µs.
 var last_travel_usec := 0
 var _traveling := false
+var _queued: Array[String] = []        # sauts invoqués pendant un saut, dans l'ordre
+var _save_task := -1                   # écriture du livre emporté sur un fil du moteur, ou −1
+var _save_again := false               # le livre emporté a changé pendant l'écriture
 var _fade: ColorRect
 var _carried_key := ""                 # clé de la galerie du livre emporté
 var _reader_key := ""                  # clé de la galerie du livre ouvert, quand elle est connue
@@ -173,6 +176,7 @@ func _ready() -> void:
 
 
 func _exit_tree() -> void:
+	flush_carried_save()
 	if _missing_task >= 0:
 		WorkerThreadPool.wait_for_task_completion(_missing_task)
 		_missing_task = -1
@@ -185,6 +189,12 @@ func _exit_tree() -> void:
 
 
 func _process(_delta: float) -> void:
+	if _save_task >= 0 and WorkerThreadPool.is_task_completed(_save_task):
+		WorkerThreadPool.wait_for_task_completion(_save_task)
+		_save_task = -1
+		if _save_again:
+			_save_again = false
+			_save_carried()
 	if _missing_task >= 0 and WorkerThreadPool.is_task_completed(_missing_task):
 		_finish_missing_keys()
 	_update_lamps()
@@ -221,6 +231,8 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	if event is InputEventMouseMotion and _mouse_captured:
 		player.look(event.relative)
+	elif _traveling:
+		return   # pendant le fondu d'un saut, ni livre ni souris
 	elif event.is_action_pressed("toggle_mouse"):
 		if _mouse_captured:
 			_release_mouse()
@@ -240,7 +252,7 @@ func _open_book() -> void:
 ## Ouvre le livre `book` (vraie adresse) dans le lecteur, à la page `page` ; `key`, la clé de sa
 ## galerie quand on la connaît (livre visé, livre emporté) : « tlon » n'a pas à la recalculer.
 func _open_address(book: Dictionary, page := 0, key := "") -> void:
-	player.frozen = true
+	player.hold("lecteur", true)
 	_release_mouse()
 	reader.open(book, page)
 	_reader_key = key
@@ -248,7 +260,7 @@ func _open_address(book: Dictionary, page := 0, key := "") -> void:
 
 func _close_book() -> void:
 	reader.close()
-	player.frozen = false
+	player.hold("lecteur", false)
 	_capture_mouse()
 
 
@@ -274,7 +286,11 @@ func _notification(what: int) -> void:
 # --- Invocations ---------------------------------------------------------------------------------
 
 ## Applique une invocation du carnet (Hud.invocation) ; le Hud n'émet que celles qui valent ici.
+## Un saut demandé pendant un autre attend sa fin (_queued), puis part de la galerie d'arrivée.
 func _on_invocation(axis: String) -> void:
+	if _traveling and axis in ["couloir", "puits", "sator", "golem"]:
+		_queued.append(axis)
+		return
 	match axis:
 		"couloir":
 			if hud.quest != null:
@@ -297,8 +313,7 @@ func travel(hexagon: Variant, level: Variant, book := {}) -> void:
 	if _traveling:
 		return
 	_traveling = true
-	var was_frozen := player.frozen
-	player.frozen = true
+	player.hold("saut", true)
 	await _fade_to(1.0)
 	var started := Time.get_ticks_usec()
 	place_origin(hexagon, level)
@@ -308,10 +323,11 @@ func travel(hexagon: Variant, level: Variant, book := {}) -> void:
 		_open_address(book, int(book.get("page", 0)))
 	last_travel_usec = Time.get_ticks_usec() - started
 	await _fade_to(0.0)
-	if book.is_empty():
-		player.frozen = was_frozen
+	player.hold("saut", false)
 	_traveling = false
 	travel_finished.emit()
+	if not _queued.is_empty():
+		_on_invocation(_queued.pop_front())
 
 
 ## Vrai pendant une invocation (fondus compris).
@@ -369,9 +385,32 @@ func set_carried_book(book: Dictionary, key := "") -> void:
 	_carried_key = ""
 	if not carried_book.is_empty():
 		_carried_key = key if not key.is_empty() else BookTextScript.gallery_key(carried_book.hexagon, carried_book.level)
-	if not QuestScript.save_carried(carried_book, carried_path):
-		push_warning("livre emporté non enregistré : %s" % carried_path)
+	_save_carried()
 	_apply_missing()
+
+
+## Enregistre le livre emporté sur un fil du moteur (~0,8 Mo, ~65 ms à 917 000 chiffres : jamais
+## sur le fil principal), une écriture à la fois ; un changement pendant l'écriture en relance une
+## à sa fin (_process), avec le livre d'alors.
+func _save_carried() -> void:
+	if _save_task >= 0:
+		_save_again = true
+		return
+	var book := carried_book
+	var path := carried_path
+	_save_task = WorkerThreadPool.add_task(func() -> void:
+		if not QuestScript.save_carried(book, path):
+			push_warning("livre emporté non enregistré : %s" % path), false, "livre emporté")
+
+
+## Attend la fin de l'écriture du livre emporté (et de celle qu'un changement a demandée).
+func flush_carried_save() -> void:
+	while _save_task >= 0:
+		WorkerThreadPool.wait_for_task_completion(_save_task)
+		_save_task = -1
+		if _save_again:
+			_save_again = false
+			_save_carried()
 
 
 ## La touche du carnet, carnet ouvert : le livre emporté s'ouvre dans le lecteur (rien sans livre).

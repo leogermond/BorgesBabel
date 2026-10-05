@@ -107,6 +107,7 @@ func _initialize() -> void:
 	await _test_same_gallery(main)
 	await _test_focus_and_hints(main)
 	await _test_invocations(main)
+	await _test_overlays_during_travel(main)
 	await _test_missing_books(main)
 	main = await _test_restart(main)
 	await _test_exit_errors()
@@ -371,12 +372,20 @@ func _test_invocations(main: Node3D) -> void:
 	_key(KEY_E, false, "e")
 	_check(not aimed.is_empty() and main.reader.visible and main.reader.book == aimed, "E ouvre le livre visé")
 	_key(CarnetScript.CARNET_KEY, true)
-	_type("tlon ")
+	_type("tlon")
+	var t_steal := Time.get_ticks_usec()
+	_type(" ")
+	var steal_ms := (Time.get_ticks_usec() - t_steal) / 1000.0
+	var saving: bool = main._save_task >= 0
 	var first_index := _index(aimed)
 	_check(main.carried_book == aimed and main.reader.visible, "« tlon␠ », carnet ouvert sur le lecteur : le livre lu est emporté")
 	_check(main._carried_key == BookTextScript.gallery_key(aimed.hexagon, aimed.level),
 		"la clé de la galerie du livre emporté, prise à la galerie visée, est celle de ses vraies coordonnées")
-	_check(QuestScript.load_carried(main.carried_path) == aimed, "le livre emporté est enregistré (%s)" % main.carried_path.get_file())
+	print("  « tlon » à ~917 000 chiffres : %.1f ms sur le fil principal (écriture du livre sur un fil du moteur)" % steal_ms)
+	_check(saving and steal_ms < 20.0, "« tlon » : le livre emporté s'écrit sur un fil du moteur (%.1f ms sur le fil principal)" % steal_ms)
+	main.flush_carried_save()
+	_check(QuestScript.load_carried(main.carried_path) == aimed and not FileAccess.file_exists(main.carried_path + ".partiel"),
+		"le livre emporté est enregistré (%s), sans fichier partiel" % main.carried_path.get_file())
 	_check(gallery.missing_books() == PackedInt32Array([first_index]) and _missing_flags(gallery) == [first_index],
 		"un vide sur l'étagère : le livre emporté est marqué absent dans la texture de sa galerie (rang %d)" % first_index)
 	_check(_locate(gallery, aimed).is_empty() and not _locate(gallery, aimed.merged({"book": (aimed.book + 1) % 32}, true)).is_empty(),
@@ -404,6 +413,7 @@ func _test_invocations(main: Node3D) -> void:
 	# Relu, « tlon » le rend à sa place (RETURN_CARRIED_ON_TLON).
 	_key(CarnetScript.CARNET_KEY, true)
 	_type("tlon ")
+	main.flush_carried_save()
 	if MainScript.RETURN_CARRIED_ON_TLON:
 		_check(main.carried_book.is_empty() and gallery.missing_books().is_empty() and _missing_flags(gallery).is_empty()
 				and QuestScript.load_carried(main.carried_path).is_empty(),
@@ -443,6 +453,81 @@ func _test_invocations(main: Node3D) -> void:
 	main._close_book()
 	print("  invocations à ~917 000 chiffres (fil principal, au noir) : aleph %.1f ms, zahir %.1f ms, sator %.1f ms (livre ouvert compris)" % [aleph_ms, zahir_ms, sator_ms])
 	_check(aleph_ms < 1000.0 and zahir_ms < 1000.0 and sator_ms < 2000.0, "coût d'une invocation mesuré, caché par le fondu")
+
+
+## Fenêtres ouvertes pendant le fondu d'un saut : le bibliothécaire est immobile exactement tant
+## qu'un saut, le lecteur, le panneau ou le carnet le retient, dans tous les ordres de fermeture ;
+## deux invocations tapées à la suite s'enchaînent (la seconde part de la galerie d'arrivée).
+func _test_overlays_during_travel(main: Node3D) -> void:
+	var hud: Hud = main.hud
+	var player: CharacterBody3D = main.player
+	var quest: QuestScript = hud.quest
+	main.place_origin(12, -5)
+	await _steps(2)
+	_check(not player.frozen and player.holds().is_empty(), "au départ, rien ne retient le bibliothécaire")
+
+	# « aleph » puis « zahir » à la suite ; Tab pendant le fondu, panneau refermé après les sauts.
+	_key(CarnetScript.CARNET_KEY, true)
+	_type("aleph ")
+	_key(CarnetScript.CARNET_KEY, true)
+	_type("zahir ")
+	var during: bool = player.frozen and main.traveling() and not hud.carnet.is_open()
+	_key(HudScript.QUEST_KEY, true)
+	_check(during and hud.is_panel_open() and player.holds().size() == 2, "pendant le fondu : saut et panneau retiennent le bibliothécaire (%s)" % [player.holds()])
+	await _until_landed(main)
+	_check(main.origin_hexagon_b25 == quest.book.hexagon and main.origin_level_b25 == quest.book.level,
+		"« aleph » puis « zahir » tapés à la suite : les deux sauts s'enchaînent jusqu'à la galerie de la quête")
+	_check(player.frozen and player.holds() == ["panneau"], "sauts finis, panneau ouvert : toujours immobile (%s)" % [player.holds()])
+	_key(KEY_ESCAPE, true)
+	_check(not player.frozen, "panneau refermé : le bibliothécaire repart")
+
+	# Carnet ouvert pendant le fondu, refermé avant la fin du saut.
+	main.place_origin(12, -5)
+	_key(CarnetScript.CARNET_KEY, true)
+	_type("aleph ")
+	_key(CarnetScript.CARNET_KEY, true)
+	_check(hud.carnet.is_open() and player.holds().size() == 2, "carnet ouvert pendant le fondu (%s)" % [player.holds()])
+	_key(KEY_ESCAPE, true)
+	_check(player.frozen and main.traveling(), "carnet refermé pendant le saut : immobile jusqu'à la fin du saut")
+	await _until_landed(main)
+	_check(not player.frozen and player.holds().is_empty(), "saut fini, carnet refermé avant : le bibliothécaire repart")
+
+	# Carnet ouvert pendant le fondu, refermé après la fin du saut.
+	main.place_origin(12, -5)
+	_key(CarnetScript.CARNET_KEY, true)
+	_type("aleph ")
+	_key(CarnetScript.CARNET_KEY, true)
+	await _until_landed(main)
+	_check(player.frozen and hud.carnet.is_open() and player.holds() == ["carnet"], "saut fini, carnet encore ouvert : immobile (%s)" % [player.holds()])
+	_key(KEY_ESCAPE, true)
+	_check(not player.frozen, "carnet refermé après le saut : le bibliothécaire repart")
+
+	# Panneau ouvert pendant le fondu, refermé avant la fin ; puis « sator » : le lecteur retient.
+	main.place_origin(12, -5)
+	_key(CarnetScript.CARNET_KEY, true)
+	_type("aleph ")
+	_key(HudScript.QUEST_KEY, true)
+	_key(KEY_ESCAPE, true)
+	_check(player.frozen and not hud.is_panel_open() and player.holds() == ["saut"], "panneau ouvert et refermé pendant le fondu : le saut seul retient")
+	await _until_landed(main)
+	_check(not player.frozen, "saut fini : le bibliothécaire repart")
+	_key(CarnetScript.CARNET_KEY, true)
+	_type("sator ")
+	_key(CarnetScript.CARNET_KEY, true)
+	await _until_landed(main)
+	_check(main.reader.visible and hud.carnet.is_open() and player.holds().size() == 2, "« sator » avec le carnet ouvert pendant le fondu : lecteur et carnet retiennent (%s)" % [player.holds()])
+	_key(KEY_ESCAPE, true)
+	_check(player.frozen and main.reader.visible, "carnet refermé : le lecteur retient encore")
+	_key(KEY_ESCAPE, true)
+	_check(not player.frozen and player.holds().is_empty() and not main.reader.visible, "lecteur refermé : le bibliothécaire repart")
+	main.place_origin(0, 0)
+
+
+## Attend la fin des sauts en cours et en attente.
+func _until_landed(main: Node3D) -> void:
+	var t0 := Time.get_ticks_msec()
+	while (main.traveling() or not main._queued.is_empty()) and Time.get_ticks_msec() - t0 < 20000:
+		await process_frame
 
 
 ## Les livres volés du catalogue : un vide sur leur étagère (texture des galeries LIT et FULL,

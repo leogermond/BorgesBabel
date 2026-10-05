@@ -35,7 +35,9 @@ status=0
 for variant in stale empty; do
 	if [ "$variant" = stale ]; then stale_cache; else printf 'list=[]\n'; fi > "$TMP/.godot/global_script_class_cache.cfg"
 	LOG="$TMP/run-$variant.log"
-	"$GODOT" --headless --path "$TMP" --quit-after 120 >"$LOG" 2>&1 || true
+	# Fichiers du joueur (quête en cours écrite au premier lancement) dans le dossier temporaire :
+	# rien n'est écrit dans le user:// du jeu.
+	"$GODOT" --headless --path "$TMP" --quit-after 120 -- "--dossier-joueur=$TMP/joueur" >"$LOG" 2>&1 || true
 	if grep -E "SCRIPT ERROR|Parse Error|Could not find type" "$LOG"; then
 		echo "ECHEC ($variant) : erreurs de script avec un cache de classes incomplet" >&2
 		status=1

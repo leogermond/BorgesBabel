@@ -463,7 +463,13 @@ func _test_missing_books(main: Node3D) -> void:
 	_check(far.detail == GalleryScript.Detail.DISTANT and faces.get_shader_parameter("missing") == Vector4i(index, -1, -1, -1),
 		"au loin (galerie peinte) : le livre volé manque aussi à la façade")
 	var other: ShaderMaterial = main._galleries[Vector2i(5, 0)].get_node("Faces").material_override
-	_check(other.get_shader_parameter("missing") == Vector4i(-1, -1, -1, -1), "une autre façade peinte n'a pas de vide")
+	var none: Variant = other.get_shader_parameter("missing")   # null : jamais posé, l'uniforme garde ivec4(-1)
+	_check(none == null or none == Vector4i(-1, -1, -1, -1), "une autre façade peinte n'a pas de vide (%s)" % [none])
+	main.place_origin(BookTextScript.b25_add_small(stolen.hexagon, -12), stolen.level)
+	# Toutes les galeries resservent après un saut : celle qui portait le vide a une autre adresse.
+	_check(is_instance_valid(far) and not far.is_queued_for_deletion() and far.missing_books().is_empty()
+			and faces.get_shader_parameter("missing") == Vector4i(-1, -1, -1, -1),
+		"la galerie peinte qui portait le vide, readressée ailleurs, n'en a plus")
 	main.place_origin(0, 0)
 
 

@@ -63,16 +63,14 @@ func _ready() -> void:
 	_folio.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	footer.add_child(_folio)
 	footer.add_child(_button("▶", turn.bind(1)))
-	var hint := _label(Color(0.4, 0.3, 0.2), 13)
-	hint.text = "← → : tourner la page    Échap ou E : refermer"
-	footer.add_child(hint)
+	# Aucune aide de commande à l'écran : le « Mode d'emploi » de la Bibliothèque est un livre.
 
 
 ## Ouvre le livre désigné par {hexagon, level, wall, shelf, book} (hexagone et niveau en base 25,
-## ou int) à sa première page.
-func open(target: Dictionary) -> void:
+## ou int) à la page `at_page` (la première par défaut).
+func open(target: Dictionary, at_page := 0) -> void:
 	book = BookTextScript.book_of(target)
-	page = 0
+	page = clampi(at_page, 0, BookTextScript.PAGES - 1)
 	var where := ""
 	if BookTextScript.b25_fits_int(book.hexagon) and BookTextScript.b25_fits_int(book.level):
 		where = "hexagone %d, niveau %d · mur %d · étagère %d · livre %d" % [

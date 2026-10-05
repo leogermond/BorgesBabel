@@ -328,6 +328,9 @@ vec2 spine_ink(vec2 p, vec2 atlas_dx, vec2 atlas_dy, float end_aa) {
 #endif
 
 #ifdef FACES
+// Livres absents de la galerie (volés), rangs (mur·5 + étagère)·32 + livre ; −1 : aucun.
+uniform ivec4 missing = ivec4(-1);
+
 // UV.x = 2 × mur + u (u de 0 à 1 le long de l'étagère), UV.y de 0 (haut) à 1 (bas).
 vec3 painted(vec2 uv) {
 	float wall = floor(uv.x * 0.5);
@@ -338,7 +341,8 @@ vec3 painted(vec2 uv) {
 	int index = (int(wall) * SHELVES + SHELVES - 1 - board) * BOOKS_PER_SHELF + book;
 	float across = abs(fract(slot) - 0.5) * BOOK_SLOT;
 	float above = y - BOARD_BASE - float(board) * BOARD_PITCH;
-	return (across < BOOK_THICK * 0.5 && above < book_height(index)) ? book_color(index) : WOOD_LINEAR;
+	bool absent = any(equal(ivec4(index), missing));
+	return (!absent && across < BOOK_THICK * 0.5 && above < book_height(index)) ? book_color(index) : WOOD_LINEAR;
 }
 #endif
 
@@ -364,6 +368,11 @@ void vertex() {
 	width = max(width - TRACKING_EM, 0.0);
 	float room = max(spine_height - 2.0 * TITLE_MARGIN, 0.0);
 	spine_layout = vec2(min(BOOK_THICK * TITLE_SIZE_FRACTION, room / max(width, 0.001)), width);
+	// Livre absent (volé, bit 21 du premier mot) : sa boîte se réduit à un point, l'étagère montre
+	// un vide à sa place.
+	if (((spine_codes.x >> {MISSING_BIT}u) & 1u) == 1u) {
+		VERTEX = vec3(0.0);
+	}
 #endif
 }
 
@@ -511,6 +520,13 @@ static var _shown: Array = []            # galeries dont la texture porte des ti
 static var last_pump_usec := 0
 ## Attente avant de redemander des genres de livres qui ne sont pas arrivés (doublée ensuite).
 static var flag_retry_ms := 5000
+## Livres absents de leur étagère (volés : ceux du catalogue, celui que porte le bibliothécaire),
+## par clé de galerie : clé → [{hexagon, level : vraies coordonnées (base 25), book : rang}].
+static var _missing: Dictionary = {}
+## Clé → rangs des livres absents de la galerie de cette clé, vérifiés une fois sur ses vraies
+## coordonnées (comparaison exacte des chaînes base 25) ; la clé, tirée des vraies coordonnées
+## seules, désigne ensuite la même galerie.
+static var _missing_checked: Dictionary = {}
 
 var hexagon: int
 var level: int
@@ -525,6 +541,9 @@ var _titles_key := ""                       # adresse dont la texture des titres
 var _titles_texture: ImageTexture           # titres des 640 livres (BookSpine.gallery_title_bytes)
 var _titles_tween: Tween
 var _speaker: AmbientSpeakerScript          # haut-parleur d'ambiance du vestibule (set_speaker)
+var _missing_books := PackedInt32Array()    # rangs des livres absents (volés) de la galerie
+var _titles_bytes := PackedByteArray()      # titres posés (ceux de _titles_key), sans les absents
+var _texture_marks := false                 # la texture branchée marque des livres absents
 
 
 ## Une galerie au repère local (p_hexagon, p_level), à la vraie adresse `p_place` (place_of) ;
@@ -535,6 +554,7 @@ static func create(p_hexagon: int, p_level: int, p_detail: Detail = Detail.FULL,
 	gallery.level = p_level
 	gallery.place = p_place if not p_place.is_empty() else place_of_ints(p_hexagon, p_level)
 	gallery.name = _node_name(p_hexagon, p_level)
+	gallery._missing_books = _missing_in(gallery.place)
 	gallery.set_detail(p_detail)
 	return gallery
 
@@ -578,6 +598,9 @@ func readdress(p_hexagon: int, p_level: int, p_detail: Detail, p_place: Dictiona
 			_face_material.set_shader_parameter("seed", shader_seed)
 		_titles_key = ""
 		_set_titles_alpha(0.0)
+		_missing_books = _missing_in(place)
+		if _face_material != null:
+			_face_material.set_shader_parameter("missing", _missing_faces())
 	set_detail(p_detail)
 
 
@@ -808,6 +831,8 @@ func _want_titles() -> void:
 		_apply_titles(key, bytes, false)
 		return
 	_set_titles_alpha(0.0)
+	if _texture_marks or not _missing_books.is_empty():
+		_set_texture(PackedByteArray())   # sans titres, mais les livres absents restent absents
 	if not _title_waiting.has(self):
 		_title_waiting.append(self)
 	if not _title_running(key) and not _title_queue.any(func(e: Dictionary) -> bool: return e.key == key):
@@ -815,12 +840,8 @@ func _want_titles() -> void:
 
 
 func _apply_titles(key: String, bytes: PackedByteArray, fade: bool) -> void:
-	var image := Image.create_from_data(BookSpineScript.TEXTURE_WIDTH, BookSpineScript.TEXTURE_HEIGHT,
-		false, Image.FORMAT_RGBA8, bytes)
-	# Une texture neuve (7,5 Ko) plutôt que update() : la texture branchée sur le matériau reste
-	# lisible telle quelle (le rendu factice des tests ne garde que l'image de création).
-	_titles_texture = ImageTexture.create_from_image(image)
-	_book_material.set_shader_parameter("titles", _titles_texture)
+	_titles_bytes = bytes
+	_set_texture(bytes)
 	_titles_key = key
 	if not _shown.has(self):
 		_shown.append(self)
@@ -830,6 +851,93 @@ func _apply_titles(key: String, bytes: PackedByteArray, fade: bool) -> void:
 		_titles_tween.tween_property(_book_material, "shader_parameter/titles_alpha", 1.0, TITLE_APPEAR)
 	else:
 		_set_titles_alpha(1.0)
+
+
+## Branche la texture des titres `bytes` (vide : pas de titres), les livres absents marqués (bit
+## MISSING_BIT, sur une copie : les titres en mémoire restent sans marque).
+func _set_texture(bytes: PackedByteArray) -> void:
+	var data := bytes
+	if not _missing_books.is_empty():
+		if data.is_empty():
+			data.resize(BookSpineScript.TEXTURE_WIDTH * BookSpineScript.TEXTURE_HEIGHT * 4)
+		else:
+			data = bytes.duplicate()
+		BookSpineScript.set_missing_flags(data, _missing_books)
+	_texture_marks = not _missing_books.is_empty()
+	if data.is_empty():
+		_titles_texture = null
+		_book_material.set_shader_parameter("titles", null)
+		return
+	var image := Image.create_from_data(BookSpineScript.TEXTURE_WIDTH, BookSpineScript.TEXTURE_HEIGHT,
+		false, Image.FORMAT_RGBA8, data)
+	# Une texture neuve (7,5 Ko) plutôt que update() : la texture branchée sur le matériau reste
+	# lisible telle quelle (le rendu factice des tests ne garde que l'image de création).
+	_titles_texture = ImageTexture.create_from_image(image)
+	_book_material.set_shader_parameter("titles", _titles_texture)
+
+
+# --- Livres absents ----------------------------------------------------------------------------
+
+## Déclare les livres absents de leur étagère : [{key : clé de leur galerie (BookText.gallery_key),
+## hexagon, level : vraies coordonnées base 25, wall, shelf, book}]. Les galeries déjà construites
+## se mettent à jour par refresh_missing.
+static func set_missing_books(books: Array) -> void:
+	_missing = {}
+	_missing_checked = {}
+	for b: Dictionary in books:
+		if not _missing.has(b.key):
+			_missing[b.key] = []
+		_missing[b.key].append({"hexagon": b.hexagon, "level": b.level,
+			"book": (int(b.wall) * SHELVES + int(b.shelf)) * BOOKS_PER_SHELF + int(b.book)})
+
+
+## Les rangs des livres absents de la galerie `p` (place_of), triés : une clé sans livre absent ne
+## coûte qu'une recherche ; sinon les vraies coordonnées de la galerie se comparent, une fois par clé,
+## à celles des livres absents.
+static func _missing_in(p: Dictionary) -> PackedInt32Array:
+	var candidates: Variant = _missing.get(p.key)
+	if candidates == null:
+		return PackedInt32Array()
+	var checked: Variant = _missing_checked.get(p.key)
+	if checked != null:
+		return checked
+	var h := BookTextScript.b25_add_small(p.hexagon, p.dh)
+	var l := BookTextScript.b25_add_small(p.level, p.dl)
+	var books := PackedInt32Array()
+	for candidate: Dictionary in candidates:
+		if candidate.hexagon == h and candidate.level == l and not books.has(candidate.book):
+			books.append(candidate.book)
+	books.sort()
+	_missing_checked[p.key] = books
+	return books
+
+
+## Les rangs des livres absents de la galerie (aucun : tableau vide).
+func missing_books() -> PackedInt32Array:
+	return _missing_books
+
+
+## Reprend les livres absents de la galerie après set_missing_books : façades peintes et texture
+## des livres.
+func refresh_missing() -> void:
+	var books := _missing_in(place)
+	if books == _missing_books:
+		return
+	_missing_books = books
+	if _face_material != null:
+		_face_material.set_shader_parameter("missing", _missing_faces())
+	if _book_material != null:
+		_set_texture(_titles_bytes if _titles_key == place.key else PackedByteArray())
+
+
+## Les quatre premiers livres absents, pour les façades peintes (−1 : aucun). Plus de quatre livres
+## volés dans une même galerie n'arrive pas (les livres volés du catalogue sont dans des galeries
+## distinctes, le bibliothécaire n'en porte qu'un) ; le cinquième resterait peint au loin.
+func _missing_faces() -> Vector4i:
+	var faces := Vector4i(-1, -1, -1, -1)
+	for i in mini(_missing_books.size(), 4):
+		faces[i] = _missing_books[i]
+	return faces
 
 
 func _set_titles_alpha(alpha: float) -> void:
@@ -858,9 +966,13 @@ func locate_book(bookcase: StaticBody3D, world_pos: Vector3) -> Dictionary:
 	var board := floori((local.y - BOARD_BASE) / BOARD_PITCH)
 	if slot < 0 or slot >= BOOKS_PER_SHELF or board < 0 or board >= SHELVES:
 		return {}
+	var wall := int(bookcase.get_meta("book_wall"))
+	var shelf := SHELVES - 1 - board
+	if _missing_books.has((wall * SHELVES + shelf) * BOOKS_PER_SHELF + slot):
+		return {}   # un vide sur l'étagère : rien à viser
 	return {
 		"gallery": self, "hexagon": hexagon, "level": level,
-		"wall": int(bookcase.get_meta("book_wall")), "shelf": SHELVES - 1 - board, "book": slot,
+		"wall": wall, "shelf": shelf, "book": slot,
 	}
 
 
@@ -1006,6 +1118,7 @@ func _fit(node: Node) -> void:
 	elif node.name == "Faces":
 		if _face_material == null:
 			_face_material = _seeded_material("FACES")
+			_face_material.set_shader_parameter("missing", _missing_faces())
 		node.material_override = _face_material
 
 
@@ -1468,6 +1581,7 @@ static func _shader(variant: String) -> Shader:
 		"HALO_DARKEN": _float(HALO_DARKEN), "GILT_DIFFUSE": _float(GILT_DIFFUSE),
 		"HALO_DARKEN_PALE": _float(HALO_DARKEN_PALE), "PALE_BEGIN": _float(PALE_BEGIN), "PALE_END": _float(PALE_END),
 		"TITLE_FADE_BEGIN": _float(TITLE_FADE_BEGIN), "TITLE_FADE_END": _float(TITLE_FADE_END),
+		"MISSING_BIT": str(BookSpineScript.MISSING_BIT),
 	})
 	_shaders[variant] = shader
 	return shader

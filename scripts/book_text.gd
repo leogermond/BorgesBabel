@@ -132,6 +132,8 @@ static var _launch_mutex := Mutex.new()
 static var _launch_done := false
 static var _launch_result: Dictionary = {}
 static var _launcher_pid := -1   # commande du lanceur `py` → python.exe (direct_command)
+static var _reap_mutex := Mutex.new()
+static var _reaped: Dictionary = {}   # processus arrêtés par OS.kill (déjà attendus par le moteur)
 # Service d'arrière-plan (voir submit) : état partagé avec son fil, sous _bg_mutex.
 static var _bg_mutex := Mutex.new()
 static var _bg_semaphore := Semaphore.new()
@@ -529,11 +531,12 @@ static func b25_difference(a: String, b: String) -> Dictionary:
 ## dépasse changent) et vaut, à l'arrivée, celle de la chaîne relue en entier — quel que soit le
 ## chemin. Coût pour une grande coordonnée : les chiffres lus 8 par 8 dans des entiers de 64 bits
 ## (to_int64_array), ~30 ms à 656 000 chiffres ; les dernières empreintes calculées restent en
-## mémoire (PRINT_CACHE).
-static func b25_print(text: String) -> PackedInt64Array:
+## mémoire (PRINT_CACHE). `remember` faux : ni lue ni écrite dans cette mémoire, ce qui permet le
+## calcul sur un fil du moteur (après un premier appel de b25_fits_int sur le fil principal).
+static func b25_print(text: String, remember := true) -> PackedInt64Array:
 	if b25_fits_int(text):
 		return _print_of_int(b25_to_int(text))
-	if _print_cache.has(text):
+	if remember and _print_cache.has(text):
 		return _print_cache[text]
 	var negative := text.begins_with("-")
 	var bytes := text.to_ascii_buffer()
@@ -560,6 +563,8 @@ static func b25_print(text: String) -> PackedInt64Array:
 		h0 = (h0 * b0 + v % p0) % p0
 		h1 = (h1 * b1 + v % p1) % p1
 	var result := PackedInt64Array([-1 if negative else 1, h0, h1])
+	if not remember:
+		return result
 	if _print_cache.size() >= PRINT_CACHE:
 		_print_cache.erase(_print_cache.keys()[0])
 	_print_cache[text] = result
@@ -1217,7 +1222,7 @@ static func _stop_and_read_stderr() -> String:
 	var err := _stderr
 	var pid := _pid
 	var waited := 0
-	while pid > 0 and OS.is_process_running(pid) and waited < STDERR_WAIT_MS:
+	while _running(pid) and waited < STDERR_WAIT_MS:
 		OS.delay_msec(10)
 		waited += 10
 	if pid > 0:
@@ -1267,7 +1272,8 @@ static func _start() -> bool:
 	# Le lancement (fork, interpréteur, ping) se fait sur un fil ; le fil principal l'attend au plus
 	# main_start_wait_ms, puis rend la main (« se lance ») : le lancement continue, la requête
 	# suivante le retrouve.
-	if _launcher == null:
+	var fresh := _launcher == null
+	if fresh:
 		_launch_done = false
 		_launch_result = {}
 		_launcher_pid = -1
@@ -1281,7 +1287,9 @@ static func _start() -> bool:
 			BookTextScript._launch_result = result
 			BookTextScript._launch_done = true
 			BookTextScript._launch_mutex.unlock())
-	var deadline := Time.get_ticks_msec() + main_start_wait_ms
+	# Un lancement déjà attendu une fois (il continue sur son fil) n'est plus attendu : la requête
+	# échoue aussitôt (« se lance encore ») jusqu'à ce qu'il aboutisse.
+	var deadline := Time.get_ticks_msec() + (main_start_wait_ms if fresh else 0)
 	while not _launched() and Time.get_ticks_msec() < deadline:
 		OS.delay_msec(2)
 	if not _launched():
@@ -1338,7 +1346,7 @@ static func _stop_launcher() -> void:
 	_launcher.wait_to_finish()
 	_launcher = null
 	var result := _launch_result
-	if result.has("pid") and OS.is_process_running(int(result.pid)):
+	if result.has("pid"):
 		_kill_tree(int(result.pid))
 
 
@@ -1357,6 +1365,7 @@ static func _launch(commands: Array, script: String, timeout: int, on_spawn := C
 		var process := OS.execute_with_pipe(command[0], args)
 		if process.is_empty():
 			continue
+		_spawned(process.pid)
 		if on_spawn.is_valid():
 			on_spawn.call(process.pid)
 		var watchdog := Watchdog.new()
@@ -1407,6 +1416,7 @@ static func direct_command(command: Array) -> Array:
 	args.append_array(["-c", "import sys; print(sys.executable)"])
 	var process := OS.execute_with_pipe(command[0], args)
 	if not process.is_empty():
+		_spawned(process.pid)
 		var watchdog := Watchdog.new()
 		watchdog.start(process.pid, RESOLVE_TIMEOUT_MS)
 		var path: String = process.stdio.get_line().strip_edges()
@@ -1433,8 +1443,9 @@ static func launcher_selector(arg: String) -> bool:
 ## parent), puis le processus et ses descendants arrêtés (SIGKILL). Rien n'attend sans borne : taskkill
 ## se lance sans être attendu (OS.create_process), pgrep sous un chien de garde. Un processus déjà
 ## fini (et attendu par le moteur) n'est pas visé : son numéro peut désigner un autre processus.
+## Un processus déjà arrêté ici ne l'est pas deux fois, ni interrogé de nouveau (voir _running).
 static func _kill_tree(pid: int) -> void:
-	if pid <= 0 or not OS.is_process_running(pid):
+	if not _claim(pid):
 		return
 	if OS.get_name() == "Windows":
 		# /T suit les liens de parenté : le lanceur doit vivre encore quand taskkill les relève.
@@ -1445,6 +1456,40 @@ static func _kill_tree(pid: int) -> void:
 	OS.kill(pid)
 	for child in family:
 		OS.kill(child)
+
+
+## Vrai si le processus `pid`, lancé par ce jeu, tourne encore. OS.kill attend la fin du processus
+## qu'il arrête (le moteur l'a alors « récolté ») sans que OS.is_process_running le sache : l'y
+## interroger ensuite écrirait une erreur (« does not exist or is not a child »). Les processus
+## arrêtés ici sont donc retenus (_reaped) et ne sont plus interrogés.
+static func _running(pid: int) -> bool:
+	if pid <= 0:
+		return false
+	_reap_mutex.lock()
+	var running := not _reaped.has(pid) and OS.is_process_running(pid)
+	_reap_mutex.unlock()
+	return running
+
+
+## Réserve l'arrêt du processus `pid` : vrai s'il tourne et qu'aucun fil ne l'a déjà arrêté ou ne
+## l'arrête (chien de garde, fil d'arrière-plan et fil principal peuvent viser le même).
+static func _claim(pid: int) -> bool:
+	if pid <= 0:
+		return false
+	_reap_mutex.lock()
+	var claimed := not _reaped.has(pid) and OS.is_process_running(pid)
+	if claimed:
+		_reaped[pid] = true
+	_reap_mutex.unlock()
+	return claimed
+
+
+## Un processus vient d'être lancé : son numéro, peut-être déjà servi à un processus arrêté, redevient
+## celui d'un processus vivant.
+static func _spawned(pid: int) -> void:
+	_reap_mutex.lock()
+	_reaped.erase(pid)
+	_reap_mutex.unlock()
 
 
 ## Les descendants d'un processus (enfants, petits-enfants…), au plus KILL_TREE_LIMIT.
@@ -1483,6 +1528,7 @@ static func _children(pid: int) -> PackedInt64Array:
 	var process := OS.execute_with_pipe("pgrep", ["-P", str(pid)])
 	if process.is_empty():
 		return children
+	_spawned(process.pid)
 	var watchdog := Watchdog.new(Watchdog.POLL_USEC, false)   # pgrep seul, sans sa famille
 	watchdog.start(process.pid, PGREP_TIMEOUT_MS)
 	var pipe: FileAccess = process.stdio
@@ -1804,7 +1850,7 @@ class Watchdog:
 			if fire:
 				if _tree:
 					BookTextScript._kill_tree(_pid)   # le processus et ses descendants (lanceur)
-				elif OS.is_process_running(_pid):
+				elif BookTextScript._claim(_pid):
 					OS.kill(_pid)
 				return
 			if done:

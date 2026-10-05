@@ -32,6 +32,7 @@ const SYMBOL_BITS := 5
 const SYMBOLS_PER_CHANNEL := 4           # 4 symboles de 5 bits par mot de 20 bits
 const CHANNELS := 4                      # 4 mots par titre : 16 symboles
 const IMAGE_BIT := 20                    # drapeau « livre d'images », au bit 20 du premier mot
+const MISSING_BIT := 21                  # drapeau « livre absent » (volé), au bit 21 du premier mot
 const WALLS := 4
 const SHELVES := 5
 const BOOKS := 32
@@ -202,6 +203,21 @@ static func decode_title(bytes: PackedByteArray, book := 0) -> String:
 
 static func decode_image_flag(bytes: PackedByteArray, book := 0) -> bool:
 	return (_words(bytes, book)[0] >> IMAGE_BIT) & 1 == 1
+
+
+## Vrai quand le livre de rang `book` est marqué absent : le nuanceur ne le dessine pas (un vide
+## sur l'étagère).
+static func decode_missing_flag(bytes: PackedByteArray, book := 0) -> bool:
+	return (_words(bytes, book)[0] >> MISSING_BIT) & 1 == 1
+
+
+## Marque absents les livres de rangs `books` (mur·5 + étagère)·32 + livre, dans un tampon de
+## galerie : seul le bit 21 de leur premier mot change ; les autres livres gardent le leur.
+static func set_missing_flags(bytes: PackedByteArray, books: PackedInt32Array) -> void:
+	for book in books:
+		var at := book * BYTES_PER_BOOK + 2   # octet 2 du mot 0 : bits 16 à 23
+		if at >= 0 and at < bytes.size():
+			bytes[at] |= 1 << (MISSING_BIT - 16)
 
 
 ## Pose les drapeaux « livre d'images » (`image_books`, 640 valeurs dans l'ordre de la texture)

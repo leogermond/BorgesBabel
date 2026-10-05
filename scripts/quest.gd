@@ -26,7 +26,19 @@ const BookTextScript := preload("res://scripts/book_text.gd")
 
 const CATALOGUE_PATH := "res://data/quetes/catalogue.bcat"
 const CATALOGUE_VERSION := 2
-const PINS_PATH := "user://quetes_epinglees.json"
+const PINS_FILE := "quetes_epinglees.json"
+const PINS_PATH := "user://" + PINS_FILE
+## La quête en cours, gardée d'une session à l'autre (null : effacée par le joueur).
+const ACTIVE_FILE := "quete_en_cours.json"
+const ACTIVE_VERSION := 1
+## Le livre que le bibliothécaire emporte (un au plus), gardé d'une session à l'autre.
+const CARRIED_FILE := "livre_emporte.json"
+const CARRIED_VERSION := 1
+## La quête du premier lancement (aucune quête enregistrée) : une entrée du catalogue.
+const FIRST_QUEST := "borges-biblioteca-de-babel"
+const KIND_BOOK := "livre"
+## L'argument (après « -- ») qui choisit un autre dossier pour les fichiers du joueur (tests).
+const USER_DIR_ARG := "--dossier-joueur="
 ## Version 2 : adresses de livres en base 25 (les épingles de la version 1, adresses de pages en
 ## décimal, sont abandonnées : le fichier revient aux épingles d'office).
 const PINS_VERSION := 2
@@ -44,6 +56,9 @@ const REGISTER_AUTHOR := "anonyme"
 const REGISTER_CONTEXT := "Registre des ouvrages manquants aux étagères."
 
 static var _stolen: Dictionary = {}       # chemin du catalogue → {livre volé: true}
+## Dossier des fichiers du joueur (épingles, quête en cours, livre emporté) : « user:// », celui
+## de l'argument USER_DIR_ARG, ou celui qu'un test fixe avant de créer le Hud et le monde.
+static var user_dir := ""
 static var _catalogues: Dictionary = {}   # chemin → catalogue lu (JSON), lu une fois
 
 var title := ""
@@ -222,6 +237,77 @@ static func _step(difference: Dictionary, delta: int) -> Dictionary:
 	if delta == 0 or not difference.exact:
 		return difference
 	return BookTextScript._exact_difference(int(difference.value) + delta)
+
+
+# --- Fichiers du joueur --------------------------------------------------------------------------
+
+## Le chemin d'un fichier du joueur, dans user_dir.
+static func user_path(file_name: String) -> String:
+	if user_dir.is_empty():
+		user_dir = "user://"
+		for arg in OS.get_cmdline_user_args():
+			if arg.begins_with(USER_DIR_ARG) and arg.length() > USER_DIR_ARG.length():
+				user_dir = arg.trim_prefix(USER_DIR_ARG)
+	return user_dir.path_join(file_name)
+
+
+## Écrit la quête en cours (null : aucune, le joueur l'a effacée) ; faux si le fichier ne s'écrit pas.
+## Une entrée du catalogue se garde par son identifiant, toute autre quête par son livre, ses pages,
+## son titre (jamais le texte cherché).
+static func save_active(quest: QuestScript, path: String) -> bool:
+	var stored: Variant = null
+	if quest != null and not quest.entry_id.is_empty():
+		stored = {"kind": KIND_CATALOGUE, "entry": quest.entry_id, "page_index": quest.page_index}
+	elif quest != null:
+		stored = {"kind": KIND_BOOK, "title": quest.title, "author": quest.author, "address": quest.book,
+			"pages": quest.pages, "page_index": quest.page_index, "notice": quest.notice}
+	return _write_document(path, {"version": ACTIVE_VERSION, "quest": stored})
+
+
+## La quête en cours enregistrée : {stored : vrai si le fichier en garde une (ou l'absence d'une),
+## quest : la quête ou null}. Fichier absent, illisible ou abîmé : stored faux (premier lancement).
+static func load_active(entries: Array, path: String) -> Dictionary:
+	var parsed: Variant = _read_document(path)
+	if not parsed is Dictionary or parsed.get("version") != ACTIVE_VERSION or not parsed.has("quest"):
+		return {"stored": false, "quest": null}
+	var raw: Variant = parsed.quest
+	if raw == null:
+		return {"stored": true, "quest": null}
+	if not raw is Dictionary:
+		return {"stored": false, "quest": null}
+	var quest: QuestScript = null
+	match raw.get("kind"):
+		KIND_CATALOGUE:
+			var entry := catalogue_entry(entries, str(raw.get("entry", "")))
+			if not entry.is_empty():
+				quest = from_entry(entry)
+		KIND_BOOK:
+			if raw.get("address") is Dictionary and raw.get("pages") is Array:
+				quest = from_book(raw.address, raw.pages, str(raw.get("title", "")), str(raw.get("author", "")))
+				if quest != null:
+					quest.notice = str(raw.get("notice", ""))
+	if quest == null:
+		return {"stored": false, "quest": null}
+	var index: Variant = raw.get("page_index", 0)
+	quest.set_page(int(index) if index is float or index is int else 0)
+	return {"stored": true, "quest": quest}
+
+
+## Écrit le livre emporté ({} : aucun) ; faux si le fichier ne s'écrit pas.
+static func save_carried(book: Dictionary, path: String) -> bool:
+	return _write_document(path, {"version": CARRIED_VERSION, "book": BookTextScript.book_of(book) if not book.is_empty() else null})
+
+
+## Le livre emporté enregistré, {hexagon, level, wall, shelf, book} ; {} sans livre, fichier absent
+## ou abîmé.
+static func load_carried(path: String) -> Dictionary:
+	var parsed: Variant = _read_document(path)
+	if not parsed is Dictionary or parsed.get("version") != CARRIED_VERSION:
+		return {}
+	var book: Variant = parsed.get("book")
+	if not book is Dictionary or book.has("page") or not is_valid_address(book):
+		return {}
+	return BookTextScript.book_of(book)
 
 
 # --- Catalogue ----------------------------------------------------------------------------------
@@ -557,6 +643,8 @@ static func _write_document(path: String, document: Variant) -> bool:
 	var table := {"strings": [], "magnitudes": [], "index": {}}
 	var data: Variant = _compact_strings(document, table)
 	var payload := JSON.stringify({"compact": 1, "strings": table.strings, "data": data}).to_utf8_buffer()
+	if not DirAccess.dir_exists_absolute(path.get_base_dir()):
+		DirAccess.make_dir_recursive_absolute(path.get_base_dir())
 	var file := FileAccess.open(path, FileAccess.WRITE)
 	if file == null:
 		return false

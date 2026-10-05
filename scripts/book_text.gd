@@ -148,6 +148,7 @@ static var _bg_next := 0                # dernier ticket (fil principal seul)
 ## Fil principal seul : requêtes et oublis qui attendent le verrou de la file (voir flush).
 static var _staged: Array = []
 static var _staged_cancels: Array = []   # [ticket, retirer de la file : bool]
+static var last_flush_parts := PackedInt32Array([0, 0, 0, 0])
 static var _bg_commands: Array = []      # relevés sur le fil principal à la création du fil
 static var _bg_script := ""
 static var _bg_start_timeout := 20000
@@ -1623,13 +1624,24 @@ static func submit(request: Variant, timeout := -1, after := Callable()) -> int:
 
 ## Passe dans la file du fil d'arrière-plan les requêtes et les oublis en attente, si le verrou est
 ## libre ; sinon rien (à refaire à l'image suivante). Fil principal seulement, sans attente.
+## Détail du dernier flush (mesures des tests) : [essai du verrou, requêtes passées (−1 : verrou
+## pris), passage, réveils du fil], en µs sauf le nombre.
 static func flush() -> void:
-	if (_staged.is_empty() and _staged_cancels.is_empty()) or not _bg_mutex.try_lock():
+	if _staged.is_empty() and _staged_cancels.is_empty():
+		last_flush_parts = PackedInt32Array([0, 0, 0, 0])
+		return
+	var t0 := Time.get_ticks_usec()
+	var locked := _bg_mutex.try_lock()
+	var t1 := Time.get_ticks_usec()
+	if not locked:
+		last_flush_parts = PackedInt32Array([t1 - t0, -1, 0, 0])
 		return
 	var posted := _flush_locked()
 	_bg_mutex.unlock()
+	var t2 := Time.get_ticks_usec()
 	for _i in posted:
 		_bg_semaphore.post()
+	last_flush_parts = PackedInt32Array([t1 - t0, posted, t2 - t1, Time.get_ticks_usec() - t2])
 
 
 ## (verrou tenu) Les requêtes en attente rejoignent la file, les oublis s'appliquent ; rend le

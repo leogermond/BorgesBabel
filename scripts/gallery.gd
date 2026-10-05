@@ -523,9 +523,10 @@ static var _flag_retry: Dictionary = {}  # clé → {place, at, ticket, delay} :
 static var _shown: Array = []            # galeries dont la texture porte des titres (pour les compléter)
 ## Temps passé par le dernier pump_titles sur le fil principal, en µs (mesures des tests), et son
 ## détail : [flush (verrou de la file), take (relevés), textures posées, genres redemandés,
-## lancements] en µs, puis le nombre de relevés, de textures posées et de lancements.
+## lancements] en µs, puis le nombre de relevés, de textures posées et de lancements, puis le
+## détail du flush (BookText.last_flush_parts).
 static var last_pump_usec := 0
-static var last_pump_parts := PackedInt32Array([0, 0, 0, 0, 0, 0, 0, 0])
+static var last_pump_parts := PackedInt32Array()
 ## Attente avant de redemander des genres de livres qui ne sont pas arrivés (doublée ensuite).
 static var flag_retry_ms := 5000
 ## Livres absents de leur étagère (volés : ceux du catalogue, celui que porte le bibliothécaire),
@@ -720,6 +721,7 @@ static func pump_titles() -> void:
 	BookTextScript.flush()   # requêtes et oublis en attente du verrou (Hud, redemandes)
 	var mark := Time.get_ticks_usec()
 	parts[0] = mark - started
+	parts.append_array(BookTextScript.last_flush_parts)
 	for i in range(_title_jobs.size() - 1, -1, -1):
 		var job: Dictionary = _title_jobs[i]
 		var response: Variant = BookTextScript.take(job.ticket)

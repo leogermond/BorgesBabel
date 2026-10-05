@@ -270,7 +270,7 @@ func pin_current(pin_title: String) -> bool:
 	if quest == null or not quest.entry_id.is_empty():
 		return false
 	var pin_name := pin_title.strip_edges() if not pin_title.strip_edges().is_empty() else quest.title
-	pins = QuestScript.add_pin(pins, QuestScript.search_pin(pin_name, quest.address()))
+	pins = QuestScript.add_pin(pins, QuestScript.search_pin(pin_name, quest.address(), quest.pages.size()))
 	_save_pins()
 	return true
 
@@ -292,7 +292,13 @@ func _start_search(found: Dictionary, default_title: String) -> bool:
 		if is_panel_open():
 			_rebuild_panel()
 		return false
-	start_quest(QuestScript.from_address(found, default_title))
+	# Les pages qu'occupe le texte (text_pages) et l'avis du service : texte tronqué, livre d'images.
+	var search := BookTextScript.last_search
+	var notice := str(search.get("notice", "")) if search.get("notice") is String else ""
+	if notice.is_empty() and search.get("is_image") == true:
+		notice = "livre d'images : chaque page se lit comme une image"
+	var pages: Variant = search.get("text_pages", 1)
+	start_quest(QuestScript.from_search(found, int(pages) if pages is float or pages is int else 1, default_title, notice))
 	return true
 
 
@@ -631,6 +637,8 @@ func _rebuild_panel() -> void:
 				button.pressed.connect(set_quest_page.bind(i))
 				selector.add_child(button)
 			_panel_box.add_child(selector)
+		if not quest.notice.is_empty():
+			_panel_box.add_child(_text(quest.notice, 13, Color(1.0, 0.75, 0.45)))
 		_panel_box.add_child(_text(str(_guide.get("summary", "")), 14, Color(1, 1, 1, 0.85)))
 		var actions := HBoxContainer.new()
 		if quest.entry_id.is_empty():

@@ -849,6 +849,7 @@ static func search_image(source: Image) -> Dictionary:
 
 static func _found(response: Dictionary) -> Dictionary:
 	if response.has("error") or not response.get("address") is Dictionary:
+		last_search = {}
 		return {}
 	var found := book_of(response.address)
 	last_search = response.duplicate()

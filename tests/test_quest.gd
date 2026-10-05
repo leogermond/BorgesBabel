@@ -297,7 +297,10 @@ func _test_pins() -> void:
 	_check(again.map(func(p: Dictionary) -> String: return p.id) == pins.map(func(p: Dictionary) -> String: return p.id), "épingles relues à l'identique")
 	var stored: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(PINS_TEST_PATH))
 	var search_stored: Array = stored.pins.filter(func(p: Dictionary) -> bool: return p.kind == QuestScript.KIND_SEARCH)
-	_check(search_stored.size() == 1 and search_stored[0].keys().size() == 3, "une recherche s'enregistre en titre et adresse seuls")
+	var stored_keys: Array = search_stored[0].keys() if search_stored.size() == 1 else []
+	stored_keys.sort()
+	_check(search_stored.size() == 1 and stored_keys == ["address", "kind", "pages", "title"],
+		"une recherche s'enregistre en titre, adresse et nombre de pages seuls (lu : %s)" % [stored_keys])
 	var restored := QuestScript.restore_catalogue(again, entries)
 	_check(restored.size() == 10 and QuestScript.missing_catalogue(restored, entries).is_empty() and restored[2].entry == "borges-el-zahir",
 		"rétablir remet l'entrée désépinglée à sa place, la recherche reste")
@@ -470,6 +473,23 @@ func _test_hud() -> void:
 	var stored := FileAccess.get_file_as_string(PINS_TEST_PATH)
 	_check(stored.contains("babel tapé") and not stored.contains("la bibliotheque de babel"), "le fichier d'épingles garde le titre, jamais le texte")
 	_check(not hud.search_typed("   ") and hud.last_error == "texte vide", "texte vide refusé")
+	# Un texte de plusieurs pages : la quête propose les pages qu'il occupe, l'épingle les garde.
+	_check(hud.search_typed("la bibliotheque de babel ".repeat(280)) and hud.quest.pages == [0, 1, 2] and hud.quest.notice.is_empty(),
+		"un texte de 7000 symboles : la quête propose ses 3 pages (lu : %s)" % [hud.quest.pages])
+	hud.open_panel()
+	texts = _texts(hud)
+	_check(texts.has("page") and texts.has("1") and texts.has("2") and texts.has("3"), "le panneau offre le choix des 3 pages")
+	hud.set_quest_page(2)
+	_check(hud.quest.address().page == 2 and hud.pin_current("trois pages"), "page 3 choisie, la recherche s'épingle")
+	var reloaded := QuestScript.load_pins(hud.catalogue, PINS_TEST_PATH)
+	var three := reloaded.filter(func(p: Dictionary) -> bool: return p.title == "trois pages")
+	var from_pin: QuestScript = QuestScript.from_pin(three[0], hud.catalogue) if three.size() == 1 else null
+	_check(from_pin != null and from_pin.pages == [0, 1, 2] and from_pin.page() == 2, "l'épingle relue garde les 3 pages et la page choisie")
+	_check(hud.search_typed(".. la bibliotheque de babel") and hud.quest.notice.contains("livre d'images"), "avis du service gardé : %s" % hud.quest.notice)
+	texts = _texts(hud)
+	_check(texts.has(hud.quest.notice), "le panneau montre l'avis du service")
+	hud.close_panel()
+	hud.unpin(hud.pins.filter(func(p: Dictionary) -> bool: return p.title == "trois pages")[0].id)
 	hud.unpin(hud.pins[0].id)
 	_check(hud.pins.size() == 9, "désépingler depuis le Hud")
 	hud.restore_pins()

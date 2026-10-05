@@ -44,9 +44,12 @@ var author := ""
 var entry_id := ""
 ## Le livre de la quête, {hexagon, level: String (base 25), wall, shelf, book: int}.
 var book: Dictionary = {}
-## Les pages proposées, numéros 0 à 409 dans le livre (les pages du texte d'une entrée).
+## Les pages proposées, numéros 0 à 409 dans le livre (les pages du texte d'une entrée, ou
+## celles qu'occupe le texte d'une recherche).
 var pages: Array = []
 var page_index := 0
+## Avis du service sur la recherche (texte tronqué, livre d'images), vide sinon.
+var notice := ""
 var _guide_origin: Array = []      # [hexagone, niveau] du dernier guidage
 var _guide_dz: Dictionary = {}
 var _guide_dy: Dictionary = {}
@@ -57,6 +60,17 @@ static func from_address(target: Dictionary, quest_title := "", quest_author := 
 	if not is_valid_address(target):
 		return null
 	return from_book(target, [int(target.get("page", 0))], quest_title, quest_author)
+
+
+## La quête d'une recherche du joueur : le livre trouvé, les `page_count` pages qu'occupe le texte
+## (0, 1 …, au plus 410), la page choisie celle de l'adresse ; `search_notice`, l'avis du service.
+static func from_search(target: Dictionary, page_count: int, quest_title := "", search_notice := "") -> QuestScript:
+	var quest := from_book(target, range(clampi(page_count, 1, BookTextScript.PAGES)), quest_title)
+	if quest == null:
+		return null
+	quest.set_page(int(target.get("page", 0)))
+	quest.notice = search_notice
+	return quest
 
 
 ## Une quête sur un livre et quelques-unes de ses pages ; null si l'adresse ou une page est mal formée.
@@ -306,7 +320,8 @@ static func _valid_entry(raw: Variant, stolen: Array) -> Dictionary:
 # --- Épingles -----------------------------------------------------------------------------------
 # Une épingle : {id, kind, title, author, address}.
 #   catalogue : id « catalogue:<id de l'entrée> », livre et pages lus dans le catalogue ;
-#   recherche : id « recherche:<condensat de l'adresse> », titre et adresse seuls (jamais la source) ;
+#   recherche : id « recherche:<condensat de l'adresse> », titre, adresse et nombre de pages du texte
+#               (pages, facultatif, 1 par défaut) seuls (jamais la source) ;
 #   registre  : id « registre », le registre des livres manquants, tiré de stolen_books.
 # Ordre : les entrées du catalogue dans l'ordre du catalogue, puis les recherches, de la plus ancienne
 # à la plus récente, puis le registre.
@@ -316,13 +331,13 @@ static func catalogue_pin(entry: Dictionary) -> Dictionary:
 		"title": entry.title, "author": entry.author, "address": {}}
 
 
-static func search_pin(pin_title: String, target: Dictionary) -> Dictionary:
+static func search_pin(pin_title: String, target: Dictionary, page_count := 1) -> Dictionary:
 	var a := normalized_address(target)
 	if not a.has("page"):
 		a.page = 0
 	var key := BookTextScript.full_form(a).sha256_text().left(16)
 	return {"id": "%s:%s" % [KIND_SEARCH, key], "kind": KIND_SEARCH, "entry": "",
-		"title": pin_title.strip_edges(), "author": "", "address": a}
+		"title": pin_title.strip_edges(), "author": "", "address": a, "pages": clampi(page_count, 1, BookTextScript.PAGES)}
 
 
 static func register_pin() -> Dictionary:
@@ -361,7 +376,7 @@ static func from_pin(pin: Dictionary, entries: Array) -> QuestScript:
 	if pin.kind == KIND_CATALOGUE:
 		var entry := catalogue_entry(entries, pin.entry)
 		return null if entry.is_empty() else from_entry(entry)
-	return from_address(pin.address, pin.title, pin.author)
+	return from_search(pin.address, int(pin.get("pages", 1)), pin.title)
 
 
 ## Ajoute une épingle à sa place (une recherche après les autres, avant le registre), ou remplace
@@ -431,7 +446,7 @@ static func save_pins(pins: Array, path := PINS_PATH) -> bool:
 			KIND_CATALOGUE:
 				stored.append({"kind": KIND_CATALOGUE, "entry": p.entry})
 			KIND_SEARCH:
-				stored.append({"kind": KIND_SEARCH, "title": p.title, "address": p.address})
+				stored.append({"kind": KIND_SEARCH, "title": p.title, "address": p.address, "pages": int(p.get("pages", 1))})
 			KIND_REGISTER:
 				stored.append({"kind": KIND_REGISTER})
 	var file := FileAccess.open(path, FileAccess.WRITE)
@@ -456,7 +471,8 @@ static func _restore_pin(raw: Variant, entries: Array) -> Dictionary:
 				return {}
 			if not is_valid_address(raw.address):
 				return {}
-			return search_pin(raw.title, raw.address)
+			var count: Variant = raw.get("pages", 1)
+			return search_pin(raw.title, raw.address, int(count) if count is float or count is int else 1)
 		KIND_REGISTER:
 			return register_pin()
 	return {}

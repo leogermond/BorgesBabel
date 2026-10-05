@@ -66,6 +66,8 @@ var origin_hexagon_print := PackedInt64Array([1, 0, 0])
 var origin_level_print := PackedInt64Array([1, 0, 0])
 var _hexagon_context: Dictionary = {}
 var _level_context: Dictionary = {}
+var _hexagon_parts: Dictionary = {}   # décalage → part de clé (_key_part), pour le pas en cours
+var _level_parts: Dictionary = {}
 ## Pas préparés d'avance, par axe (« hexagon », « level ») : pas (±1) → coordonnée voisine prête
 ## (String), ou calcul en cours sur un fil du moteur ({task, result}). Le pas en arrière est la
 ## coordonnée d'où l'on vient ; le pas en avant ne se prépare que lorsqu'une retenue doit traverser
@@ -276,6 +278,7 @@ func _shift(step: int) -> void:
 	origin_hexagon += step
 	origin_hexagon_b25 = _stepped("hexagon", origin_hexagon_b25, step)
 	_hexagon_context = BookTextScript.print_context_step(_hexagon_context, step, origin_hexagon_b25)
+	_hexagon_parts = {}
 	origin_hexagon_print = _print_of(_hexagon_context)
 	player.position.z -= step * GalleryScript.PITCH
 	_update_galleries(Vector2i(step, 0))
@@ -287,6 +290,7 @@ func _shift_level(step: int) -> void:
 	origin_level += step
 	origin_level_b25 = _stepped("level", origin_level_b25, step)
 	_level_context = BookTextScript.print_context_step(_level_context, step, origin_level_b25)
+	_level_parts = {}
 	origin_level_print = _print_of(_level_context)
 	player.position.y -= step * GalleryScript.LEVEL_PITCH
 	_update_galleries(Vector2i(0, step))
@@ -427,8 +431,17 @@ func _update_galleries(moved := Vector2i.ZERO, readdress_all := false) -> void:
 ## les chaînes de l'origine, partagées sans copie, le décalage, et la clé tirée des empreintes.
 func place_at(cell: Vector2i) -> Dictionary:
 	return GalleryScript.place_of(origin_hexagon_b25, cell.x, origin_level_b25, cell.y,
-		BookTextScript.gallery_key_of(BookTextScript.print_at(_hexagon_context, cell.x),
-			BookTextScript.print_at(_level_context, cell.y)))
+		_key_part(_hexagon_parts, _hexagon_context, cell.x) + "|" + _key_part(_level_parts, _level_context, cell.y))
+
+
+## La part d'un axe dans la clé d'une galerie (BookText.print_text de l'empreinte à `delta` de
+## l'origine), calculée une fois par pas pour toutes les galeries de la même rangée.
+static func _key_part(parts: Dictionary, context: Dictionary, delta: int) -> String:
+	var part: Variant = parts.get(delta)
+	if part == null:
+		part = BookTextScript.print_text(BookTextScript.print_at(context, delta))
+		parts[delta] = part
+	return part
 
 
 ## Empreintes de l'origine après un saut (les chaînes origin_*_b25 sont déjà à jour) et leur
@@ -436,6 +449,8 @@ func place_at(cell: Vector2i) -> Dictionary:
 func _set_prints(hexagon_print: PackedInt64Array, level_print: PackedInt64Array) -> void:
 	_hexagon_context = BookTextScript.print_context(origin_hexagon_b25, hexagon_print)
 	_level_context = BookTextScript.print_context(origin_level_b25, level_print)
+	_hexagon_parts = {}
+	_level_parts = {}
 	origin_hexagon_print = hexagon_print
 	origin_level_print = level_print
 

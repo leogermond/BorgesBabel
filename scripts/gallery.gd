@@ -35,8 +35,8 @@ extends Node3D
 ## galerie LIT ou FULL donne à son matériau des livres une petite texture RGBA8 (96 × 20 texels,
 ## 12 octets par livre) que le nuanceur lit au texel près selon INSTANCE_ID, sous Forward+ comme
 ## sous Compatibility. Les titres d'une galerie (SHA-256 de 640 adresses, ~4 ms) se calculent sur
-## un fil du moteur ; en même temps, les genres de ses livres (livres d'images : double filet doré)
-## se demandent au service d'arrière-plan de BookText (son propre processus et son propre fil) :
+## le fil d'arrière-plan de BookText (priorité basse), après les genres de ses livres (livres
+## d'images : double filet doré) demandés au service d'arrière-plan (son propre processus) :
 ## pump_titles, une fois par image, ne fait que relever ce qui est prêt et lancer la suite, sans
 ## jamais attendre le service. Ceux des galeries qui deviendront LIT au prochain pas sont préparés
 ## d'avance (prefetch_titles) et gardés en mémoire : un pas ne fait que poser des textures prêtes.
@@ -139,7 +139,7 @@ const TITLE_FADE_BEGIN := 24.0
 const TITLE_FADE_END := 32.0
 const TITLE_APPEAR := 0.5            # s : fondu d'arrivée des titres calculés en retard
 const TITLE_CACHE_SIZE := 160        # galeries dont les titres restent en mémoire (7,5 Ko chacune)
-const TITLE_JOBS := 1                # galerie en cours au plus (titres sur un fil du moteur, genres en arrière-plan) : un seul calcul à la fois gêne le moins les pas
+const TITLE_JOBS := 2                # galeries confiées au fil d'arrière-plan à la fois (il les traite l'une après l'autre)
 
 const LEATHER: Array[Color] = [
 	Color(0.42, 0.12, 0.08), Color(0.30, 0.18, 0.10), Color(0.16, 0.24, 0.14),
@@ -503,7 +503,7 @@ static var _glyph_texture: ImageTexture  # atlas des glyphes de Lora (BookSpine)
 static var _halo_texture: ImageTexture   # halo des glyphes (BookSpine.glyph_halo), commun
 static var _title_cache: Dictionary = {} # clé de galerie → octets de la texture des titres (du plus ancien au plus récent)
 static var _title_queue: Array = []      # adresses (place) à calculer, urgentes d'abord
-static var _title_jobs: Array = []       # travaux {key, place, task, ticket, flags, failed, bytes}
+static var _title_jobs: Array = []       # travaux en cours {key, place, ticket} (fil d'arrière-plan)
 static var _title_waiting: Array = []    # galeries LIT ou FULL qui attendent leurs titres
 static var _flag_retry: Dictionary = {}  # clé → {place, at, ticket, delay} : genres à redemander
 static var _shown: Array = []            # galeries dont la texture porte des titres (pour les compléter)
@@ -687,33 +687,32 @@ static func pump_titles() -> void:
 	var now := Time.get_ticks_msec()
 	for i in range(_title_jobs.size() - 1, -1, -1):
 		var job: Dictionary = _title_jobs[i]
-		if job.task >= 0 and WorkerThreadPool.is_task_completed(job.task):
-			WorkerThreadPool.wait_for_task_completion(job.task)
-			job.task = -1
-		if job.ticket >= 0:
-			var response: Variant = BookTextScript.take(job.ticket)
-			if response != null:
-				job.ticket = -1
-				job.flags = _flags_of(response)
-				job.failed = job.flags.is_empty()
-		if job.task < 0 and job.ticket < 0:
-			_title_jobs.remove_at(i)
-			if job.failed:
-				_flag_retry[job.key] = {"place": job.place, "at": now + flag_retry_ms, "ticket": -1, "delay": flag_retry_ms}
-			else:
-				BookSpineScript.set_image_flags(job.bytes, job.flags)
-			_store_titles(job.key, job.bytes)
+		var response: Variant = BookTextScript.take(job.ticket)
+		if response == null:
+			continue
+		_title_jobs.remove_at(i)
+		var bytes: Variant = response.get("title_bytes") if response is Dictionary else null
+		if not bytes is PackedByteArray:   # service arrêté avant le calcul : la galerie se redemande
+			_title_queue.push_front(job.place)
+			continue
+		if response.get("flags_ok") != true:
+			_flag_retry[job.key] = {"place": job.place, "at": now + flag_retry_ms, "ticket": -1, "delay": flag_retry_ms}
+		_store_titles(job.key, bytes)
 	_pump_retries(now)
 	while not _title_queue.is_empty() and _title_jobs.size() < TITLE_JOBS:
 		var entry: Dictionary = _title_queue.pop_front()
 		if _title_cache.has(entry.key) or _title_running(entry.key):
 			continue
-		var job := {"key": entry.key, "place": entry, "flags": [], "failed": false, "bytes": PackedByteArray(),
-			"ticket": BookTextScript.submit_gallery_flags(entry.hexagon, entry.dh, entry.level, entry.dl)}
-		job.task = WorkerThreadPool.add_task(func() -> void:
-			job["bytes"] = BookSpineScript.gallery_title_bytes(job["key"]),
-			false, "titres des dos")
-		_title_jobs.append(job)
+		var key: String = entry.key
+		# Titres (SHA-256 des 640 adresses) et genres, tout sur le fil d'arrière-plan.
+		var ticket := BookTextScript.submit_gallery_flags(entry.hexagon, entry.dh, entry.level, entry.dl,
+			func(flags_response: Dictionary) -> Dictionary:
+				var title_bytes := BookSpineScript.gallery_title_bytes(key)
+				var flags := GalleryScript._flags_of(flags_response)
+				if not flags.is_empty():
+					BookSpineScript.set_image_flags(title_bytes, flags)
+				return {"title_bytes": title_bytes, "flags_ok": not flags.is_empty()})
+		_title_jobs.append({"key": key, "place": entry, "ticket": ticket})
 	last_pump_usec = Time.get_ticks_usec() - started
 
 
@@ -1012,10 +1011,7 @@ static func release_pool() -> void:
 			node.free()
 	_pool.clear()
 	for running: Dictionary in _title_jobs:
-		if running.task >= 0:
-			WorkerThreadPool.wait_for_task_completion(running.task)
-		if running.ticket >= 0:
-			BookTextScript.cancel(running.ticket)
+		BookTextScript.cancel(running.ticket)
 	for retry: Dictionary in _flag_retry.values():
 		if retry.ticket >= 0:
 			BookTextScript.cancel(retry.ticket)

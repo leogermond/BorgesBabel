@@ -678,7 +678,12 @@ static func _powmod(b: int, e: int, p: int) -> int:
 ## des vraies coordonnées. Les titres des dos (BookSpine) et la graine des livres (Gallery) en
 ## sont tirés.
 static func gallery_key_of(hexagon_print: PackedInt64Array, level_print: PackedInt64Array) -> String:
-	return "%d.%x.%x|%d.%x.%x" % [hexagon_print[0], hexagon_print[1], hexagon_print[2], level_print[0], level_print[1], level_print[2]]
+	return print_text(hexagon_print) + "|" + print_text(level_print)
+
+
+## L'empreinte d'une coordonnée écrite pour une clé : « signe.H₀.H₁ » (H en hexadécimal).
+static func print_text(print: PackedInt64Array) -> String:
+	return "%d.%x.%x" % [print[0], print[1], print[2]]
 
 
 ## Clé de la galerie (hexagone, niveau) : int ou chaînes base 25 de toute taille.
@@ -1537,7 +1542,9 @@ static func _split_command(command: String) -> Array:
 
 ## Met une requête (Dictionary, ou Callable sans argument qui la rend, ou rend sa ligne JSON) en file pour le service
 ## d'arrière-plan ; rend son ticket.
-static func submit(request: Variant, timeout := -1) -> int:
+## `after(réponse) -> Dictionary`, facultatif, s'appelle sur le fil avec la réponse (erreurs comprises)
+## et rend ce que take() rendra : un calcul qui ne doit pas non plus coûter au fil principal.
+static func submit(request: Variant, timeout := -1, after := Callable()) -> int:
 	b25_valid("0")   # expressions régulières créées ici, sur le fil principal
 	if _bg_thread == null:
 		_bg_commands = _background_commands(_launch_commands())
@@ -1550,7 +1557,7 @@ static func submit(request: Variant, timeout := -1) -> int:
 	_bg_mutex.lock()
 	_bg_next += 1
 	var ticket := _bg_next
-	_bg_jobs.append([ticket, request, timeout])
+	_bg_jobs.append([ticket, request, timeout, after])
 	_bg_mutex.unlock()
 	_bg_semaphore.post()
 	return ticket
@@ -1598,10 +1605,10 @@ static func pending() -> int:
 ## dl), demandés au service d'arrière-plan (forme « gallery » de is_image_book) : rend un ticket ;
 ## la réponse porte « is_image » (640 valeurs) ou « error ». Les coordonnées (base 25, toute
 ## taille) se calculent sur le fil.
-static func submit_gallery_flags(hexagon_base: String, dh: int, level_base: String, dl: int) -> int:
+static func submit_gallery_flags(hexagon_base: String, dh: int, level_base: String, dl: int, after := Callable()) -> int:
 	return submit(func() -> String:   # ligne écrite telle quelle : chiffres 0-9, a-o et « - », rien à échapper
 		return '{"op":"is_image_book","gallery":{"hexagon":"' + BookTextScript.b25_add_small(hexagon_base, dh) \
-			+ '","level":"' + BookTextScript.b25_add_small(level_base, dl) + '"}}')
+			+ '","level":"' + BookTextScript.b25_add_small(level_base, dl) + '"}}', -1, after)
 
 
 ## Les commandes du service d'arrière-plan : hors de Windows, chacune d'abord précédée de `nice`
@@ -1703,6 +1710,8 @@ static func _bg_loop() -> void:
 				_bg_publish_pid(-1)
 				response = {"error": "le service d'arrière-plan n'a pas répondu en %.1f s" % (limit / 1000.0), "code": "timeout"} if fired \
 					else {"error": "le service d'arrière-plan s'est arrêté pendant la requête", "code": "stopped"}
+		if job[3].is_valid():
+			response = job[3].call(response)
 		_bg_mutex.lock()
 		_bg_store(job[0], response)
 		_bg_busy = 0

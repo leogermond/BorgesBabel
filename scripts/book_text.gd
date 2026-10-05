@@ -77,6 +77,12 @@ const EXACT_DIGITS_LIMIT := 20000
 const PRINT_M1 := 152587890624
 const PRINT_M2 := 152587890626
 const PRINT_CACHE := 8
+## Résumés d'écran (coordinate_summary) : calcul local exact jusqu'à 30 chiffres base 25 (moins
+## de 10^42), pas à pas en int jusqu'à 2^62, 18 derniers chiffres suivis au-delà.
+const SMALL_SUMMARY_DIGITS := 30
+const SMALL_SUMMARY_DECIMALS := 41
+const INT_SUMMARY_LIMIT := 4611686018427387904
+const LOW_MODULUS := 1000000000000000000
 
 ## Délai de relance au plus après des lancements trop lents (voir _start).
 const START_RETRY_MAX_MS := 60000
@@ -169,16 +175,30 @@ static func display(target: Dictionary) -> String:
 
 
 ## Résumé d'une coordonnée pour l'écran : {sign, digits (chiffres décimaux), lead (4 premiers),
-## tail (4 derniers)}, et value (int) quand elle tient dans un int. Calcul local exact pour une
-## petite coordonnée ; pour une grande, la forme « display » du service. {} en cas d'erreur.
+## tail (4 derniers), low (18 derniers, complétés de zéros)}, et value (int) quand elle tient dans
+## un int. Calcul local exact jusqu'à SMALL_SUMMARY_DIGITS chiffres base 25 ; au-delà, la forme
+## « display » du service (requête sur le fil principal ; display_request pour l'arrière-plan).
+## {} en cas d'erreur.
 static func coordinate_summary(coordinate: String) -> Dictionary:
 	var value := b25(coordinate)
 	if value.is_empty():
 		return {}
 	if b25_fits_int(value):
 		return _int_summary(b25_to_int(value))
-	var response := _request({"op": "display", "address": {"hexagon": value, "level": "0", "wall": 0, "shelf": 0, "book": 0}})
-	return response.get("hexagon", {})
+	if value.length() - (1 if value.begins_with("-") else 0) <= SMALL_SUMMARY_DIGITS:
+		return _decimal_summary(b25_sign(value), _small_decimal(value.trim_prefix("-")))
+	return summary_of_display(_request(display_request(value)))
+
+
+## La requête « display » d'une coordonnée (canonique) : son résumé est celui de l'hexagone.
+static func display_request(coordinate: String) -> Dictionary:
+	return {"op": "display", "address": {"hexagon": coordinate, "level": "0", "wall": 0, "shelf": 0, "book": 0}}
+
+
+## Le résumé d'une réponse « display » (display_request), ou {} (erreur).
+static func summary_of_display(response: Variant) -> Dictionary:
+	var summary: Variant = response.get("hexagon") if response is Dictionary else null
+	return summary if summary is Dictionary and summary.has("low") else {}
 
 
 ## La coordonnée à l'écran : ses chiffres décimaux quand elle tient dans un int, sinon
@@ -192,23 +212,69 @@ static func summary_text(summary: Dictionary) -> String:
 
 
 ## Le résumé de la coordonnée voisine (coordonnée + delta, |delta| petit), sans la relire : les
-## derniers chiffres suivent le pas ; {} quand ils débordent (retenue vers les chiffres de tête,
-## une fois tous les 10 000 pas au plus) ou que la valeur tient dans un int (recalcul exact).
+## 18 derniers chiffres (low) suivent le pas, le reste ne change pas tant qu'ils ne débordent pas
+## (une fois tous les 10^18 pas au plus). Rend {} quand il faut recalculer : petite coordonnée
+## (au plus SMALL_SUMMARY_DIGITS chiffres base 25, calcul local exact, en int au besoin), ou
+## débordement des 18 derniers chiffres (recalcul complet, voir Hud : en arrière-plan).
 static func summary_step(summary: Dictionary, delta: int) -> Dictionary:
-	if summary.is_empty() or summary.has("value") or absi(delta) >= 10000:
+	if summary.is_empty() or absi(delta) >= 1000000:
 		return {}
-	var magnitude_delta := delta if int(summary.sign) > 0 else -delta
-	var tail := int(summary.tail) + magnitude_delta
-	if tail < 0 or tail >= 10000:
+	if summary.has("value"):
+		var next: int = int(summary.value) + delta
+		return _int_summary(next) if absi(next) <= INT_SUMMARY_LIMIT else {}
+	if int(summary.digits) <= SMALL_SUMMARY_DECIMALS or not summary.has("low"):
+		return {}
+	var low := int(summary.low) + (delta if int(summary.sign) > 0 else -delta)
+	if low < 0 or low >= LOW_MODULUS:
 		return {}
 	var result := summary.duplicate()
-	result.tail = "%04d" % tail
+	result.low = "%018d" % low
+	result.tail = result.low.right(4)
+	return result
+
+
+## Le résumé provisoire après un pas qui fait déborder les 18 derniers chiffres : ceux-ci suivent
+## le pas (modulo 10^18), signe, chiffres de tête et nombre de chiffres restent ceux d'avant
+## jusqu'au recalcul (« pending »).
+static func summary_wrap(summary: Dictionary, delta: int) -> Dictionary:
+	var result := summary.duplicate()
+	var low := posmod(int(summary.get("low", "0")) + (delta if int(summary.sign) > 0 else -delta), LOW_MODULUS)
+	result.low = "%018d" % low
+	result.tail = result.low.right(4)
+	result.pending = true
 	return result
 
 
 static func _int_summary(value: int) -> Dictionary:
 	var digits := str(absi(value)) if value != -9223372036854775807 - 1 else "9223372036854775808"
-	return {"sign": signi(value), "digits": digits.length(), "lead": digits.left(4), "tail": digits.right(4), "value": value}
+	var summary := _decimal_summary(signi(value), digits)
+	summary.value = value
+	return summary
+
+
+static func _decimal_summary(sign: int, digits: String) -> Dictionary:
+	return {"sign": sign, "digits": digits.length(), "lead": digits.left(4), "tail": digits.right(4),
+		"low": digits.right(18).lpad(18, "0")}
+
+
+## L'écriture décimale exacte d'une petite valeur absolue (chiffres base 25 sans signe, au plus
+## SMALL_SUMMARY_DIGITS), par tranches de 10^12.
+static func _small_decimal(digits: String) -> String:
+	const LIMB := 1000000000000
+	var limbs := PackedInt64Array([0])
+	for i in digits.length():
+		var carry := _digit(digits, i)
+		for k in limbs.size():
+			var v := limbs[k] * 25 + carry
+			limbs[k] = v % LIMB
+			@warning_ignore("integer_division")
+			carry = v / LIMB
+		if carry > 0:
+			limbs.append(carry)
+	var text := str(limbs[limbs.size() - 1])
+	for k in range(limbs.size() - 2, -1, -1):
+		text += str(limbs[k]).lpad(12, "0")
+	return text
 
 
 # --- Arithmétique en base 25 ------------------------------------------------------------------
@@ -1253,7 +1319,7 @@ static func submit(request: Variant, timeout := -1) -> int:
 		_bg_timeout = timeout_ms
 		_bg_quit = false
 		_bg_thread = Thread.new()
-		_bg_thread.start(_bg_loop)
+		_bg_thread.start(_bg_loop, Thread.PRIORITY_LOW)
 	_bg_mutex.lock()
 	_bg_next += 1
 	var ticket := _bg_next

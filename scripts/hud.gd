@@ -63,6 +63,8 @@ var _hexagon := "0"
 var _level := "0"
 var _hexagon_summary: Dictionary = {}
 var _level_summary: Dictionary = {}
+## Résumés recalculés en arrière-plan (BookText.submit) : axe → [ticket, pas faits depuis la demande].
+var _summary_requests: Dictionary = {}
 var _guide: Dictionary = {}
 var _mouse_before := Input.MOUSE_MODE_VISIBLE
 ## Dernier mode de souris demandé par le panneau (le mode effectif reste VISIBLE sans fenêtre).
@@ -109,8 +111,8 @@ func _ready() -> void:
 
 
 ## Affiche l'adresse de la galerie courante, hexagone et niveau en int ou en chaînes base 25.
-## Une coordonnée qui tient dans un int s'écrit en entier ; une plus grande, par la forme
-## « display » du service : signe, 4 premiers chiffres, 4 derniers, nombre de chiffres.
+## Une coordonnée qui tient dans un int s'écrit en entier ; une plus grande, par son résumé
+## (BookText.coordinate_summary) : signe, 4 premiers chiffres, 4 derniers, nombre de chiffres.
 ## `moved` : le pas (galeries, niveaux) qui mène de l'adresse précédente à celle-ci ; les
 ## derniers chiffres et le guidage suivent alors le pas sans relire les coordonnées (un pas reste
 ## dans le budget d'une image même à 900 000 chiffres ; les chaînes, canoniques, ne sont alors pas
@@ -121,25 +123,74 @@ func set_address(hexagon: Variant, level: Variant, moved := Vector2i.ZERO) -> vo
 	if stepping:
 		_hexagon = hexagon
 		_level = level
-		_hexagon_summary = _stepped_summary(_hexagon_summary, _hexagon, moved.x)
-		_level_summary = _stepped_summary(_level_summary, _level, moved.y)
+		_hexagon_summary = _stepped_summary("hexagon", _hexagon_summary, _hexagon, moved.x)
+		_level_summary = _stepped_summary("level", _level_summary, _level, moved.y)
 	else:
+		_cancel_summary_requests()
 		_hexagon = BookTextScript.b25(hexagon)
 		_level = BookTextScript.b25(level)
 		_hexagon_summary = BookTextScript.coordinate_summary(_hexagon)
 		_level_summary = BookTextScript.coordinate_summary(_level)
-	_address.text = "Hexagone %s · niveau %s" % [BookTextScript.summary_text(_hexagon_summary), BookTextScript.summary_text(_level_summary)]
+	_show_address()
 	_refresh_widget(moved if stepping else Vector2i.ZERO)
 
 
+func _show_address() -> void:
+	_address.text = "Hexagone %s · niveau %s" % [BookTextScript.summary_text(_hexagon_summary), BookTextScript.summary_text(_level_summary)]
+
+
 ## Le résumé d'écran d'une coordonnée après un pas : celui d'avant (pas nul sur cet axe), ou
-## avancé du pas quand il le permet (BookText.summary_step) ; sinon recalculé (exact en int, ou
-## par le service, une fois tous les 10 000 pas au plus).
-static func _stepped_summary(previous: Dictionary, coordinate: String, step: int) -> Dictionary:
+## avancé du pas (BookText.summary_step) ; une petite coordonnée se recalcule sur place (calcul
+## local exact, en int quand elle y tient de nouveau) ; une grande dont les 18 derniers chiffres
+## débordent (une fois tous les 10^18 pas) garde un résumé provisoire (summary_wrap) et se
+## recalcule en arrière-plan : aucun pas n'attend le service.
+func _stepped_summary(axis: String, previous: Dictionary, coordinate: String, step: int) -> Dictionary:
 	if step == 0:
 		return previous
+	if _summary_requests.has(axis):
+		_summary_requests[axis][1] += step
 	var next := BookTextScript.summary_step(previous, step)
-	return next if not next.is_empty() else BookTextScript.coordinate_summary(coordinate)
+	if not next.is_empty():
+		return next
+	if coordinate.length() <= BookTextScript.SMALL_SUMMARY_DIGITS + 1 or previous.is_empty():
+		return BookTextScript.coordinate_summary(coordinate)
+	if not _summary_requests.has(axis):
+		_summary_requests[axis] = [BookTextScript.submit(BookTextScript.display_request(coordinate)), 0]
+	return BookTextScript.summary_wrap(previous, step)
+
+
+## Résumés recalculés en arrière-plan : arrivés, ils remplacent le résumé provisoire, avancés des
+## pas faits depuis la demande.
+func _poll_summaries() -> void:
+	for axis: String in _summary_requests.keys():
+		var request: Array = _summary_requests[axis]
+		var response: Variant = BookTextScript.take(request[0])
+		if response == null:
+			continue
+		_summary_requests.erase(axis)
+		var coordinate := _hexagon if axis == "hexagon" else _level
+		var summary := BookTextScript.summary_of_display(response)
+		if not summary.is_empty() and request[1] != 0:
+			summary = BookTextScript.summary_step(summary, request[1])
+		if summary.is_empty():   # erreur, ou nouveau débordement : nouvelle demande
+			_summary_requests[axis] = [BookTextScript.submit(BookTextScript.display_request(coordinate)), 0]
+			continue
+		if axis == "hexagon":
+			_hexagon_summary = summary
+		else:
+			_level_summary = summary
+		_show_address()
+
+
+func _cancel_summary_requests() -> void:
+	for request: Array in _summary_requests.values():
+		BookTextScript.cancel(request[0])
+	_summary_requests.clear()
+
+
+## Vrai tant qu'un résumé d'adresse se recalcule en arrière-plan.
+func address_pending() -> bool:
+	return not _summary_requests.is_empty()
 
 
 ## Affiche la cote du livre visé, ou rien.
@@ -389,6 +440,8 @@ func _refresh_widget(moved := Vector2i.ZERO) -> void:
 
 
 func _process(_delta: float) -> void:
+	if not _summary_requests.is_empty():
+		_poll_summaries()
 	if quest != null and not _guide.is_empty():
 		_update_arrow(get_viewport().get_camera_3d())
 

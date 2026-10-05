@@ -404,6 +404,7 @@ func _test_hud() -> void:
 	var recomputed := "Hexagone %s · niveau %s" % [BookTextScript.summary_text(BookTextScript.coordinate_summary(h)), BookTextScript.summary_text(BookTextScript.coordinate_summary(l))]
 	_check(after == recomputed and after != shown, "cinq pas : l'adresse affichée suit (%s), comme la relecture par le service" % after)
 	_check(worst < 8000, "un pas de l'encart à 917 000 chiffres : %.2f ms au pire (budget 8 ms)" % (worst / 1000.0))
+	await _test_address_steps(hud, huge, deep)
 	hud.set_address(8, -2)
 
 	# Carnet : touche cachée, mot écrit dans l'alphabet, invocation à l'espace.
@@ -546,6 +547,61 @@ func _mouse(_hud: Hud) -> bool:
 	release.pressed = false
 	_push(release)
 	return handled
+
+
+## L'adresse affichée pas à pas : de part et d'autre de 2^62 (retour à l'écriture entière), et à
+## 917 000 chiffres quand les 4 derniers chiffres débordent (suivis sur place) ou les 18 derniers
+## (résumé provisoire, recalcul en arrière-plan) : chaque pas sous 8 ms, l'adresse finale égale à
+## la relecture complète.
+func _test_address_steps(hud: Hud, huge: String, deep: String) -> void:
+	var limit := BookTextScript.b25_from_int(1 << 62)
+	var h := BookTextScript.b25_add_small(limit, -2)
+	hud.set_address(h, "3")
+	var above := ""
+	for step: int in [1, 1, 1, 1, 1, -1, -1, -1, -1, -1]:
+		h = BookTextScript.b25_add_small(h, step)
+		hud.set_address(h, "3", Vector2i(step, 0))
+		if above.is_empty() and not BookTextScript.b25_fits_int(h):
+			above = hud._address.text
+	_check(above == "Hexagone %s · niveau 3" % BookTextScript.summary_text(BookTextScript.coordinate_summary(BookTextScript.b25_add_small(limit, 1)))
+			and above.contains("4611…7905 (19 chiffres)"),
+		"au-delà de 2^62, l'adresse s'abrège (%s)" % above)
+	_check(hud._address.text == "Hexagone %d · niveau 3" % ((1 << 62) - 2),
+		"revenue sous 2^62, l'adresse s'écrit de nouveau en entier (%s)" % hud._address.text)
+
+	var summary := BookTextScript.coordinate_summary(huge)
+	var cases := {
+		"4 derniers chiffres": BookTextScript.b25_add_small(huge, 9998 - int(summary.tail)),
+		"18 derniers chiffres": _add_large(huge, 999999999999999998 - int(summary.low)),
+	}
+	for label: String in cases:
+		var start: String = cases[label]
+		hud.set_address(start, deep)
+		var worst := 0
+		var current := start
+		for _i in 4:
+			current = BookTextScript.b25_add_small(current, 1)
+			var t := Time.get_ticks_usec()
+			hud.set_address(current, deep, Vector2i(1, 0))
+			worst = maxi(worst, Time.get_ticks_usec() - t)
+		var t0 := Time.get_ticks_msec()
+		while hud.address_pending() and Time.get_ticks_msec() - t0 < 20000:
+			await process_frame
+		var expected := "Hexagone %s · niveau %s" % [BookTextScript.summary_text(BookTextScript.coordinate_summary(current)),
+			BookTextScript.summary_text(BookTextScript.coordinate_summary(deep))]
+		_check(worst < 8000 and hud._address.text == expected,
+			"917 000 chiffres, débordement des %s : pas de l'adresse en %.2f ms au pire (budget 8 ms), puis %s" % [label, worst / 1000.0, hud._address.text])
+
+
+## coordonnée + delta pour un delta jusqu'à ~10^18 (par tranches que b25_add_small accepte).
+static func _add_large(coordinate: String, delta: int) -> String:
+	const CHUNK := 50000000000000000
+	var result := coordinate
+	while delta != 0:
+		var part: int = clampi(delta, -CHUNK, CHUNK)
+		result = BookTextScript.b25_add_small(result, part)
+		delta -= part
+	return result
 
 
 # --- Flèche de direction -----------------------------------------------------------------------

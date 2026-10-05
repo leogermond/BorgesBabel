@@ -168,10 +168,16 @@ func _test_same_gallery(main: Node3D) -> void:
 		var label: String = route[0]
 		var moves: Vector2i = route[3]
 		main.place_origin(route[1], route[2])
+		var worst := 0
 		for _i in absi(moves.x):
+			var t := Time.get_ticks_usec()
 			main._shift(signi(moves.x))
+			worst = maxi(worst, Time.get_ticks_usec() - t)
 		for _i in absi(moves.y):
+			var t := Time.get_ticks_usec()
 			main._shift_level(signi(moves.y))
+			worst = maxi(worst, Time.get_ticks_usec() - t)
+		_check(worst <= SHIFT_BUDGET_USEC, "%s : chaque pas en moins de %.0f ms (pire : %.2f ms)" % [label, SHIFT_BUDGET_USEC / 1000.0, worst / 1000.0])
 		var walked := _looks(main)
 		var h := BookTextScript.b25_add_small(route[1], moves.x)
 		var l := BookTextScript.b25_add_small(route[2], moves.y)

@@ -126,18 +126,43 @@ func _test_normalize_crosscheck() -> void:
 	for text: String in written:
 		_check(CarnetScript.normalize(text) == written[text], "normalisation du carnet : « %s »" % text.c_escape())
 		cases.append(text)
-	# Chaque caractère de U+0020 à U+00FF et de la ponctuation générale, seul et entre deux lettres.
+	# Chaque caractère de U+0009 à U+250 (Latin-1, Latin étendu A et B), des marques combinantes, du Latin
+	# étendu additionnel, de la ponctuation générale, des blancs typographiques : seul, entre deux lettres.
+	var ranges := [[0x09, 0x0e], [0x1c, 0x250], [0x300, 0x370], [0x37e, 0x37f], [0x1680, 0x1681], [0x1e00, 0x1f00],
+		[0x2000, 0x2070], [0x2126, 0x2127], [0x212a, 0x212c], [0x3000, 0x3001]]
 	var sweep := ""
-	for code in range(0x20, 0x100):
-		sweep += String.chr(code)
-	for code in range(0x2010, 0x2027):
-		sweep += String.chr(code)
-	for code in [0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x1c, 0x1d, 0x1e, 0x1f, 0x1680, 0x2000, 0x2005, 0x200a, 0x2028, 0x2029, 0x205f, 0x3000]:
-		sweep += String.chr(code)
+	for r: Array in ranges:
+		for code in range(r[0], r[1]):
+			sweep += String.chr(code)
 	for c in sweep:
 		cases.append(c)
 		cases.append("a%sb" % c)
 	cases.append(sweep)
+	# Chaînes au hasard (graine fixe) : lettres, lettres accentuées, marques combinantes après chaque signe
+	# et chaque guillemet, blancs (insécables compris), « ; » grec, apostrophes, traits d'union.
+	var specials := ["'", "’", "ʼ", "‘", "-", "‐", "‑", "–", "—", ":", ";", "!", "?", "…", "«", "»", "‹", "›", "\"", "“", "”",
+		",", ".", " ", " ", "\t", "\n", "\u00a0", "\u202f", "\u037e", "\u2003", "\u3000", "\u0085", "1", "%", "œ", "æ", "ß", "k", "q", "w", "y"]
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 7311
+	for _i in 3000:
+		var text := ""
+		for _j in rng.randi_range(1, 24):
+			var pick := rng.randi() % 10
+			if pick < 3:
+				text += specials[rng.randi() % specials.size()]
+			elif pick < 4:
+				text += String.chr(rng.randi_range(0x300, 0x36f))                       # marque combinante
+			elif pick < 5:
+				text += String.chr(0x41 + rng.randi() % 26)                              # capitale
+			elif pick < 7:
+				text += String.chr(0x61 + rng.randi() % 26)
+			elif pick < 8:
+				text += String.chr(rng.randi_range(0xc0, 0x250))                         # Latin-1, A, B
+			elif pick < 9:
+				text += String.chr(rng.randi_range(0x1e00, 0x1eff))                      # Latin additionnel
+			else:
+				text += specials[rng.randi() % specials.size()] + String.chr(rng.randi_range(0x300, 0x36f))
+		cases.append(text)
 	var file := FileAccess.open(NORMALIZE_CASES_PATH, FileAccess.WRITE)
 	for text: String in cases:
 		file.store_line(text.to_utf8_buffer().hex_encode())   # un texte par ligne, en hexadécimal

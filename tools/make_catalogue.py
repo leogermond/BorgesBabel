@@ -95,6 +95,13 @@ FORBIDDEN_LETTERS = "qkwy"
 ## Sources qui ne doivent contenir aucune de ces lettres.
 NO_FORBIDDEN_LETTERS = ("mode_d_emploi",)
 
+## Mots que la composition ne sépare pas : l'élidé d'au plus ELISION_MAX symboles (« l'espace », « qu'il » → « cu »)
+## et la première partie d'au plus HYPHEN_MAX symboles d'un mot à trait d'union (« lui-même »).
+APOSTROPHES = "'’ʼ‘"
+CONNECTORS = APOSTROPHES + "-‐‑–—"
+ELISION_MAX = 2
+HYPHEN_MAX = 3
+
 ## Intertitre : une ligne seule de moins de 40 caractères, sans ponctuation finale.
 HEADING_MAX = 40
 FINAL_PUNCTUATION = ".,;:!?…»)\"”’'"
@@ -234,7 +241,8 @@ def read(paths: dict[str, str], key: str) -> str:
 
 def check_forbidden_letters(key: str, text: str) -> None:
     """Le mode d'emploi s'écrit sans q, k, w, y : la normalisation n'y crée alors aucune faute."""
-    found = sorted({c for c in text.lower() if c in FORBIDDEN_LETTERS})
+    # lettres de base, majuscules ou accentuées comprises (« Ý », « ÿ », « ẃ », « ḱ » : y, y, w, k)
+    found = sorted({c for char in text for c in babel.fold_char(char) if c in FORBIDDEN_LETTERS})
     if found:
         raise SystemExit(f"{key} : les lettres {found} sont interdites dans cette source")
 
@@ -252,6 +260,36 @@ def words_of(text: str) -> list[str]:
     s'efface avec le signe converti, d'où le texte entier et non chaque mot isolé) ; ceux qui ne
     laissent rien (« — », chiffres seuls) disparaissent."""
     return babel.normalize_all(text).split()
+
+
+def units_of(paragraph: str) -> list[str]:
+    """Les mots du paragraphe (words_of), réunis en unités qu'une ligne ne sépare pas : un mot élidé
+    d'au plus ELISION_MAX symboles avec le mot qui suit (« l'espace » → « l espace »), une première
+    partie d'au plus HYPHEN_MAX symboles avec la suivante (« lui-même » → « lui meme »). Chaque unité
+    est ses mots séparés par une espace."""
+    words = words_of(paragraph)
+    # le blanc qu'efface la normalisation devant « : ; ! ? … » ou après « ‹ doit partir avant le découpage en jetons
+    merged = re.sub(r"\s+(?=[:;!?…»›])", "", paragraph)
+    merged = re.sub(r"(?<=[«‹])\s+", "", merged)
+    units: list[str] = []
+    flat: list[str] = []
+    for token in merged.split():
+        pieces = re.split("([" + re.escape(CONNECTORS) + "])", token)     # pièce, lien, pièce, lien…
+        previous = ""
+        for index in range(0, len(pieces), 2):
+            connector = pieces[index - 1] if index else ""
+            piece = words_of(pieces[index])
+            for number, word in enumerate(piece):
+                limit = ELISION_MAX if connector in APOSTROPHES else HYPHEN_MAX
+                if number == 0 and connector and previous and len(previous) <= limit and units:
+                    units[-1] += " " + word
+                else:
+                    units.append(word)
+                flat.append(word)
+            previous = piece[-1] if piece else ""
+    if flat != words:
+        raise SystemExit("unités : les jetons normalisés un à un ne redonnent pas les mots du paragraphe")
+    return units
 
 
 def wrap(words: list[str], width: int = babel.CHARS) -> list[str]:
@@ -290,7 +328,7 @@ def blocks_of(text: str) -> list[dict]:
     def flush() -> None:
         nonlocal group
         if group:
-            words = words_of(" ".join(group))
+            words = units_of(" ".join(group))
             if words:
                 plain = group[0].strip()
                 kind = "paragraph"

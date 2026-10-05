@@ -93,15 +93,16 @@ Image cherchée (image_grid, fit_samples, quantize_samples)
     puis tramée aux 25 encres par Floyd–Steinberg.
 
 Normalisation d'un texte cherché (normalize)
-    minuscules ; accents retirés (décomposition Unicode NFD, marques combinantes ôtées) ;
+    minuscules ; accents retirés (décomposition Unicode NFD, marques combinantes ôtées : fold_char,
+    caractère par caractère, étape 1, dont le carnet du jeu lit la table) ;
     œ → oe, æ → ae, ß → ss ; k → c, q → c, w → v, y → i ; tout blanc (espace, tabulation,
     retour à la ligne) → espace ; ponctuation : apostrophes (' ’ ʼ ‘) et traits d'union ou
     tirets (- ‐ ‑ – —) → espace, « : » et « ; » → « , », « ! » « ? » « … » → « . » (« … » donne
     un seul « . »), guillemets et apostrophes doubles (« » " “ ” ‹ ›) retirés ; les autres
     caractères (chiffres, symboles…) sont retirés. Quand « : ; ! ? … » devient « , » ou « . »,
     les blancs qui le précèdent immédiatement (espaces, insécables U+00A0 et U+202F compris, comme
-    en typographie française) sont retirés : « galerie : son » → « galerie, son ». Les espaces
-    répétées ne sont pas fondues : la
+    en typographie française) sont retirés : « galerie : son » → « galerie, son ». Hors de ces
+    cas, les blancs ne sont jamais fondus (deux espaces de la source restent deux symboles) : la
     recherche reste exacte. Les guillemets français portent leurs espaces intérieures : en retirant
     « ou ‹, les blancs qui le suivent sont retirés ; en retirant » ou ›, ceux qui le précèdent :
     « dit « mot », puis » → « dit mot, puis ». Au-delà de M = 1 312 000 symboles, la suite est ignorée.
@@ -156,6 +157,7 @@ from __future__ import annotations
 import argparse
 import base64
 import decimal
+import functools
 import hashlib
 import json
 import math
@@ -1041,6 +1043,14 @@ _PUNCTUATION = {
 }
 
 
+@functools.lru_cache(maxsize=None)
+def fold_char(char: str) -> str:
+    """Un caractère passé en minuscules, décomposé (NFD), marques combinantes ôtées : « É » → « e »,
+    « ǽ » → « æ ». C'est la première étape de la normalisation ; le carnet du jeu (GDScript) en lit
+    la table, générée de cette fonction par tools/make_fold_table.py (scripts/fold_table.gd)."""
+    return "".join(c for c in unicodedata.normalize("NFD", char.lower()) if not unicodedata.combining(c))
+
+
 def normalize(text: str) -> str:
     """Ramène un texte à l'alphabet de 25 symboles, M au plus (règles dans l'en-tête du module)."""
     return normalize_all(text)[:BOOK_SYMBOLS]
@@ -1051,24 +1061,21 @@ def normalize_all(text: str) -> str:
     out: list[str] = []
     blanks = 0          # blancs de la source qui terminent `out` (ceux qu'un « : ; ! ? … » efface)
     after_opening = False   # le caractère précédent est un « ou un ‹ : les blancs qui suivent s'effacent
-    for raw in unicodedata.normalize("NFD", text.lower()):
-        if unicodedata.combining(raw):
-            continue
-        char = _LIGATURES.get(raw) or _PUNCTUATION.get(raw, raw)
-        if after_opening and raw.isspace():
-            continue
-        after_opening = raw in _OPENING
-        if raw in _SPACE_BEFORE:
-            del out[len(out) - blanks:]
-            blanks = 0
-        if char.isspace():
-            out.append(" ")
-            blanks = blanks + 1 if raw.isspace() else 0
-        elif all(c in ALPHABET for c in char):
-            out.append(char)
-            blanks = 0
-        else:
-            continue
+    for source in text:
+        for raw in fold_char(source):      # étape 1 : minuscule, décomposition, marques combinantes ôtées
+            char = _LIGATURES.get(raw) or _PUNCTUATION.get(raw, raw)
+            if after_opening and raw.isspace():
+                continue
+            after_opening = raw in _OPENING
+            if raw in _SPACE_BEFORE:
+                del out[len(out) - blanks:]
+                blanks = 0
+            if char.isspace():
+                out.append(" ")
+                blanks = blanks + 1 if raw.isspace() else 0
+            elif all(c in ALPHABET for c in char):
+                out.append(char)
+                blanks = 0
     return "".join(out)
 
 

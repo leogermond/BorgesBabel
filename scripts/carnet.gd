@@ -28,15 +28,9 @@ const PAPER_BORDER := Color(0.45, 0.32, 0.2)
 const INK := Color(0.16, 0.11, 0.07)
 const CARET_PERIOD := 0.53
 const FADE_SECONDS := 0.45
-## Lettres accentuées (après passage en minuscules) → leur lettre de base, comme la décomposition
-## NFD de la recherche ; les ligatures et les lettres absentes de l'alphabet suivent.
-const ACCENTS := {
-	"a": "àáâãäåāăąǎǟǡǻȁȃȧạảấầẩẫậắằẳẵặ", "c": "çćĉċč", "d": "ďḍḏ",
-	"e": "èéêëēĕėęěȅȇȩẹẻẽếềểễệ", "g": "ĝğġģǧǵ", "h": "ĥȟḥ", "i": "ìíîïĩīĭįǐȉȋỉị",
-	"j": "ĵǰ", "k": "ķǩ", "l": "ĺļľḷ", "n": "ñńņňǹṇ", "o": "òóôõöōŏőơǒȍȏȫȭȯȱọỏốồổỗộớờởỡợ",
-	"r": "ŕŗřȑȓ", "s": "śŝşšșṣ", "t": "ţťțṭ", "u": "ùúûüũūŭůűųưǔǖǘǚǜȕȗụủứừửữự",
-	"w": "ŵẁẃẅ", "y": "ýÿŷỳỹỷ", "z": "źżžẓ",
-}
+## Étape 1 de la normalisation : minuscule, décomposition NFD, marques combinantes ôtées. Table
+## générée de babel.fold_char (python/babel.py) par tools/make_fold_table.py.
+const FoldTable := preload("res://scripts/fold_table.gd")
 const LIGATURES := {"œ": "oe", "æ": "ae", "ß": "ss", "k": "c", "q": "c", "w": "v", "y": "i"}
 ## Les blancs de Python (str.isspace) : tous deviennent une espace.
 const WHITESPACE := ["\t", "\n", "\u000b", "\u000c", "\r", "\u001c", "\u001d", "\u001e", "\u001f", "\u0085", "\u00a0",
@@ -67,7 +61,6 @@ var _blink := 0.0
 var _mouse_before := Input.MOUSE_MODE_VISIBLE
 ## Dernier mode de souris demandé par le carnet (le mode effectif reste VISIBLE sans fenêtre).
 var mouse_mode_requested := -1
-static var _base: Dictionary = {}
 
 
 func _ready() -> void:
@@ -196,30 +189,31 @@ func submit() -> void:
 	_render()
 
 
-## Le texte ramené à l'alphabet de 25 symboles, comme la normalisation de la recherche.
+## Le texte ramené à l'alphabet de 25 symboles, étape pour étape comme babel.normalize_all : chaque
+## caractère est d'abord plié (table FOLD, sinon minuscule), puis ses caractères suivent les règles
+## de ligatures, de ponctuation et de blancs.
 static func normalize(text: String) -> String:
-	if _base.is_empty():
-		for letter: String in ACCENTS:
-			for accented in ACCENTS[letter]:
-				_base[accented] = letter
 	var out := ""
 	var blanks := 0   # blancs de la source qui terminent `out` (ceux qu'un « : ; ! ? … » efface)
 	var after_opening := false   # le caractère précédent est un « ou un ‹ : les blancs qui suivent s'effacent
-	for c in text.to_lower():
-		var base: String = _base.get(c, c)
-		var mapped: String = LIGATURES.get(base, PUNCTUATION.get(base, base))
-		var blank: bool = base == " " or base in WHITESPACE
-		if blank and after_opening:
-			continue
-		after_opening = OPENING.contains(base)
-		if blank:
-			mapped = " "
-		elif SPACE_BEFORE.contains(base):
-			out = out.left(out.length() - blanks)
-			blanks = 0
-		for s in mapped:
-			if ALPHABET.contains(s):
-				out += s
+	for source in text:
+		var folded: String = FoldTable.FOLD.get(source, source.to_lower())
+		for base in folded:
+			var mapped: String = LIGATURES.get(base, PUNCTUATION.get(base, base))
+			var blank: bool = base == " " or base in WHITESPACE
+			if blank and after_opening:
+				continue
+			after_opening = OPENING.contains(base)
+			if blank:
+				mapped = " "
+			elif SPACE_BEFORE.contains(base):
+				out = out.left(out.length() - blanks)
+				blanks = 0
+			var inside := true
+			for symbol in mapped:
+				inside = inside and ALPHABET.contains(symbol)
+			if inside:
+				out += mapped
 				blanks = blanks + 1 if blank else 0
 	return out
 

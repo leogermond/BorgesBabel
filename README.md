@@ -135,10 +135,17 @@ vides. Une adresse prise au hasard, ou trouvée par une recherche, a un hexagone
 d'environ 917 000 chiffres décimaux chacun. Le détail (rang, région, mélange) est dans l'en-tête
 de `python/babel.py`.
 
-- **Texte.** Le texte cherché est normalisé : minuscules, accents retirés, œ → oe, æ → ae,
-  ß → ss, k et q → c, w → v, y → i, blancs → espace ; apostrophes et traits d'union ou tirets →
-  espace, « : » et « ; » → « , », « ! » « ? » « … » → « . », guillemets retirés (les espaces
-  répétées ne sont pas fondues), autres caractères retirés ; puis complété par
+- **Texte.** Le texte cherché est normalisé, caractère par caractère : minuscules, décomposition
+  Unicode (NFD) puis marques combinantes retirées (« é » → « e », « ǽ » → « æ »), œ → oe, æ → ae,
+  ß → ss, k et q → c, w → v, y → i, blancs (espace, tabulation, retour, insécables) → espace ;
+  apostrophes et traits d'union ou tirets → espace ; « : » et « ; » → « , » ; « ! » « ? » « … » →
+  « . » ; autres caractères (chiffres, symboles) retirés. Les blancs qui précèdent immédiatement
+  un « : ; ! ? … » converti sont retirés avec lui (« galerie : son » → « galerie, son »). Les
+  guillemets (« » ‹ › " “ ”) sont retirés, et les guillemets français emportent leurs espaces
+  intérieures : les blancs qui suivent un « ou un ‹, ceux qui précèdent un » ou un ›
+  (« dit « mot », puis » → « dit mot, puis »). Hors de ces cas, les blancs ne sont jamais fondus :
+  deux espaces de la source restent deux symboles, de sorte que la recherche reste exacte et
+  prévisible. Le texte est ensuite complété par
   des espaces jusqu'à la fin du livre. La recherche rend l'unique livre qui contient ce texte suivi
   seulement d'espaces ; un texte de plusieurs pages occupe les pages 0, 1, 2 … du même livre. Au-delà
   de 1 312 000 symboles (un livre), la suite est ignorée et la réponse le signale.

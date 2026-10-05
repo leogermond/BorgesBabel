@@ -83,3 +83,32 @@ def test_forbidden_letters_assertion():
     for letter in "qkwyQKWY":
         with pytest.raises(SystemExit):
             m.check_forbidden_letters("mode_d_emploi", "un " + letter + " de trop")
+
+
+def test_forbidden_letters_found_through_accents():
+    for text in ("un ý isole", "UN Ÿ ISOLE", "un ẃ isole", "un ḱ isole", "un Ý isole"):
+        with pytest.raises(SystemExit):
+            m.check_forbidden_letters("mode_d_emploi", text)
+    m.check_forbidden_letters("mode_d_emploi", "un été à l'île")
+
+
+def test_elisions_and_short_hyphen_parts_are_unbreakable_units():
+    assert m.units_of("l'espace d'or, lui-même, peut-être, qu'il vis-à-vis") == [
+        "l espace", "d or,", "lui meme,", "peut", "etre,", "cu il", "vis a vis"]
+    assert m.units_of("a : b « mot » ;") == ["a,", "b", "mot,"]
+
+
+def test_no_dangling_elision_at_a_line_end():
+    for shift in range(0, 12):
+        text = "Titre\n\n" + "x" * shift + " " + " ".join(["mot l'autre lui-même d'or"] * 30)
+        lines = lines_of(text)
+        for line, following in zip(lines, lines[1:]):
+            last = line.split()[-1] if line.strip() else ""
+            if last in ("l", "d", "lui") and following.strip():
+                assert False, (last, shift)
+        m.check_layout(text, m.typeset(text))
+
+
+def test_fold_table_is_up_to_date():
+    import make_fold_table
+    make_fold_table.main(["--check"])

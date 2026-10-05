@@ -521,8 +521,11 @@ static var _title_jobs: Array = []       # travaux en cours {key, place, ticket}
 static var _title_waiting: Array = []    # galeries LIT ou FULL qui attendent leurs titres
 static var _flag_retry: Dictionary = {}  # clé → {place, at, ticket, delay} : genres à redemander
 static var _shown: Array = []            # galeries dont la texture porte des titres (pour les compléter)
-## Temps passé par le dernier pump_titles sur le fil principal, en µs (mesures des tests).
+## Temps passé par le dernier pump_titles sur le fil principal, en µs (mesures des tests), et son
+## détail : [flush (verrou de la file), take (relevés), textures posées, genres redemandés,
+## lancements] en µs, puis le nombre de relevés, de textures posées et de lancements.
 static var last_pump_usec := 0
+static var last_pump_parts := PackedInt32Array([0, 0, 0, 0, 0, 0, 0, 0])
 ## Attente avant de redemander des genres de livres qui ne sont pas arrivés (doublée ensuite).
 static var flag_retry_ms := 5000
 ## Livres absents de leur étagère (volés : ceux du catalogue, celui que porte le bibliothécaire),
@@ -713,9 +716,17 @@ static func prefetch_titles(place_at: Callable, cells: Array) -> void:
 static func pump_titles() -> void:
 	var started := Time.get_ticks_usec()
 	var now := Time.get_ticks_msec()
+	var parts := PackedInt32Array([0, 0, 0, 0, 0, 0, 0, 0])
+	BookTextScript.flush()   # requêtes et oublis en attente du verrou (Hud, redemandes)
+	var mark := Time.get_ticks_usec()
+	parts[0] = mark - started
 	for i in range(_title_jobs.size() - 1, -1, -1):
 		var job: Dictionary = _title_jobs[i]
 		var response: Variant = BookTextScript.take(job.ticket)
+		var taken := Time.get_ticks_usec()
+		parts[1] += taken - mark
+		parts[5] += 1
+		mark = taken
 		if response == null:
 			continue
 		_title_jobs.remove_at(i)
@@ -726,7 +737,13 @@ static func pump_titles() -> void:
 		if response.get("flags_ok") != true:
 			_flag_retry[job.key] = {"place": job.place, "at": now + flag_retry_ms, "ticket": -1, "delay": flag_retry_ms}
 		_store_titles(job.key, bytes)
+		var stored := Time.get_ticks_usec()
+		parts[2] += stored - mark
+		parts[6] += 1
+		mark = stored
 	_pump_retries(now)
+	var retried := Time.get_ticks_usec()
+	parts[3] = retried - mark
 	while not _title_queue.is_empty() and _title_jobs.size() < TITLE_JOBS:
 		var entry: Dictionary = _title_queue.pop_front()
 		if _title_cache.has(entry.key) or _title_running(entry.key):
@@ -734,12 +751,13 @@ static func pump_titles() -> void:
 		var key: String = entry.key
 		# Titres (SHA-256 des 640 adresses) et genres, tout sur le fil d'arrière-plan.
 		var ticket := BookTextScript.submit_gallery_flags(entry.hexagon, entry.dh, entry.level, entry.dl,
-			GalleryScript._titles_of.bind(key), false)
-		if ticket < 0:   # file tenue par le fil d'arrière-plan : à l'image suivante
-			_title_queue.push_front(entry)
-			break
+			GalleryScript._titles_of.bind(key))
 		_title_jobs.append({"key": key, "place": entry, "ticket": ticket})
-	last_pump_usec = Time.get_ticks_usec() - started
+		parts[7] += 1
+	var ended := Time.get_ticks_usec()
+	parts[4] = ended - retried
+	last_pump_parts = parts
+	last_pump_usec = ended - started
 
 
 ## Sur le fil d'arrière-plan : les titres de la galerie `key`, avec les genres de la réponse du

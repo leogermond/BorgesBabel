@@ -37,6 +37,8 @@ const CARRIED_VERSION := 1
 ## La quête du premier lancement (aucune quête enregistrée) : une entrée du catalogue.
 const FIRST_QUEST := "borges-biblioteca-de-babel"
 const KIND_BOOK := "livre"
+## Suffixe de l'écriture en cours d'un fichier du joueur, renommée à la fin (_write_document).
+const PARTIAL_SUFFIX := ".partiel"
 ## L'argument (après « -- ») qui choisit un autre dossier pour les fichiers du joueur (tests).
 const USER_DIR_ARG := "--dossier-joueur="
 ## Version 2 : adresses de livres en base 25 (les épingles de la version 1, adresses de pages en
@@ -267,6 +269,7 @@ static func save_active(quest: QuestScript, path: String) -> bool:
 ## La quête en cours enregistrée : {stored : vrai si le fichier en garde une (ou l'absence d'une),
 ## quest : la quête ou null}. Fichier absent, illisible ou abîmé : stored faux (premier lancement).
 static func load_active(entries: Array, path: String) -> Dictionary:
+	drop_partial(path)
 	var parsed: Variant = _read_document(path)
 	if not parsed is Dictionary or parsed.get("version") != ACTIVE_VERSION or not parsed.has("quest"):
 		return {"stored": false, "quest": null}
@@ -293,6 +296,13 @@ static func load_active(entries: Array, path: String) -> Dictionary:
 	return {"stored": true, "quest": quest}
 
 
+## Retire l'écriture abandonnée d'un fichier du joueur (`<chemin>.partiel`, jeu arrêté pendant
+## l'écriture) : au lancement, avant toute écriture ; le fichier lui-même est intact (renommage).
+static func drop_partial(path: String) -> void:
+	if FileAccess.file_exists(path + PARTIAL_SUFFIX):
+		DirAccess.remove_absolute(path + PARTIAL_SUFFIX)
+
+
 ## Écrit le livre emporté ({} : aucun) ; faux si le fichier ne s'écrit pas.
 static func save_carried(book: Dictionary, path: String) -> bool:
 	return _write_document(path, {"version": CARRIED_VERSION, "book": BookTextScript.book_of(book) if not book.is_empty() else null})
@@ -301,6 +311,7 @@ static func save_carried(book: Dictionary, path: String) -> bool:
 ## Le livre emporté enregistré, {hexagon, level, wall, shelf, book} ; {} sans livre, fichier absent
 ## ou abîmé.
 static func load_carried(path: String) -> Dictionary:
+	drop_partial(path)
 	var parsed: Variant = _read_document(path)
 	if not parsed is Dictionary or parsed.get("version") != CARRIED_VERSION:
 		return {}
@@ -505,6 +516,7 @@ static func restore_catalogue(pins: Array, entries: Array) -> Array:
 ## Lit les épingles. Fichier absent, illisible ou d'un autre format → les épingles d'office ;
 ## épingles abîmées ou entrées disparues du catalogue écartées une à une.
 static func load_pins(entries: Array, path := PINS_PATH) -> Array:
+	drop_partial(path)
 	var parsed: Variant = _read_document(path)
 	if not parsed is Dictionary or parsed.get("version") != PINS_VERSION or not parsed.get("pins") is Array:
 		return default_pins(entries)
@@ -647,7 +659,7 @@ static func _write_document(path: String, document: Variant) -> bool:
 	var payload := JSON.stringify({"compact": 1, "strings": table.strings, "data": data}).to_utf8_buffer()
 	if not DirAccess.dir_exists_absolute(path.get_base_dir()):
 		DirAccess.make_dir_recursive_absolute(path.get_base_dir())
-	var partial := path + ".partiel"
+	var partial := path + PARTIAL_SUFFIX
 	var file := FileAccess.open(partial, FileAccess.WRITE)
 	if file == null:
 		return false

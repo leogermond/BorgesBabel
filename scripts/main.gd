@@ -326,7 +326,14 @@ func travel(hexagon: Variant, level: Variant, book := {}) -> void:
 	player.hold("saut", false)
 	_traveling = false
 	travel_finished.emit()
-	if not _queued.is_empty():
+	_drain_queue()
+
+
+## Les sauts invoqués pendant un saut, dans l'ordre : une invocation qui ne vaut plus (quête
+## effacée entre-temps, destination vide) est oubliée et la suivante part aussitôt ; chacune
+## sort de la file avant de partir (un mot tapé, un atterrissage au plus).
+func _drain_queue() -> void:
+	while not _queued.is_empty() and not _traveling:
 		_on_invocation(_queued.pop_front())
 
 

@@ -520,14 +520,44 @@ func _test_overlays_during_travel(main: Node3D) -> void:
 	_check(player.frozen and main.reader.visible, "carnet refermé : le lecteur retient encore")
 	_key(KEY_ESCAPE, true)
 	_check(not player.frozen and player.holds().is_empty() and not main.reader.visible, "lecteur refermé : le bibliothécaire repart")
+
+	# « aleph », « zahir », « sator » tapés pendant un fondu, puis Suppr (quête effacée) : « zahir »
+	# ne vaut plus et s'oublie, « sator » part aussitôt ; un « sator » tapé ensuite atterrit une fois.
+	var landings := [0]
+	var count := func() -> void: landings[0] += 1
+	main.travel_finished.connect(count)
+	main.place_origin(12, -5)
+	for word: String in ["aleph ", "zahir ", "sator "]:
+		_key(CarnetScript.CARNET_KEY, true)
+		_type(word)
+	_check(main.traveling() and main._queued == ["puits", "sator"], "pendant le fondu : « zahir » et « sator » en file (%s)" % [main._queued])
+	_key(HudScript.CLEAR_KEY, true)
+	_check(hud.quest == null, "Suppr pendant le fondu efface la quête")
+	await _until_landed(main)
+	var sator := QuestScript.destination("sator")
+	_check(landings[0] == 2 and main.origin_hexagon_b25 == sator.address.hexagon and main.reader.visible,
+		"« zahir » sans quête s'oublie, « sator » part ensuite : deux atterrissages (lu : %d)" % landings[0])
+	_key(KEY_ESCAPE, true)
+	landings[0] = 0
+	_key(CarnetScript.CARNET_KEY, true)
+	_type("sator ")
+	await _until_landed(main)
+	await _steps(30)   # le temps d'un second saut, s'il y en avait un
+	_check(landings[0] == 1 and not main.traveling() and main._queued.is_empty(), "un « sator » tapé : un seul atterrissage (lu : %d)" % landings[0])
+	main.travel_finished.disconnect(count)
+	main._close_book()
+	hud.start_quest(QuestScript.from_entry(QuestScript.catalogue_entry(hud.catalogue, QuestScript.FIRST_QUEST)))
 	main.place_origin(0, 0)
 
 
 ## Attend la fin des sauts en cours et en attente.
+## Sans saut en cours, la file doit être vide : sinon elle est bloquée (échec aussitôt, sans attente).
 func _until_landed(main: Node3D) -> void:
 	var t0 := Time.get_ticks_msec()
-	while (main.traveling() or not main._queued.is_empty()) and Time.get_ticks_msec() - t0 < 20000:
+	while main.traveling() and Time.get_ticks_msec() - t0 < 5000:
 		await process_frame
+	_check(not main.traveling() and main._queued.is_empty(),
+		"les sauts finissent, la file des invocations est vide (en cours : %s, en file : %s)" % [main.traveling(), main._queued])
 
 
 ## Les livres volés du catalogue : un vide sur leur étagère (texture des galeries LIT et FULL,
@@ -564,11 +594,18 @@ func _test_missing_books(main: Node3D) -> void:
 ## la quête effacée (Suppr) le reste à la relance suivante, et « aleph » s'efface sans quête.
 func _test_restart(main: Node3D) -> Node3D:
 	var carried: Dictionary = main.carried_book
+	var path: String = main.carried_path
 	main.queue_free()
 	await process_frame
+	# Une écriture abandonnée (jeu tué pendant l'écriture du livre emporté) : ignorée et retirée.
+	var partial := FileAccess.open(path + QuestScript.PARTIAL_SUFFIX, FileAccess.WRITE)
+	partial.store_string("BCAT tronqué")
+	partial.close()
 	main = load("res://main.tscn").instantiate()
 	root.add_child(main)
 	await _steps(5)
+	_check(not FileAccess.file_exists(path + QuestScript.PARTIAL_SUFFIX) and main.carried_book == carried,
+		"relance : l'écriture abandonnée (.partiel) est retirée, le livre emporté relu intact")
 	_check(main.carried_book == carried and main.hud.quest != null and main.hud.quest.entry_id == QuestScript.FIRST_QUEST,
 		"relance : le livre emporté et la quête en cours sont gardés")
 	main.place_origin(carried.hexagon, carried.level)

@@ -144,7 +144,10 @@ static var _bg_cancelled: Dictionary = {}
 static var _bg_quit := false
 static var _bg_pid := -1
 static var _bg_busy := 0
-static var _bg_next := 0
+static var _bg_next := 0                # dernier ticket (fil principal seul)
+## Fil principal seul : requêtes et oublis qui attendent le verrou de la file (voir flush).
+static var _staged: Array = []
+static var _staged_cancels: Array = []   # [ticket, retirer de la file : bool]
 static var _bg_commands: Array = []      # relevés sur le fil principal à la création du fil
 static var _bg_script := ""
 static var _bg_start_timeout := 20000
@@ -1598,10 +1601,10 @@ static func _split_command(command: String) -> Array:
 ## d'arrière-plan ; rend son ticket.
 ## `after(réponse) -> Dictionary`, facultatif, s'appelle sur le fil avec la réponse (erreurs comprises)
 ## et rend ce que take() rendra : un calcul qui ne doit pas non plus coûter au fil principal.
-## `wait` faux : si le fil d'arrière-plan tient la file à cet instant, rien n'est mis en file et
-## l'appel rend −1 (à refaire à l'image suivante) : le fil principal n'attend jamais un fil de
-## priorité basse qu'un autre processus a pu interrompre verrou tenu.
-static func submit(request: Variant, timeout := -1, after := Callable(), wait := true) -> int:
+## Le fil principal n'attend jamais le verrou de la file (un fil de priorité basse qu'un autre
+## processus a pu interrompre verrou tenu) : la requête attend dans _staged et passe dans la file
+## dès que le verrou est libre (flush, ici ou à l'image suivante : Gallery.pump_titles, take).
+static func submit(request: Variant, timeout := -1, after := Callable()) -> int:
 	b25_valid("0")   # expressions régulières créées ici, sur le fil principal
 	if _bg_thread == null:
 		_bg_commands = _background_commands(_launch_commands())
@@ -1611,16 +1614,39 @@ static func submit(request: Variant, timeout := -1, after := Callable(), wait :=
 		_bg_quit = false
 		_bg_thread = Thread.new()
 		_bg_thread.start(_bg_loop, Thread.PRIORITY_LOW)
-	if wait:
-		_bg_mutex.lock()
-	elif not _bg_mutex.try_lock():
-		return -1
 	_bg_next += 1
 	var ticket := _bg_next
-	_bg_jobs.append([ticket, request, timeout, after])
-	_bg_mutex.unlock()
-	_bg_semaphore.post()
+	_staged.append([ticket, request, timeout, after])
+	flush()
 	return ticket
+
+
+## Passe dans la file du fil d'arrière-plan les requêtes et les oublis en attente, si le verrou est
+## libre ; sinon rien (à refaire à l'image suivante). Fil principal seulement, sans attente.
+static func flush() -> void:
+	if (_staged.is_empty() and _staged_cancels.is_empty()) or not _bg_mutex.try_lock():
+		return
+	var posted := _flush_locked()
+	_bg_mutex.unlock()
+	for _i in posted:
+		_bg_semaphore.post()
+
+
+## (verrou tenu) Les requêtes en attente rejoignent la file, les oublis s'appliquent ; rend le
+## nombre de requêtes ajoutées.
+static func _flush_locked() -> int:
+	var posted := _staged.size()
+	_bg_jobs.append_array(_staged)
+	_staged.clear()
+	for entry: Array in _staged_cancels:
+		if entry[1]:
+			for i in range(_bg_jobs.size() - 1, -1, -1):
+				if _bg_jobs[i][0] == entry[0]:
+					_bg_jobs.remove_at(i)
+		if not _bg_results.erase(entry[0]):
+			_bg_cancelled[entry[0]] = true
+	_staged_cancels.clear()
+	return posted
 
 
 ## Lance le service d'arrière-plan s'il ne tourne pas encore (une requête « ping » dont la réponse
@@ -1628,9 +1654,8 @@ static func submit(request: Variant, timeout := -1, after := Callable(), wait :=
 static func warm_up() -> void:
 	if _bg_thread == null:
 		var ticket := submit({"op": "ping"})
-		_bg_mutex.lock()
-		_bg_cancelled[ticket] = true   # la requête part, sa réponse est jetée
-		_bg_mutex.unlock()
+		_staged_cancels.append([ticket, false])   # la requête part, sa réponse est jetée
+		flush()
 
 
 ## La réponse d'un ticket (retirée de la mémoire), ou null tant qu'elle n'est pas arrivée — ou
@@ -1639,27 +1664,32 @@ static func warm_up() -> void:
 static func take(ticket: int) -> Variant:
 	if not _bg_mutex.try_lock():
 		return null
+	var posted := _flush_locked()
 	var response: Variant = _bg_results.get(ticket)
 	_bg_results.erase(ticket)
 	_bg_mutex.unlock()
+	for _i in posted:
+		_bg_semaphore.post()
 	return response
 
 
-## Oublie un ticket : retiré de la file s'il y attend, sa réponse jetée si elle arrive.
+## Oublie un ticket : retiré de la file s'il y attend, sa réponse jetée si elle arrive. Sans
+## attente : une requête encore en attente du verrou est simplement retirée ; sinon l'oubli
+## s'applique au prochain verrou libre (flush).
 static func cancel(ticket: int) -> void:
-	_bg_mutex.lock()
-	for i in range(_bg_jobs.size() - 1, -1, -1):
-		if _bg_jobs[i][0] == ticket:
-			_bg_jobs.remove_at(i)
-	if not _bg_results.erase(ticket):
-		_bg_cancelled[ticket] = true
-	_bg_mutex.unlock()
+	for i in range(_staged.size() - 1, -1, -1):
+		if _staged[i][0] == ticket:
+			_staged.remove_at(i)
+			return
+	_staged_cancels.append([ticket, true])
+	flush()
 
 
-## Requêtes en file ou en cours sur le fil d'arrière-plan.
+## Requêtes en attente, en file ou en cours sur le fil d'arrière-plan (diagnostic, tests : attend
+## le verrou).
 static func pending() -> int:
 	_bg_mutex.lock()
-	var count := _bg_jobs.size() + _bg_busy
+	var count := _bg_jobs.size() + _bg_busy + _staged.size()
 	_bg_mutex.unlock()
 	return count
 
@@ -1668,8 +1698,8 @@ static func pending() -> int:
 ## dl), demandés au service d'arrière-plan (forme « gallery » de is_image_book) : rend un ticket ;
 ## la réponse porte « is_image » (640 valeurs) ou « error ». Les coordonnées (base 25, toute
 ## taille) se calculent sur le fil.
-static func submit_gallery_flags(hexagon_base: String, dh: int, level_base: String, dl: int, after := Callable(), wait := true) -> int:
-	return submit(BookTextScript._gallery_flags_line.bind(hexagon_base, dh, level_base, dl), -1, after, wait)
+static func submit_gallery_flags(hexagon_base: String, dh: int, level_base: String, dl: int, after := Callable()) -> int:
+	return submit(BookTextScript._gallery_flags_line.bind(hexagon_base, dh, level_base, dl), -1, after)
 
 
 ## La ligne de la requête des genres d'une galerie (sur le fil d'arrière-plan) : écrite telle
@@ -1695,6 +1725,7 @@ static func _bg_stop() -> void:
 	if _bg_thread == null:
 		return
 	_bg_mutex.lock()
+	_flush_locked()
 	_bg_quit = true
 	var pid := _bg_pid
 	for job: Array in _bg_jobs:

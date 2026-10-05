@@ -362,6 +362,10 @@ func _check_pump(main: Node) -> void:
 			for _f in PUMP_FRAMES:
 				await process_frame
 				samples.append(Gallery.last_pump_usec)
+				if Gallery.last_pump_usec > 500:
+					var parts: PackedInt32Array = Gallery.last_pump_parts
+					print("    image lente : pump_titles %d µs = flush %d + relevés %d (%d) + textures %d (%d) + redemandes %d + lancements %d (%d) µs"
+						% [Gallery.last_pump_usec, parts[0], parts[1], parts[5], parts[2], parts[6], parts[3], parts[4], parts[7]])
 	await _titles_settled(main)
 	samples.sort()
 	var p99: int = samples[int(samples.size() * 0.99)]

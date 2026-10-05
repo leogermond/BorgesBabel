@@ -16,7 +16,7 @@ for f in project.godot main.tscn scripts shaders fonts audio data; do
 	[ -e "$SRC/$f" ] && cp -R "$SRC/$f" "$TMP/"
 done
 
-"$GODOT" --headless --path "$TMP" --import >/dev/null 2>&1 || true
+"$GODOT" --headless --path "$TMP" --log-file "$TMP/import.log" --import >/dev/null 2>&1 || true
 
 entry() { # classe base fichier
 	printf '{\n"base": &"%s",\n"class": &"%s",\n"icon": "",\n"is_abstract": false,\n"is_tool": false,\n"language": &"GDScript",\n"path": "res://scripts/%s.gd"\n}' "$2" "$1" "$3"
@@ -37,7 +37,8 @@ for variant in stale empty; do
 	LOG="$TMP/run-$variant.log"
 	# Fichiers du joueur (quête en cours écrite au premier lancement) dans le dossier temporaire :
 	# rien n'est écrit dans le user:// du jeu.
-	"$GODOT" --headless --path "$TMP" --quit-after 120 -- "--dossier-joueur=$TMP/joueur" >"$LOG" 2>&1 || true
+	# Journal du moteur aussi dans le dossier temporaire (--log-file) : rien dans le user:// du jeu.
+	"$GODOT" --headless --path "$TMP" --log-file "$TMP/godot-$variant.log" --quit-after 120 -- "--dossier-joueur=$TMP/joueur" >"$LOG" 2>&1 || true
 	if grep -E "SCRIPT ERROR|Parse Error|Could not find type" "$LOG"; then
 		echo "ECHEC ($variant) : erreurs de script avec un cache de classes incomplet" >&2
 		status=1

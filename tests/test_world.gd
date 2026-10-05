@@ -173,9 +173,10 @@ func _test_same_gallery(main: Node3D) -> void:
 	for route: Array in routes:
 		var label: String = route[0]
 		var moves: Vector2i = route[3]
+		main.player.position = Vector3(0.0, 0.05, 3.2)   # au milieu de la galerie : aucun pas pendant l'attente
+		main.player.velocity = Vector3.ZERO
 		main.place_origin(route[1], route[2])
 		await _steps(5)   # comme après un saut en jeu : quelques images avant le premier pas
-		main.player.position = Vector3(0.0, 0.05, 3.2)
 		var worst := 0
 		for _i in absi(moves.x):
 			var t := Time.get_ticks_usec()

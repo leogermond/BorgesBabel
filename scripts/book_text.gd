@@ -92,6 +92,9 @@ const START_RETRY_MAX_MS := 60000
 const RESOLVE_TIMEOUT_MS := 5000
 ## Descendants d'un processus relevés au plus (_kill_tree).
 const KILL_TREE_LIMIT := 64
+## Service d'arrière-plan : priorité basse (nice) et période de son chien de garde.
+const BACKGROUND_NICENESS := 10
+const BACKGROUND_POLL_USEC := 2000
 
 ## Délais de réponse du service, en millisecondes.
 static var timeout_ms := 3000
@@ -1115,8 +1118,9 @@ static func _stop_and_read_stderr() -> String:
 	return " | ".join(lines.slice(-STDERR_TAIL_LINES))
 
 
-static func _exchange_on(stdio: FileAccess, request: Dictionary) -> Dictionary:
-	stdio.store_line(JSON.stringify(request))
+## Une requête (Dictionary, ou ligne JSON déjà écrite) et sa réponse, sur le tube `stdio`.
+static func _exchange_on(stdio: FileAccess, request: Variant) -> Dictionary:
+	stdio.store_line(request if request is String else JSON.stringify(request))
 	stdio.flush()
 	var line := stdio.get_line()
 	if line.is_empty():
@@ -1354,12 +1358,12 @@ static func _split_command(command: String) -> Array:
 # (la lecture en cours finit aussitôt) et attend le fil ; les requêtes encore en file reçoivent
 # une erreur de code « stopped ».
 
-## Met une requête (Dictionary, ou Callable sans argument qui la rend) en file pour le service
+## Met une requête (Dictionary, ou Callable sans argument qui la rend, ou rend sa ligne JSON) en file pour le service
 ## d'arrière-plan ; rend son ticket.
 static func submit(request: Variant, timeout := -1) -> int:
 	b25_valid("0")   # expressions régulières créées ici, sur le fil principal
 	if _bg_thread == null:
-		_bg_commands = _launch_commands()
+		_bg_commands = _background_commands(_launch_commands())
 		_bg_script = ProjectSettings.globalize_path(SCRIPT_PATH)
 		_bg_start_timeout = start_timeout_ms
 		_bg_timeout = timeout_ms
@@ -1418,9 +1422,21 @@ static func pending() -> int:
 ## la réponse porte « is_image » (640 valeurs) ou « error ». Les coordonnées (base 25, toute
 ## taille) se calculent sur le fil.
 static func submit_gallery_flags(hexagon_base: String, dh: int, level_base: String, dl: int) -> int:
-	return submit(func() -> Dictionary:
-		return {"op": "is_image_book", "gallery": {
-			"hexagon": BookTextScript.b25_add_small(hexagon_base, dh), "level": BookTextScript.b25_add_small(level_base, dl)}})
+	return submit(func() -> String:   # ligne écrite telle quelle : chiffres 0-9, a-o et « - », rien à échapper
+		return '{"op":"is_image_book","gallery":{"hexagon":"' + BookTextScript.b25_add_small(hexagon_base, dh) \
+			+ '","level":"' + BookTextScript.b25_add_small(level_base, dl) + '"}}')
+
+
+## Les commandes du service d'arrière-plan : hors de Windows, chacune d'abord précédée de `nice`
+## (priorité basse : son calcul ne prend pas le pas sur le jeu ; `nice` remplace son processus
+## par l'interpréteur, même PID), puis telle quelle si `nice` manque.
+static func _background_commands(commands: Array) -> Array:
+	if OS.get_name() == "Windows":
+		return commands
+	var result := []
+	for command: Array in commands:
+		result.append(["nice", "-n", str(BACKGROUND_NICENESS)] + command)
+	return result + commands
 
 
 static func _bg_stop() -> void:
@@ -1498,7 +1514,7 @@ static func _bg_loop() -> void:
 		if response.is_empty():
 			var request: Variant = job[1].call() if job[1] is Callable else job[1]
 			var limit: int = job[2] if job[2] > 0 else _bg_timeout
-			var watchdog := Watchdog.new()
+			var watchdog := Watchdog.new(BACKGROUND_POLL_USEC)
 			watchdog.start(pid, limit)
 			response = _exchange_on(stdio, request)
 			var fired := watchdog.finish()
@@ -1563,6 +1579,12 @@ class Watchdog:
 	var _fired := false
 	var _pid := -1
 	var _deadline := 0
+	var _poll_usec := POLL_USEC
+
+	## `poll_usec` : période de surveillance (plus longue pour le service d'arrière-plan, que rien
+	## n'attend : moins de réveils).
+	func _init(poll_usec := POLL_USEC) -> void:
+		_poll_usec = poll_usec
 
 	func start(pid: int, timeout_ms: int) -> void:
 		_pid = pid
@@ -1591,4 +1613,4 @@ class Watchdog:
 				return
 			if done:
 				return
-			OS.delay_usec(POLL_USEC)
+			OS.delay_usec(_poll_usec)

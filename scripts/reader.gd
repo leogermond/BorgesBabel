@@ -68,13 +68,18 @@ func _ready() -> void:
 	footer.add_child(hint)
 
 
-## Ouvre le livre désigné par {hexagon, level, wall, shelf, book} à sa première page.
+## Ouvre le livre désigné par {hexagon, level, wall, shelf, book} (hexagone et niveau en base 25,
+## ou int) à sa première page.
 func open(target: Dictionary) -> void:
-	book = target
+	book = BookTextScript.book_of(target)
 	page = 0
-	_heading.text = "« %s »   —   hexagone %d, niveau %d · mur %d · étagère %d · livre %d" % [
-		BookTextScript.title(book.hexagon, book.level, book.wall, book.shelf, book.book),
-		book.hexagon, book.level, book.wall + 1, book.shelf + 1, book.book + 1]
+	var where := ""
+	if BookTextScript.b25_fits_int(book.hexagon) and BookTextScript.b25_fits_int(book.level):
+		where = "hexagone %d, niveau %d · mur %d · étagère %d · livre %d" % [
+			BookTextScript.b25_to_int(book.hexagon), BookTextScript.b25_to_int(book.level), book.wall + 1, book.shelf + 1, book.book + 1]
+	else:
+		where = BookTextScript.display(book)   # grands nombres abrégés par le service
+	_heading.text = "« %s »   —   %s" % [BookTextScript.title_at(book), where]
 	_render()
 	visible = true
 
@@ -93,7 +98,7 @@ func turn(step: int) -> void:
 
 
 func _render() -> void:
-	var lines := BookTextScript.page_lines(book.hexagon, book.level, book.wall, book.shelf, book.book, page)
+	var lines := BookTextScript.page_lines_at(book, page)
 	_text.text = "\n".join(lines)
 	_folio.text = "page %d / %d" % [page + 1, BookTextScript.PAGES]
 

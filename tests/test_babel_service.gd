@@ -4,7 +4,10 @@ extends SceneTree
 ## La dernière vérification provoque volontairement des erreurs « Python introuvable » dans le journal.
 
 const BookTextScript := preload("res://scripts/book_text.gd")
+const QuestScript := preload("res://scripts/quest.gd")
 const PAGE_LATENCY_TARGET_MS := 50.0
+## Délai réduit pendant l'essai du service muet.
+const SHORT_TIMEOUT_MS := 800
 
 var _failures := 0
 
@@ -16,21 +19,50 @@ func _init() -> void:
 
 	start = Time.get_ticks_usec()
 	for p in 50:
-		BookTextScript.page_lines(123456, -42, p % 4, p % 5, p % 32, p)
+		BookTextScript.page_lines(123456, -42 - p, p % 4, p % 5, p % 32, 0)
 	var page_ms := _ms(start) / 50.0
-	_check(page_ms < PAGE_LATENCY_TARGET_MS, "page à travers le service : %.2f ms (cible < %.0f ms)" % [page_ms, PAGE_LATENCY_TARGET_MS])
+	_check(page_ms < PAGE_LATENCY_TARGET_MS, "page 1 de 50 livres jamais ouverts : %.2f ms la page (cible < %.0f ms)" % [page_ms, PAGE_LATENCY_TARGET_MS])
+	start = Time.get_ticks_usec()
+	for p in 50:
+		BookTextScript.page_lines(123456, -42, 1, 2, 3, p)
+	var turn_ms := _ms(start) / 50.0
+	_check(turn_ms < PAGE_LATENCY_TARGET_MS, "pages 1 à 50 d'un même livre, tournées une à une : %.2f ms la page (cible < %.0f ms)" % [turn_ms, PAGE_LATENCY_TARGET_MS])
+	start = Time.get_ticks_usec()
+	var deep := BookTextScript.page_lines(123456, -41, 0, 0, 0, 409)
+	var deep_ms := _ms(start)
+	_check(deep.size() == 40 and BookTextScript.last_error.is_empty() and deep_ms < BookTextScript.timeout_ms,
+		"page 410 d'un livre jamais ouvert (chaîne des 410 pages) : %.0f ms, sous le délai de %d ms" % [deep_ms, BookTextScript.timeout_ms])
 
+	start = Time.get_ticks_usec()
 	var far := BookTextScript.search_text("loin")
+	print("  search_text d'un mot : %.1f ms (adresse de %d + %d chiffres base 25)" % [_ms(start), far.hexagon.length(), far.level.length()])
 	start = Time.get_ticks_usec()
 	for p in 20:
-		far.page = p
-		BookTextScript.page_lines_at(far)
-	print("  page d'une adresse trouvée (hexagone de %d chiffres) : %.2f ms" % [far.hexagon.length(), _ms(start) / 20.0])
+		BookTextScript.page_lines_at(far, p)
+	var far_ms := _ms(start) / 20.0
+	_check(far_ms < PAGE_LATENCY_TARGET_MS, "pages 0 à 19 d'un livre trouvé, par sa clé : %.2f ms la page (cible < %.0f ms)" % [far_ms, PAGE_LATENCY_TARGET_MS])
+
+	# Un livre du catalogue jamais ouvert (service relancé : rien en cache) : page 1, puis page 3.
+	var entry: Dictionary = QuestScript.load_catalogue()[0]
+	BookTextScript.restart()
+	BookTextScript.page_lines(0, 0, 0, 0, 0, 0)
+	start = Time.get_ticks_usec()
+	var first := BookTextScript.page_lines_at(entry.address, 0)
+	var first_ms := _ms(start)
+	start = Time.get_ticks_usec()
+	var third := BookTextScript.page_lines_at(entry.address, 2)
+	var third_ms := _ms(start)
+	print("  %s, jamais ouvert : page 1 en %.1f ms (adresse envoyée), page 3 en %.1f ms (par la clé)" % [entry.title, first_ms, third_ms])
+	_check(first.size() == 40 and third.size() == 40 and first_ms < 1000.0 and third_ms < 1000.0, "livre du catalogue : pages 1 et 3 en moins d'une seconde")
 
 	start = Time.get_ticks_usec()
 	var flags := BookTextScript.gallery_image_books(17, -3)
-	print("  640 genres de livres en une requête : %.1f ms" % _ms(start))
+	print("  640 genres de livres en une requête (galerie proche) : %.1f ms" % _ms(start))
 	_check(flags.size() == 640, "640 genres rendus")
+	start = Time.get_ticks_usec()
+	var far_flags := BookTextScript.gallery_image_books(far.hexagon, far.level)
+	print("  640 genres de livres en une requête (galerie à 917 000 chiffres) : %.1f ms" % _ms(start))
+	_check(far_flags.size() == 640, "640 genres rendus pour une galerie lointaine")
 
 	var text := ""
 	for i in 3200:
@@ -79,6 +111,35 @@ func _init() -> void:
 	_check(dead_lines[0].begins_with("Bibliothèque indisponible"), "service mort : la page dit l'erreur")
 	_check(BookTextScript.last_error.contains("RuntimeError: panne volontaire"), "service mort : la trace Python rejoint last_error : « %s »" % BookTextScript.last_error)
 
+	# Service muet : il répond au ping, puis dort ; le délai l'arrête, l'appel rend une erreur
+	# claire au lieu de figer le jeu, et le service est relancé à la requête suivante.
+	print("  (erreurs attendues ci-dessous : service volontairement muet)")
+	var asleep := "import sys,json,time;sys.stdin.readline();print(json.dumps(dict(protocol=%d)),flush=True);sys.stdin.readline();time.sleep(60)" % BookTextScript.PROTOCOL
+	ProjectSettings.set_setting(BookTextScript.PYTHON_SETTING, "python3 -c \"%s\"" % asleep)
+	BookTextScript.restart()
+	var saved_timeouts := [BookTextScript.timeout_ms, BookTextScript.search_timeout_ms]
+	BookTextScript.timeout_ms = SHORT_TIMEOUT_MS
+	BookTextScript.search_timeout_ms = SHORT_TIMEOUT_MS * 2
+	start = Time.get_ticks_usec()
+	var mute_lines := BookTextScript.page_lines(0, 0, 0, 0, 0, 0)
+	var mute_ms := _ms(start)
+	print("  service muet : page rendue en %.0f ms (délai %d ms)" % [mute_ms, SHORT_TIMEOUT_MS])
+	_check(mute_ms >= SHORT_TIMEOUT_MS and mute_ms < SHORT_TIMEOUT_MS + 1500, "service muet : la lecture rend la main après le délai (%.0f ms)" % mute_ms)
+	_check(mute_lines.size() == 40 and mute_lines[0].begins_with("Bibliothèque indisponible"), "service muet : la page dit l'erreur")
+	_check(BookTextScript.last_error.contains("n'a pas répondu") and BookTextScript.last_error.contains("page"),
+		"service muet : last_error le dit : « %s »" % BookTextScript.last_error)
+	_check(BookTextScript._pid == -1 and BookTextScript._stdio == null, "service muet : arrêté")
+	start = Time.get_ticks_usec()
+	var mute_search := BookTextScript.search_text("x")
+	var mute_search_ms := _ms(start)
+	_check(mute_search.is_empty() and mute_search_ms >= SHORT_TIMEOUT_MS * 2 and mute_search_ms < SHORT_TIMEOUT_MS * 2 + 1500,
+		"service muet relancé : la recherche s'arrête au délai des recherches (%.0f ms)" % mute_search_ms)
+	BookTextScript.timeout_ms = saved_timeouts[0]
+	BookTextScript.search_timeout_ms = saved_timeouts[1]
+	ProjectSettings.set_setting(BookTextScript.PYTHON_SETTING, "")
+	BookTextScript.restart()
+	_check(BookTextScript.page_lines(0, 0, 0, 0, 0, 0)[0].length() == 80 and BookTextScript.last_error.is_empty(), "après le service muet, le vrai service revient")
+
 	# Sans Python : la page affiche l'erreur, le jeu continue.
 	print("  (erreurs attendues ci-dessous : interpréteur volontairement introuvable)")
 	ProjectSettings.set_setting(BookTextScript.PYTHON_SETTING, "/chemin/introuvable/python3")
@@ -109,7 +170,7 @@ func _check_image_parity() -> void:
 		var game := BookTextScript.search_image(img)
 		var full: Dictionary = BookTextScript._request({"op": "search_image", "width": size.x, "height": size.y,
 			"rgba": Marshalls.raw_to_base64(bytes)}).get("address", {})
-		_check(not game.is_empty() and game == full, "%d × %d : points de grille du jeu → même adresse que l'image complète" % [size.x, size.y])
+		_check(not game.is_empty() and game == BookTextScript.book_of(full), "%d × %d : points de grille du jeu → même adresse que l'image complète" % [size.x, size.y])
 
 	var script := ProjectSettings.globalize_path(BookTextScript.SCRIPT_PATH)
 	for case in [[Vector2i(1024, 1024), Image.FORMAT_RGBA8], [Vector2i(3000, 200), Image.FORMAT_RGB8]]:
@@ -127,7 +188,7 @@ func _check_image_parity() -> void:
 		var parsed: Variant = JSON.parse_string(output[0] if code == 0 and not output.is_empty() else "")
 		var cli: Dictionary = parsed.get("address", {}) if parsed is Dictionary else {}
 		print("  %d × %d PNG : search_image_file %.1f ms dans le jeu, %.1f ms en ligne de commande" % [size.x, size.y, game_ms, cli_ms])
-		_check(code == 0 and not in_game.is_empty() and in_game == cli,
+		_check(code == 0 and not in_game.is_empty() and not cli.is_empty() and in_game == BookTextScript.book_of(cli),
 			"%d × %d PNG : même adresse dans le jeu et par `babel.py search-image` (code %d)" % [size.x, size.y, code])
 		DirAccess.remove_absolute(path)
 

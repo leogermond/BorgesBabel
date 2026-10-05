@@ -1,14 +1,19 @@
 class_name Quest
 extends RefCounted
-## Quête : un livre à retrouver, ses pages, et le guidage depuis la galerie d'origine du monde.
+## Quête : un livre à retrouver, la page à y lire, et le guidage depuis la galerie d'origine du monde.
 ##
-## Une adresse trouvée par la recherche inverse compte quelque 2234 chiffres : l'hexagone et le
-## niveau sont des entiers relatifs décimaux en chaînes. La différence avec l'origine (deux int)
-## se calcule donc en arithmétique décimale pure GDScript (dec_*), sans appel au service Python.
+## Représentation : hexagone et niveau sont, de bout en bout, des chaînes base 25 signées (voir
+## BookText) : celles du fil (protocole 3), du catalogue et de main.gd. Une adresse trouvée par la
+## recherche inverse en compte ~656 000 par coordonnée (~917 000 chiffres décimaux) : elle se lit,
+## se compare et se recopie en temps linéaire par les fonctions natives des chaînes, alors qu'un
+## passage au décimal coûterait une conversion quadratique (plusieurs secondes). La différence avec
+## l'origine se résume (BookText.b25_difference) : exacte quand elle est petite, sinon en ordre de
+## grandeur décimal (« ≈ 10^N »). Un pas d'une galerie ou d'un niveau (paramètre `moved` de
+## guidance) la met à jour sans relire les coordonnées.
 ##
-## Ce script lit aussi le catalogue data/quetes/catalogue.json (métadonnées, et pour chaque page
-## son adresse et le SHA-256 de ses 3200 symboles : aucun texte) et tient les épingles du panneau
-## de quête, enregistrées dans user://quetes_epinglees.json.
+## Ce script lit aussi le catalogue data/quetes/catalogue.json (métadonnées, et pour chaque entrée
+## l'adresse de son livre et le SHA-256 de chacune de ses pages : aucun texte) et tient les
+## épingles du panneau de quête, enregistrées dans user://quetes_epinglees.json.
 ##
 ## Repères du monde : l'hexagone h + 1 est à 12 m vers +Z, le niveau l + 1 à 3,4 m au-dessus.
 
@@ -16,8 +21,11 @@ const QuestScript := preload("res://scripts/quest.gd")
 const BookTextScript := preload("res://scripts/book_text.gd")
 
 const CATALOGUE_PATH := "res://data/quetes/catalogue.json"
+const CATALOGUE_VERSION := 2
 const PINS_PATH := "user://quetes_epinglees.json"
-const PINS_VERSION := 1
+## Version 2 : adresses de livres en base 25 (les épingles de la version 1, adresses de pages en
+## décimal, sont abandonnées : le fichier revient aux épingles d'office).
+const PINS_VERSION := 2
 ## Jusqu'à 15 chiffres, une distance s'écrit exactement ; au-delà, en ordre de grandeur.
 const EXACT_DIGITS := 15
 const KIND_CATALOGUE := "catalogue"
@@ -27,69 +35,90 @@ const REGISTER_TITLE := "Registre des livres manquants"
 const REGISTER_AUTHOR := "anonyme"
 const REGISTER_CONTEXT := "Registre des ouvrages manquants aux étagères."
 
-static var _stolen: Dictionary = {}   # cache de is_stolen_book
+static var _stolen: Dictionary = {}       # chemin du catalogue → {livre volé: true}
+static var _catalogues: Dictionary = {}   # chemin → catalogue lu (JSON), lu une fois
 
 var title := ""
 var author := ""
 ## Identifiant de l'entrée du catalogue, vide pour une recherche du joueur.
 var entry_id := ""
-## Les adresses des pages de la quête, {hexagon: String, level: String, wall, shelf, book, page: int}.
+## Le livre de la quête, {hexagon, level: String (base 25), wall, shelf, book: int}.
+var book: Dictionary = {}
+## Les pages proposées, numéros 0 à 409 dans le livre (les pages du texte d'une entrée).
 var pages: Array = []
 var page_index := 0
+var _guide_origin: Array = []      # [hexagone, niveau] du dernier guidage
+var _guide_dz: Dictionary = {}
+var _guide_dy: Dictionary = {}
 
 
-## Une quête sur une seule adresse ; null si l'adresse est mal formée.
+## Une quête sur une adresse de livre (page facultative, 0 par défaut) ; null si elle est mal formée.
 static func from_address(target: Dictionary, quest_title := "", quest_author := "") -> QuestScript:
-	return from_pages([target], quest_title, quest_author)
+	if not is_valid_address(target):
+		return null
+	return from_book(target, [int(target.get("page", 0))], quest_title, quest_author)
 
 
-static func from_pages(targets: Array, quest_title := "", quest_author := "", id := "") -> QuestScript:
-	if targets.is_empty():
+## Une quête sur un livre et quelques-unes de ses pages ; null si l'adresse ou une page est mal formée.
+static func from_book(target: Dictionary, page_numbers: Array, quest_title := "", quest_author := "", id := "") -> QuestScript:
+	if page_numbers.is_empty() or not is_valid_address(target):
 		return null
 	var quest := QuestScript.new()
-	for target: Variant in targets:
-		if not target is Dictionary or not is_valid_address(target):
+	quest.book = BookTextScript.book_of(target)
+	for page: Variant in page_numbers:
+		if not _is_page(page):
 			return null
-		quest.pages.append(normalized_address(target))
+		quest.pages.append(int(page))
 	quest.title = quest_title
 	quest.author = quest_author
 	quest.entry_id = id
 	return quest
 
 
-## La quête d'une entrée du catalogue : ses pages dans l'ordre.
+## La quête d'une entrée du catalogue : son livre, ses pages dans l'ordre.
 static func from_entry(entry: Dictionary) -> QuestScript:
-	var targets := []
-	for page: Dictionary in entry.pages:
-		targets.append(page.address)
-	return from_pages(targets, entry.title, entry.author, entry.id)
+	return from_book(entry.address, range(entry.page_count), entry.title, entry.author, entry.id)
 
 
+## Vrai pour une adresse de livre bien formée : coordonnées base 25, mur, étagère et livre dans la
+## galerie, et page (facultative) dans le livre.
 static func is_valid_address(target: Dictionary) -> bool:
 	if not (target.get("hexagon") is String and target.get("level") is String):
 		return false
-	if not (dec_valid(target.hexagon) and dec_valid(target.level)):
+	if not (BookTextScript.b25_valid(target.hexagon) and BookTextScript.b25_valid(target.level)):
 		return false
-	var bounds := {"wall": 4, "shelf": 5, "book": 32, "page": 410}
+	var bounds := {"wall": 4, "shelf": 5, "book": 32}
 	for key: String in bounds:
-		var value: Variant = target.get(key)
-		if value is float and is_equal_approx(value, roundf(value)):
-			value = int(value)   # JSON lit les nombres en float
-		if not value is int or value < 0 or value >= bounds[key]:
+		if not _is_index(target.get(key), bounds[key]):
 			return false
-	return true
+	return not target.has("page") or _is_page(target.page)
 
 
-## Copie de l'adresse sous forme canonique : décimaux normalisés, entiers int.
+static func _is_page(value: Variant) -> bool:
+	return _is_index(value, BookTextScript.PAGES)
+
+
+static func _is_index(value: Variant, bound: int) -> bool:
+	if value is float and is_equal_approx(value, roundf(value)):
+		value = int(value)   # JSON lit les nombres en float
+	return value is int and value >= 0 and value < bound
+
+
+## Copie de l'adresse sous forme canonique (base 25 canonique, entiers int ; la page si elle y est).
 static func normalized_address(target: Dictionary) -> Dictionary:
-	return {
-		"hexagon": dec_normalize(target.hexagon), "level": dec_normalize(target.level),
-		"wall": int(target.wall), "shelf": int(target.shelf), "book": int(target.book), "page": int(target.page),
-	}
+	var a := BookTextScript.book_of(target)
+	if target.has("page"):
+		a.page = int(target.page)
+	return a
 
 
-## L'adresse de la page choisie.
+## L'adresse de la page choisie : le livre et « page ».
 func address() -> Dictionary:
+	return book.merged({"page": page()})
+
+
+## Le numéro (0 à 409) de la page choisie.
+func page() -> int:
 	return pages[page_index]
 
 
@@ -106,33 +135,45 @@ func label() -> String:
 
 ## La cote de la page visée, comptée depuis 1 : « mur 2 · étagère 3 · livre 17 · page 205 ».
 func book_line() -> String:
-	var a := address()
-	return "mur %d · étagère %d · livre %d · page %d" % [a.wall + 1, a.shelf + 1, a.book + 1, a.page + 1]
+	return "mur %d · étagère %d · livre %d · page %d" % [book.wall + 1, book.shelf + 1, book.book + 1, page() + 1]
 
 
-## Le livre visé quand (hexagone, niveau) est sa galerie : {wall, shelf, book, page} ; sinon {}.
-func target_in_gallery(hexagon: int, level: int) -> Dictionary:
-	var a := address()
-	if a.hexagon != str(hexagon) or a.level != str(level):
+## Le livre visé quand (hexagone, niveau) — int ou chaînes base 25 — est sa galerie :
+## {wall, shelf, book, page} ; sinon {}.
+func target_in_gallery(hexagon: Variant, level: Variant) -> Dictionary:
+	if BookTextScript.b25(hexagon) != book.hexagon or BookTextScript.b25(level) != book.level:
 		return {}
-	return {"wall": a.wall, "shelf": a.shelf, "book": a.book, "page": a.page}
+	return {"wall": book.wall, "shelf": book.shelf, "book": book.book, "page": page()}
 
 
-## Le guidage depuis la galerie (hexagone, niveau) :
-## {dz, dy : différences signées cible − origine (chaînes décimales), hall, vert : −1, 0 ou +1,
-##  here : vrai dans la galerie visée, hall_text, level_text, book_text, summary}.
-func guidance(hexagon: int, level: int) -> Dictionary:
-	var a := address()
-	var dz := dec_sub(a.hexagon, str(hexagon))
-	var dy := dec_sub(a.level, str(level))
-	var hall := dec_sign(dz)
-	var vert := dec_sign(dy)
+## Le guidage depuis la galerie (hexagone, niveau) — int ou chaînes base 25 :
+## {dz, dy : différences cible − origine résumées (BookText.b25_difference : sign, exact, value,
+##  digits), hall, vert : −1, 0 ou +1, here : vrai dans la galerie visée, hall_text, level_text,
+##  book_text, summary}. `moved` : le pas (galeries, niveaux) qui mène de la galerie du guidage
+## précédent à celle-ci ; la différence suit alors le pas sans relire les coordonnées.
+func guidance(hexagon: Variant, level: Variant, moved := Vector2i.ZERO) -> Dictionary:
+	if moved != Vector2i.ZERO and not _guide_origin.is_empty() and hexagon is String and level is String:
+		# Un pas annoncé : chaînes canoniques de l'appelant, ni relues ni comparées.
+		_guide_dz = _step(_guide_dz, -moved.x)
+		_guide_dy = _step(_guide_dy, -moved.y)
+		_guide_origin = [hexagon, level]
+	else:
+		var h := BookTextScript.b25(hexagon)
+		var l := BookTextScript.b25(level)
+		if _guide_origin.is_empty() or _guide_origin[0] != h or _guide_origin[1] != l:
+			_guide_dz = BookTextScript.b25_difference(book.hexagon, h)
+			_guide_dy = BookTextScript.b25_difference(book.level, l)
+		_guide_origin = [h, l]
+	var dz := _guide_dz
+	var dy := _guide_dy
+	var hall: int = dz.sign
+	var vert: int = dy.sign
 	var hall_text := "couloir : ici"
 	if hall != 0:
-		hall_text = "couloir : %s %s vers %s" % [magnitude_text(dz), "galerie" if dec_abs(dz) == "1" else "galeries", "+Z" if hall > 0 else "−Z"]
+		hall_text = "couloir : %s %s vers %s" % [magnitude_text(dz), "galerie" if _is_one(dz) else "galeries", "+Z" if hall > 0 else "−Z"]
 	var level_text := "étages : ici"
 	if vert != 0:
-		level_text = "étages : %s %s vers le %s" % [magnitude_text(dy), "niveau" if dec_abs(dy) == "1" else "niveaux", "haut" if vert > 0 else "bas"]
+		level_text = "étages : %s %s vers le %s" % [magnitude_text(dy), "niveau" if _is_one(dy) else "niveaux", "haut" if vert > 0 else "bas"]
 	var book_text := "dans la galerie : " + book_line()
 	return {
 		"dz": dz, "dy": dy, "hall": hall, "vert": vert, "here": hall == 0 and vert == 0,
@@ -141,196 +182,90 @@ func guidance(hexagon: int, level: int) -> Dictionary:
 	}
 
 
-# --- Arithmétique décimale sur chaînes ---------------------------------------------------------
-# Un entier relatif s'écrit « [+-]chiffres » ; dec_normalize rend la forme canonique : sans « + »,
-# sans zéros de tête, « 0 » pour zéro (jamais « -0 »). Les opérations parcourent les chiffres un à
-# un : quelques millisecondes pour 2234 chiffres, à chaque changement d'origine.
-
-static func dec_valid(text: String) -> bool:
-	# Les caractères se lisent un à un (unicode_at) : aucune conversion par le moteur, donc aucune
-	# erreur de décodage pour un texte non ASCII.
-	var start := 1 if text.begins_with("+") or text.begins_with("-") else 0
-	if text.length() <= start:
-		return false
-	for i in range(start, text.length()):
-		var c := text.unicode_at(i)
-		if c < 48 or c > 57:
-			return false
-	return true
+## La distance d'une différence résumée : exacte jusqu'à 15 chiffres, sinon « ≈ 10^N »,
+## N = chiffres décimaux − 1.
+static func magnitude_text(difference: Dictionary) -> String:
+	if difference.exact and int(difference.digits) <= EXACT_DIGITS:
+		return str(absi(difference.value))
+	return "≈ 10^%d" % (int(difference.digits) - 1)
 
 
-static func dec_normalize(text: String) -> String:
-	assert(dec_valid(text), "entier décimal invalide : %s" % text.left(40))
-	var negative := text.begins_with("-")
-	var digits := text.trim_prefix("+").trim_prefix("-").lstrip("0")
-	if digits.is_empty():
-		return "0"
-	return "-" + digits if negative else digits
+static func _is_one(difference: Dictionary) -> bool:
+	return difference.exact and absi(difference.value) == 1
 
 
-## −1, 0 ou +1.
-static func dec_sign(text: String) -> int:
-	var value := dec_normalize(text)
-	if value == "0":
-		return 0
-	return -1 if value.begins_with("-") else 1
-
-
-static func dec_abs(text: String) -> String:
-	return dec_normalize(text).trim_prefix("-")
-
-
-static func dec_neg(text: String) -> String:
-	var value := dec_normalize(text)
-	if value == "0":
-		return value
-	return value.substr(1) if value.begins_with("-") else "-" + value
-
-
-## Nombre de chiffres de la valeur absolue (1 pour zéro).
-static func dec_digits(text: String) -> int:
-	return dec_abs(text).length()
-
-
-## −1, 0 ou +1 selon que a < b, a = b ou a > b.
-static func dec_compare(a: String, b: String) -> int:
-	var x := dec_normalize(a)
-	var y := dec_normalize(b)
-	var sx := dec_sign(x)
-	var sy := dec_sign(y)
-	if sx != sy:
-		return -1 if sx < sy else 1
-	if sx == 0:
-		return 0
-	return _cmp_abs(x.trim_prefix("-"), y.trim_prefix("-")) * sx
-
-
-static func dec_add(a: String, b: String) -> String:
-	var x := dec_normalize(a)
-	var y := dec_normalize(b)
-	var nx := x.begins_with("-")
-	var ny := y.begins_with("-")
-	var ax := x.trim_prefix("-")
-	var ay := y.trim_prefix("-")
-	if nx == ny:
-		return _signed(_add_abs(ax, ay), nx)
-	var order := _cmp_abs(ax, ay)
-	if order == 0:
-		return "0"
-	if order > 0:
-		return _signed(_sub_abs(ax, ay), nx)
-	return _signed(_sub_abs(ay, ax), ny)
-
-
-static func dec_sub(a: String, b: String) -> String:
-	return dec_add(a, dec_neg(b))
-
-
-## La valeur absolue exacte jusqu'à 15 chiffres, sinon « ≈ 10^N » avec N = chiffres − 1.
-static func magnitude_text(text: String) -> String:
-	var digits := dec_abs(text)
-	if digits.length() <= EXACT_DIGITS:
-		return digits
-	return "≈ 10^%d" % (digits.length() - 1)
-
-
-static func _signed(digits: String, negative: bool) -> String:
-	return "-" + digits if negative and digits != "0" else digits
-
-
-## Comparaison de deux entiers naturels canoniques.
-static func _cmp_abs(a: String, b: String) -> int:
-	if a.length() != b.length():
-		return -1 if a.length() < b.length() else 1
-	if a == b:
-		return 0
-	return -1 if a < b else 1   # même longueur : l'ordre des chaînes est l'ordre des nombres
-
-
-static func _add_abs(a: String, b: String) -> String:
-	var x := a.to_ascii_buffer()
-	var y := b.to_ascii_buffer()
-	var count := maxi(x.size(), y.size())
-	var out := PackedByteArray()
-	out.resize(count + 1)
-	var carry := 0
-	for i in count:
-		var s := carry
-		if i < x.size():
-			s += x[x.size() - 1 - i] - 48
-		if i < y.size():
-			s += y[y.size() - 1 - i] - 48
-		carry = 1 if s >= 10 else 0
-		out[count - i] = 48 + s - 10 * carry
-	out[0] = 48 + carry
-	var text := out.get_string_from_ascii().lstrip("0")
-	return "0" if text.is_empty() else text
-
-
-## a − b pour deux entiers naturels canoniques, a ≥ b.
-static func _sub_abs(a: String, b: String) -> String:
-	var x := a.to_ascii_buffer()
-	var y := b.to_ascii_buffer()
-	var out := PackedByteArray()
-	out.resize(x.size())
-	var borrow := 0
-	for i in x.size():
-		var d: int = x[x.size() - 1 - i] - 48 - borrow
-		if i < y.size():
-			d -= y[y.size() - 1 - i] - 48
-		borrow = 1 if d < 0 else 0
-		out[x.size() - 1 - i] = 48 + d + 10 * borrow
-	var text := out.get_string_from_ascii().lstrip("0")
-	return "0" if text.is_empty() else text
+## La différence résumée après un pas de `delta` : exacte, elle suit le pas ; en ordre de
+## grandeur (au moins 25^12 ≈ 6·10^16), un pas ne change ni son signe ni son nombre de chiffres.
+static func _step(difference: Dictionary, delta: int) -> Dictionary:
+	if delta == 0 or not difference.exact:
+		return difference
+	return BookTextScript._exact_difference(int(difference.value) + delta)
 
 
 # --- Catalogue ----------------------------------------------------------------------------------
-# Une entrée : {id, title, author, year, language, context, group, licence, protected, page_count,
-# pages: [{address, sha256}], notice_address, notice_hash}. La notice (titre, auteur et contexte, une
-# ligne chacun) est elle-même une page de la Bibliothèque, à notice_address. Les entrées incomplètes
-# sont écartées ; l'ordre du fichier est gardé.
+# Version 2. Une entrée : {id, title, author, year, language, context, group, licence, protected,
+# address : le livre (base 25), page_count, pages : [{page, sha256}] (les pages du texte, dans
+# l'ordre, chacune avec le SHA-256 de ses 3200 symboles), notice_book : rang dans stolen_books du
+# livre de la notice, notice_hash : SHA-256 de la première page de ce livre}. La notice (titre,
+# auteur et contexte, une ligne chacun) est le contenu d'un livre de la Bibliothèque, suivi
+# d'espaces : un livre volé. stolen_books garde l'adresse de chaque livre volé une seule fois
+# (1,3 Mo par adresse) ; load_catalogue la recopie dans entry.notice_address. destinations :
+# {nom: {address, page, sha256}} ou {} (lieux du monde que les quêtes savent atteindre ; « sator »,
+# « golem » encore vide). Les entrées incomplètes sont écartées ; l'ordre du fichier est gardé.
 
 static func load_catalogue(path := CATALOGUE_PATH) -> Array:
-	var parsed: Variant = _read_json(path)
+	var parsed: Variant = _catalogue(path)
 	if not parsed is Dictionary or not parsed.get("entries") is Array:
 		return []
+	var stolen := stolen_books(path)
 	var entries := []
 	var seen := {}
 	for raw: Variant in parsed.entries:
-		var entry := _valid_entry(raw)
+		var entry := _valid_entry(raw, stolen)
 		if not entry.is_empty() and not seen.has(entry.id):
 			seen[entry.id] = true
 			entries.append(entry)
 	return entries
 
 
-## Vrai pour un livre dont une page est la notice d'une entrée du catalogue (liste stolen_books,
-## lue une fois) : un livre volé à la Bibliothèque. Hexagone et niveau en chaînes décimales.
-static func is_stolen_book(hexagon: String, level: String, wall: int, shelf: int, book: int) -> bool:
-	if _stolen.is_empty():
-		_stolen["chargé"] = true
-		for b: Dictionary in stolen_books():
-			_stolen[_book_key(b.hexagon, b.level, b.wall, b.shelf, b.book)] = true
-	return _stolen.has(_book_key(hexagon, level, wall, shelf, book))
+## Une destination du catalogue : {address (livre et page), sha256} ; {} si elle manque ou est
+## encore vide (« golem »).
+static func destination(name: String, path := CATALOGUE_PATH) -> Dictionary:
+	var parsed: Variant = _catalogue(path)
+	var places: Variant = parsed.get("destinations") if parsed is Dictionary else null
+	var place: Variant = places.get(name) if places is Dictionary else null
+	if not place is Dictionary or not place.get("address") is Dictionary:
+		return {}
+	var target: Dictionary = place.address.merged({"page": place.get("page", 0)})
+	if not is_valid_address(target):
+		return {}
+	return {"address": normalized_address(target), "sha256": str(place.get("sha256", ""))}
+
+
+## Vrai pour un livre volé à la Bibliothèque (liste stolen_books, lue une fois) : ceux dont le
+## contenu est la notice d'une entrée du catalogue. Hexagone et niveau en base 25 (ou int).
+static func is_stolen_book(hexagon: Variant, level: Variant, wall: int, shelf: int, book: int, path := CATALOGUE_PATH) -> bool:
+	if not _stolen.has(path):
+		var known := {}
+		for b: Dictionary in stolen_books(path):
+			known[b] = true
+		_stolen[path] = known
+	return _stolen[path].has(BookTextScript.book_of({"hexagon": hexagon, "level": level, "wall": wall, "shelf": shelf, "book": book}))
 
 
 ## Les livres volés du catalogue, dans son ordre : {hexagon, level, wall, shelf, book}, forme
-## canonique ; les livres mal formés sont écartés.
+## canonique ; un livre mal formé laisse sa place vide ({}), pour garder les rangs de notice_book.
 static func stolen_books(path := CATALOGUE_PATH) -> Array:
-	var parsed: Variant = _read_json(path)
+	var parsed: Variant = _catalogue(path)
 	var books: Variant = parsed.get("stolen_books") if parsed is Dictionary else null
 	var result := []
 	if books is Array:
 		for raw: Variant in books:
-			if raw is Dictionary and is_valid_address(raw.merged({"page": 0})):
-				var a := normalized_address(raw.merged({"page": 0}))
-				a.erase("page")
-				result.append(a)
+			if raw is Dictionary and is_valid_address(raw) and not raw.has("page"):
+				result.append(BookTextScript.book_of(raw))
+			else:
+				result.append({})
 	return result
-
-
-static func _book_key(hexagon: String, level: String, wall: int, shelf: int, book: int) -> String:
-	return "%s:%s:%d:%d:%d" % [hexagon, level, wall, shelf, book]
 
 
 static func catalogue_entry(entries: Array, id: String) -> Dictionary:
@@ -340,26 +275,27 @@ static func catalogue_entry(entries: Array, id: String) -> Dictionary:
 	return {}
 
 
-static func _valid_entry(raw: Variant) -> Dictionary:
+static func _valid_entry(raw: Variant, stolen: Array) -> Dictionary:
 	if not raw is Dictionary:
 		return {}
 	for key in ["id", "title", "author", "context"]:
 		if not raw.get(key) is String or raw[key].is_empty():
 			return {}
+	if not raw.get("address") is Dictionary or raw.address.has("page") or not is_valid_address(raw.address):
+		return {}
 	if not raw.get("pages") is Array or raw.pages.is_empty():
 		return {}
 	var pages := []
 	for page: Variant in raw.pages:
-		if not page is Dictionary or not page.get("address") is Dictionary or not page.get("sha256") is String:
+		if not page is Dictionary or not _is_page(page.get("page")) or not page.get("sha256") is String:
 			return {}
-		if not is_valid_address(page.address):
-			return {}
-		pages.append({"address": normalized_address(page.address), "sha256": page.sha256})
+		pages.append({"page": int(page.page), "sha256": page.sha256})
 	var entry: Dictionary = raw.duplicate()
-	if raw.get("notice_address") is Dictionary and is_valid_address(raw.notice_address):
-		entry.notice_address = normalized_address(raw.notice_address)
-	else:
-		entry.erase("notice_address")
+	entry.address = BookTextScript.book_of(raw.address)
+	entry.erase("notice_address")
+	var notice: Variant = raw.get("notice_book")
+	if _is_index(notice, stolen.size()) and not stolen[int(notice)].is_empty():
+		entry.notice_address = stolen[int(notice)]
 	entry.group = str(raw.get("group", ""))
 	entry.protected = raw.get("protected", false) == true
 	entry.pages = pages
@@ -369,7 +305,7 @@ static func _valid_entry(raw: Variant) -> Dictionary:
 
 # --- Épingles -----------------------------------------------------------------------------------
 # Une épingle : {id, kind, title, author, address}.
-#   catalogue : id « catalogue:<id de l'entrée> », pages lues dans le catalogue ;
+#   catalogue : id « catalogue:<id de l'entrée> », livre et pages lus dans le catalogue ;
 #   recherche : id « recherche:<condensat de l'adresse> », titre et adresse seuls (jamais la source) ;
 #   registre  : id « registre », le registre des livres manquants, tiré de stolen_books.
 # Ordre : les entrées du catalogue dans l'ordre du catalogue, puis les recherches, de la plus ancienne
@@ -382,6 +318,8 @@ static func catalogue_pin(entry: Dictionary) -> Dictionary:
 
 static func search_pin(pin_title: String, target: Dictionary) -> Dictionary:
 	var a := normalized_address(target)
+	if not a.has("page"):
+		a.page = 0
 	var key := BookTextScript.full_form(a).sha256_text().left(16)
 	return {"id": "%s:%s" % [KIND_SEARCH, key], "kind": KIND_SEARCH, "entry": "",
 		"title": pin_title.strip_edges(), "author": "", "address": a}
@@ -393,10 +331,12 @@ static func register_pin() -> Dictionary:
 
 
 ## Les lignes du registre, une par livre de stolen_books dans l'ordre du catalogue :
-## {label : « Ouvrage manquant n — mur · étagère · livre », address : page 1 du livre}.
+## {label : « Ouvrage manquant n — mur · étagère · livre », address : le livre, page 1}.
 static func register_items(path := CATALOGUE_PATH) -> Array:
 	var items := []
 	for book: Dictionary in stolen_books(path):
+		if book.is_empty():
+			continue
 		var a: Dictionary = book.merged({"page": 0})
 		items.append({
 			"label": "Ouvrage manquant %d — mur %d · étagère %d · livre %d" % [items.size() + 1, a.wall + 1, a.shelf + 1, a.book + 1],
@@ -520,6 +460,17 @@ static func _restore_pin(raw: Variant, entries: Array) -> Dictionary:
 		KIND_REGISTER:
 			return register_pin()
 	return {}
+
+
+## Le catalogue lu (une fois par chemin : 22 Mo de JSON, ~0,3 s), ou null s'il manque, est
+## illisible ou n'est pas de la version attendue.
+static func _catalogue(path: String) -> Variant:
+	if not _catalogues.has(path):
+		var parsed: Variant = _read_json(path)
+		if not parsed is Dictionary or parsed.get("version") != CATALOGUE_VERSION:
+			parsed = null
+		_catalogues[path] = parsed
+	return _catalogues[path]
 
 
 static func _read_json(path: String) -> Variant:

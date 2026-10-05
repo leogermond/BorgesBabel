@@ -9,7 +9,36 @@ const CarnetScript := preload("res://scripts/carnet.gd")
 const BookTextScript := preload("res://scripts/book_text.gd")
 const PINS_TEST_PATH := "user://test_quete_epinglees.json"
 const ARITH_CASES_PATH := "user://test_quete_arith.json"
-const ENTRY_KEYS := ["id", "title", "author", "year", "language", "context", "group", "licence", "protected", "page_count", "pages", "notice_address", "notice_hash"]
+const ARITH_SCRIPT_PATH := "user://test_quete_arith.py"
+## Contre-épreuve de l'arithmétique base 25 de BookText par les entiers de Python (conversions
+## sous-quadratiques de babel.py) : lit [[a, b, k], …] et écrit une ligne JSON, pour chaque cas,
+## {add : a + k en base 25, sign_diff, exact, value, digits_diff : différence a − b résumée comme
+## b25_difference, cmp, sign : signe de a, digits : chiffres décimaux de |a|}.
+const ARITH_CHECK := """
+import json, sys
+sys.path.insert(0, sys.argv[2])
+import babel
+def digits10(x):
+    x = abs(x)
+    if x < 10:
+        return 1
+    k = max(1, int((x.bit_length() - 1) * 0.30102999566398114))
+    p = 10 ** k
+    while p <= x:
+        p *= 10
+        k += 1
+    return k
+out = []
+for a, b, k in json.load(open(sys.argv[1], encoding='utf-8')):
+    x, y = babel.b25_to_int(a), babel.b25_to_int(b)
+    d = x - y
+    exact = abs(d) < 25 ** 12
+    out.append({'add': babel.int_to_b25(x + k), 'sign_diff': (d > 0) - (d < 0), 'exact': exact,
+                'value': str(d) if exact else '', 'digits_diff': digits10(d), 'cmp': (x > y) - (x < y),
+                'sign': (x > 0) - (x < 0), 'digits': digits10(x)})
+print(json.dumps(out))
+"""
+const ENTRY_KEYS := ["id", "title", "author", "year", "language", "context", "group", "licence", "protected", "address", "page_count", "pages", "notice_book", "notice_hash"]
 
 var _failures := 0
 ## Événements parvenus au « jeu » (un nœud placé avant le Hud, servi après lui comme main.gd).
@@ -28,6 +57,7 @@ func _initialize() -> void:
 	await _test_main_panel()
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(PINS_TEST_PATH))
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(ARITH_CASES_PATH))
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(ARITH_SCRIPT_PATH))
 	print("test_quest : %s" % ("OK" if _failures == 0 else "%d échec(s)" % _failures))
 	BookTextScript.shutdown()
 	quit(1 if _failures else 0)
@@ -36,85 +66,115 @@ func _initialize() -> void:
 # --- Arithmétique -------------------------------------------------------------------------------
 
 func _test_arithmetic() -> void:
-	_check(QuestScript.dec_normalize("+007") == "7", "normalisation de « +007 »")
-	_check(QuestScript.dec_normalize("-000") == "0", "« -000 » vaut 0, sans signe")
-	_check(QuestScript.dec_add("-5", "3") == "-2", "-5 + 3 = -2")
-	_check(QuestScript.dec_sub("3", "5") == "-2", "3 − 5 = -2")
-	_check(QuestScript.dec_sub("-7", "-7") == "0", "-7 − (-7) = 0")
-	_check(QuestScript.dec_add("999999999999999999999", "1") == "1000000000000000000000", "retenue sur 21 chiffres")
-	_check(not QuestScript.dec_valid("12a") and not QuestScript.dec_valid("-") and not QuestScript.dec_valid(""), "chaînes non décimales refusées")
-	_check(not QuestScript.dec_valid("١٢٣") and not QuestScript.dec_valid("１２") and not QuestScript.dec_valid("-٣"), "chiffres non ASCII refusés (sans erreur de décodage)")
+	_check(BookTextScript.b25("+007") == "7" and BookTextScript.b25("-00C") == "-c", "forme canonique de « +007 » et « -00C »")
+	_check(BookTextScript.b25("-000") == "0", "« -000 » vaut 0, sans signe")
+	_check(BookTextScript.b25(-625) == "-100" and BookTextScript.b25(24) == "o" and BookTextScript.b25(105) == "45"
+		and BookTextScript.b25(-9223372036854775807 - 1) == "-64ie1focnn5g78", "entiers → base 25 (jusqu'à -2^63)")
+	_check(BookTextScript.b25_fits_int("32970kc6bo2kg4") and not BookTextScript.b25_fits_int("32970kc6bo2kg5") and BookTextScript.b25_to_int("-32970kc6bo2kg4") == -(1 << 62),
+		"les coordonnées jusqu'à 2^62 se calculent en int")
+	_check(BookTextScript.b25_add_small("o", 1) == "10" and BookTextScript.b25_add_small("-1", 1) == "0" and BookTextScript.b25_add_small("0", -1) == "-1", "±1 autour de 0 et de 25")
+	for bad in ["12p", "-", "", "1 2", "1\t2", "12\n", "+-1", "１２", "-٣", "x"]:
+		_check(not BookTextScript.b25_valid(bad) and BookTextScript.b25(bad).is_empty(), "« %s » refusé (sans erreur de décodage)" % bad.c_escape())
 
+	# Contre-épreuve par les entiers de Python : ±k, différence résumée, comparaison, signe, chiffres décimaux.
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 2234
-	var big_a := _digits(rng, 2234)
-	var big_b := _digits(rng, 2100)
-	var pairs := [
-		[big_a, big_b], ["-" + big_a, big_b], [big_a, "-" + big_b], ["-" + big_a, "-" + big_b],
-		[big_a, big_a], ["-" + big_a, big_a], [big_b, big_a], ["9".repeat(2050), "1"],
-		["1" + "0".repeat(2049), "1"], ["0", "-" + big_b], [str(-9223372036854775807 - 1), "9223372036854775807"],
-		[big_a, str(-4611686018427387904)], ["+00" + big_b, "-000"],
+	var huge := _b25_digits(rng, 656000)     # ~917 000 chiffres décimaux, comme une adresse trouvée
+	var big_a := _b25_digits(rng, 2234)
+	var big_b := _b25_digits(rng, 2100)
+	var cascade := "1" + "0".repeat(3000) + "5"           # emprunt en cascade sur 3000 chiffres
+	var under := "o".repeat(3001)
+	var cases := [
+		[big_a, big_b, 1], ["-" + big_a, big_b, -1], [big_a, "-" + big_b, 7], ["-" + big_a, "-" + big_b, -7],
+		[big_a, big_a, 0], ["-" + big_a, big_a, 1], [big_b, big_a, 24], ["o".repeat(2050), "1", 1],
+		["1" + "0".repeat(2049), "1", -1], ["0", "-" + big_b, 5], ["-" + "o".repeat(40), "-1", -1],
+		[cascade, under, 1], [under, cascade, -1], ["-" + cascade, "-" + under, 3],
+		[big_a, big_a.left(-3) + "000", 2], [big_a.left(-14) + "1" + "0".repeat(13), big_a.left(-14) + "0" + "o".repeat(13), 1],
+		[huge, huge.left(-5) + "00000", 25], [huge, "-" + huge.left(-1), -1], ["-" + huge, huge.left(-2) + "oo", 1],
+		[huge, huge, -24], ["1" + "0".repeat(2233), "-c", 1], ["-" + "4".repeat(2234), "7", 1],
+		[BookTextScript.b25_from_int(4611686018427387904), "-" + BookTextScript.b25_from_int(4611686018427387904), 1],
 	]
-	for _i in 6:
-		pairs.append([("-" if rng.randi() % 2 else "") + _digits(rng, rng.randi_range(1, 2300)),
-			("-" if rng.randi() % 2 else "") + _digits(rng, rng.randi_range(1, 2300))])
+	for _i in 8:
+		cases.append([("-" if rng.randi() % 2 else "") + _b25_digits(rng, rng.randi_range(1, 2300)),
+			("-" if rng.randi() % 2 else "") + _b25_digits(rng, rng.randi_range(1, 2300)), rng.randi_range(-30, 30)])
 	var file := FileAccess.open(ARITH_CASES_PATH, FileAccess.WRITE)
-	file.store_string(JSON.stringify(pairs))
+	file.store_string(JSON.stringify(cases))
+	file.close()
+	file = FileAccess.open(ARITH_SCRIPT_PATH, FileAccess.WRITE)
+	file.store_string(ARITH_CHECK)
 	file.close()
 	var command: Array = BookTextScript._interpreters()[0]
 	var args := PackedStringArray(command.slice(1))
-	args.append_array([ProjectSettings.globalize_path("res://tests/check_quest_arith.py"), ProjectSettings.globalize_path(ARITH_CASES_PATH)])
+	args.append_array([ProjectSettings.globalize_path(ARITH_SCRIPT_PATH), ProjectSettings.globalize_path(ARITH_CASES_PATH),
+		ProjectSettings.globalize_path("res://python")])
 	var output := []
 	var code := OS.execute(command[0], args, output, true)
 	var expected: Variant = JSON.parse_string(output[0] if code == 0 and not output.is_empty() else "")
-	_check(expected is Array and expected.size() == pairs.size(), "Python rend la contre-épreuve de %d paires (code %d)" % [pairs.size(), code])
-	if not expected is Array or expected.size() != pairs.size():
+	_check(expected is Array and expected.size() == cases.size(), "Python rend la contre-épreuve de %d cas (code %d)" % [cases.size(), code])
+	if not expected is Array or expected.size() != cases.size():
 		return
 	var mismatches := 0
-	for i in pairs.size():
-		var a: String = pairs[i][0]
-		var b: String = pairs[i][1]
+	var worst_usec := 0
+	for i in cases.size():
+		var a: String = cases[i][0]
+		var b: String = cases[i][1]
+		var k: int = cases[i][2]
 		var want: Dictionary = expected[i]
-		if QuestScript.dec_add(a, b) != want.sum or QuestScript.dec_sub(a, b) != want.diff \
-				or QuestScript.dec_compare(a, b) != int(want.cmp) or QuestScript.dec_sign(a) != int(want.sign) \
-				or QuestScript.dec_digits(a) != int(want.digits):
+		var t := Time.get_ticks_usec()
+		var d := BookTextScript.b25_difference(a, b)
+		worst_usec = maxi(worst_usec, Time.get_ticks_usec() - t)
+		var exact_ok: bool = d.exact == want.exact and (not d.exact or str(d.value) == want.value)
+		if BookTextScript.b25_add_small(a, k) != want.add or d.sign != int(want.sign_diff) or not exact_ok \
+				or d.digits != int(want.digits_diff) or BookTextScript.b25_compare(a, b) != int(want.cmp) \
+				or BookTextScript.b25_sign(a) != int(want.sign) or BookTextScript.b25_decimal_digits(a) != int(want.digits):
 			mismatches += 1
-			print("    écart sur la paire %d (%d et %d chiffres)" % [i, a.length(), b.length()])
-	_check(mismatches == 0, "somme, différence, comparaison, signe, chiffres : identiques à Python sur %d paires de 1 à 2300 chiffres" % pairs.size())
+			print("    écart sur le cas %d (%d et %d chiffres) : %s / %s" % [i, a.length(), b.length(), d, {"sign": want.sign_diff, "exact": want.exact, "digits": want.digits_diff}])
+	_check(mismatches == 0, "±k, différence (signe, valeur exacte ou chiffres décimaux), comparaison, signe, chiffres : identiques à Python sur %d cas de 1 à 656 000 chiffres" % cases.size())
+	print("    différence résumée la plus lente : %.1f ms" % (worst_usec / 1000.0))
 
 
-static func _digits(rng: RandomNumberGenerator, count: int) -> String:
-	var text := str(rng.randi_range(1, 9))
-	for _i in count - 1:
-		text += str(rng.randi_range(0, 9))
-	return text
+## Un nombre de `count` chiffres base 25, sans zéro de tête.
+static func _b25_digits(rng: RandomNumberGenerator, count: int) -> String:
+	var bytes := PackedByteArray()
+	bytes.resize(count)
+	for i in count:
+		bytes[i] = BookTextScript.B25_DIGITS.unicode_at(rng.randi_range(1 if i == 0 else 0, 24))
+	return bytes.get_string_from_ascii()
 
 
 # --- Guidage ------------------------------------------------------------------------------------
 
 func _test_guidance() -> void:
-	var quest := QuestScript.from_address({"hexagon": "105", "level": "-3", "wall": 1, "shelf": 2, "book": 16, "page": 204}, "Titre", "Auteur")
+	var quest := QuestScript.from_address({"hexagon": BookTextScript.b25(105), "level": "-3", "wall": 1, "shelf": 2, "book": 16, "page": 204}, "Titre", "Auteur")
 	_check(quest != null and quest.label() == "Titre — Auteur", "quête sur une adresse, « titre — auteur »")
 	var g := quest.guidance(100, 0)
-	_check(g.dz == "5" and g.dy == "-3" and g.hall == 1 and g.vert == -1 and not g.here, "différences signées depuis (100, 0) : +5, -3")
+	_check(g.dz.exact and g.dz.value == 5 and g.dy.value == -3 and g.hall == 1 and g.vert == -1 and not g.here, "différences signées depuis (100, 0) : +5, -3")
 	_check(g.hall_text == "couloir : 5 galeries vers +Z", "couloir : %s" % g.hall_text)
 	_check(g.level_text == "étages : 3 niveaux vers le bas", "étages : %s" % g.level_text)
 	_check(g.book_text == "dans la galerie : mur 2 · étagère 3 · livre 17 · page 205", "cote : %s" % g.book_text)
 	g = quest.guidance(106, -4)
 	_check(g.hall_text == "couloir : 1 galerie vers −Z" and g.level_text == "étages : 1 niveau vers le haut", "singulier et sens inverses : %s / %s" % [g.hall_text, g.level_text])
-	g = quest.guidance(105, -3)
-	_check(g.here and g.hall_text == "couloir : ici" and g.level_text == "étages : ici", "dans la galerie visée : ici")
+	g = quest.guidance(BookTextScript.b25(105), "-3")
+	_check(g.here and g.hall_text == "couloir : ici" and g.level_text == "étages : ici", "dans la galerie visée (coordonnées base 25) : ici")
+	g = quest.guidance(104, -3, Vector2i(-1, 0))
+	_check(g.hall_text == "couloir : 1 galerie vers +Z" and g.level_text == "étages : ici", "un pas en arrière suivi sans relire les coordonnées : %s" % g.hall_text)
 	_check(quest.target_in_gallery(105, -3) == {"wall": 1, "shelf": 2, "book": 16, "page": 204}, "livre visé dans la galerie")
 	_check(quest.target_in_gallery(105, -2).is_empty(), "aucun livre visé ailleurs")
+	_check(quest.address() == {"hexagon": "45", "level": "-3", "wall": 1, "shelf": 2, "book": 16, "page": 204}, "adresse de la page visée : le livre et sa page")
 
-	var far := QuestScript.from_address({"hexagon": "1" + "0".repeat(2233), "level": "-" + "4".repeat(2234), "wall": 0, "shelf": 0, "book": 0, "page": 0})
+	# Loin : « ≈ 10^N » en chiffres décimaux (25^2233 a 3122 chiffres, 4…4 sur 2234 chiffres base 25, 3123).
+	var far := QuestScript.from_address({"hexagon": "1" + "0".repeat(2233), "level": "-" + "4".repeat(2234), "wall": 0, "shelf": 0, "book": 0})
 	g = far.guidance(-12, 7)
-	_check(g.hall_text == "couloir : ≈ 10^2233 galeries vers +Z", "grande distance : %s" % g.hall_text)
-	_check(g.level_text == "étages : ≈ 10^2233 niveaux vers le bas", "grande hauteur : %s" % g.level_text)
-	_check(QuestScript.magnitude_text("-999999999999999") == "999999999999999", "15 chiffres : valeur exacte")
-	_check(QuestScript.magnitude_text("1000000000000000") == "≈ 10^15", "16 chiffres : ordre de grandeur")
+	_check(g.hall_text == "couloir : ≈ 10^3121 galeries vers +Z", "grande distance : %s" % g.hall_text)
+	_check(g.level_text == "étages : ≈ 10^3122 niveaux vers le bas", "grande hauteur : %s" % g.level_text)
+	var stepped := far.guidance(-11, 7, Vector2i(1, 0))
+	_check(stepped.hall_text == g.hall_text and stepped.dz.digits == g.dz.digits, "un pas ne change pas un ordre de grandeur")
+	_check(QuestScript.magnitude_text(BookTextScript._exact_difference(-999999999999999)) == "999999999999999", "15 chiffres : valeur exacte")
+	_check(QuestScript.magnitude_text(BookTextScript._exact_difference(1000000000000000)) == "≈ 10^15", "16 chiffres : ordre de grandeur")
 	_check(QuestScript.from_address({"hexagon": "1", "level": "x", "wall": 0, "shelf": 0, "book": 0, "page": 0}) == null, "adresse mal formée refusée")
 	_check(QuestScript.from_address({"hexagon": "1", "level": "2", "wall": 4, "shelf": 0, "book": 0, "page": 0}) == null, "mur hors de la galerie refusé")
+	_check(QuestScript.from_address({"hexagon": "1", "level": "2", "wall": 0, "shelf": 0, "book": 0, "page": 410}) == null, "page hors du livre refusée")
+	_check(QuestScript.from_address({"hexagon": "1\t", "level": "2", "wall": 0, "shelf": 0, "book": 0}) == null, "caractère de contrôle refusé")
 
 
 # --- Catalogue ----------------------------------------------------------------------------------
@@ -125,52 +185,67 @@ func _test_catalogue() -> void:
 	_check(titles == ["La biblioteca de Babel", "El Aleph", "El Zahir", "Tlön, Uqbar, Orbis Tertius", "El Golem",
 		"Mode d'emploi de la Bibliothèque", "Sur la vertu", "Sur l'humour"], "catalogue : 8 entrées dans l'ordre (lu : %s)" % [titles])
 	var raw: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(QuestScript.CATALOGUE_PATH))
+	_check(int(raw.version) == QuestScript.CATALOGUE_VERSION and raw.keys().size() == 5, "catalogue version %d : entries, stolen_books, destinations" % QuestScript.CATALOGUE_VERSION)
 	var extra := []
 	for entry: Dictionary in raw.entries:
 		for key: String in entry:
 			if not key in ENTRY_KEYS:
 				extra.append(key)
+		if entry.address.keys().size() != 5:
+			extra.append("address")
 		for page: Dictionary in entry.pages:
-			if page.keys().size() != 2:
+			if page.keys().size() != 2 or not page.has("page") or not page.has("sha256"):
 				extra.append("pages")
-	_check(extra.is_empty(), "le catalogue ne porte que des métadonnées, des adresses et des condensats (en trop : %s)" % [extra])
+	_check(extra.is_empty(), "le catalogue ne porte que des métadonnées, des adresses de livres et des condensats (en trop : %s)" % [extra])
 	var borges := entries.filter(func(e: Dictionary) -> bool: return e.author == "Jorge Luis Borges")
-	_check(borges.size() == 5 and borges.all(func(e: Dictionary) -> bool: return e.protected and e.pages.size() == 1 and e.page_count == 1),
-		"5 entrées protégées de Borges, une page chacune")
+	_check(borges.size() == 5 and borges.all(func(e: Dictionary) -> bool: return e.protected and e.page_count >= 2 and e.pages.size() == e.page_count),
+		"5 livres protégés de Borges : la citation et la loi en page 1, le texte français ensuite (pages : %s)" % [borges.map(func(e: Dictionary) -> int: return e.page_count)])
 	var claude := entries.filter(func(e: Dictionary) -> bool: return e.author == "Claude")
 	_check(claude.size() == 3 and claude.all(func(e: Dictionary) -> bool: return e.licence == "texte original écrit pour le jeu" and e.pages.size() == 1),
-		"3 textes de Claude, une page chacun, « texte original écrit pour le jeu »")
+		"3 textes de Claude, un livre d'une page chacun, « texte original écrit pour le jeu »")
+	var books := {}
 	for entry: Dictionary in entries:
 		_check(not entry.author.strip_edges().is_empty() and not entry.context.strip_edges().is_empty(), "%s : auteur et contexte présents" % entry.title)
-	var checked := {}
+		books[entry.address] = true
+	_check(books.size() == entries.size(), "chaque entrée a son propre livre")
+	var start := Time.get_ticks_usec()
 	for entry: Dictionary in entries:
+		var numbers: Array = entry.pages.map(func(p: Dictionary) -> int: return p.page)
+		_check(numbers == range(entry.page_count), "%s : pages consécutives du livre, à partir de la première (%s)" % [entry.title, numbers])
 		for page: Dictionary in entry.pages:
-			var key := BookTextScript.full_form(page.address)
-			if checked.has(key):
-				_check(checked[key] == page.sha256, "%s : même page, même condensat" % entry.title)
-				continue
-			var lines := BookTextScript.page_lines_at(page.address)
-			var text := "".join(lines)
-			_check(text.length() == 3200 and text.sha256_text() == page.sha256, "%s : la page relue au service a le condensat du catalogue" % entry.title)
-			var flags := BookTextScript.image_books([page.address])
-			_check(flags.size() == 1 and not flags[0], "%s : l'adresse est un livre de texte" % entry.title)
-			checked[key] = page.sha256
-	# Notices : chaque notice est une page d'un livre volé à la Bibliothèque.
+			var text := "".join(BookTextScript.page_lines_at(entry.address, page.page))
+			_check(text.length() == 3200 and text.sha256_text() == page.sha256, "%s, page %d : relue au service, elle a le condensat du catalogue" % [entry.title, page.page + 1])
+		_check("".join(BookTextScript.page_lines_at(entry.address, entry.page_count)) == " ".repeat(3200), "%s : la page qui suit le texte est blanche" % entry.title)
+		var flags := BookTextScript.image_books([entry.address])
+		_check(flags.size() == 1 and flags[0] == false, "%s : l'adresse est un livre de texte" % entry.title)
+	print("    pages du catalogue relues au service : %.1f s" % ((Time.get_ticks_usec() - start) / 1.0e6))
+	# Notices : chaque notice est le contenu d'un livre volé à la Bibliothèque.
 	for entry: Dictionary in entries:
 		var notice := "\n".join([entry.title, entry.author, entry.context])
 		var expected := CarnetScript.normalize(notice).rpad(3200)
 		_check(expected.length() == 3200 and expected.sha256_text() == entry.notice_hash, "%s : la notice normalisée a le condensat du catalogue" % entry.title)
 		var a: Dictionary = entry.get("notice_address", {})
-		_check(not a.is_empty() and "".join(BookTextScript.page_lines_at(a)).sha256_text() == entry.notice_hash, "%s : la page de la notice relue au service a ce condensat" % entry.title)
+		_check(not a.is_empty() and "".join(BookTextScript.page_lines_at(a, 0)).sha256_text() == entry.notice_hash, "%s : la première page du livre de la notice relue au service a ce condensat" % entry.title)
 		if a.is_empty():
 			continue
+		_check("".join(BookTextScript.page_lines_at(a, 1)) == " ".repeat(3200), "%s : le livre de la notice continue en blanc" % entry.title)
 		_check(QuestScript.is_stolen_book(a.hexagon, a.level, a.wall, a.shelf, a.book), "%s : le livre de la notice est volé" % entry.title)
 		_check(not QuestScript.is_stolen_book(a.hexagon, a.level, a.wall, a.shelf, (a.book + 1) % 32), "%s : le livre voisin est en place" % entry.title)
+		_check(not QuestScript.is_stolen_book(entry.address.hexagon, entry.address.level, entry.address.wall, entry.address.shelf, entry.address.book), "%s : le livre de l'œuvre est en place" % entry.title)
 	_check(raw.stolen_books.size() == entries.size(), "stolen_books : un livre par notice (%d)" % raw.stolen_books.size())
-	_check(not QuestScript.is_stolen_book("0", "0", 0, 0, 0), "le livre (0, 0, 0, 0, 0) est en place")
+	_check(not QuestScript.is_stolen_book("0", "0", 0, 0, 0) and not QuestScript.is_stolen_book(0, 0, 0, 0, 0), "le livre (0, 0, 0, 0, 0) est en place")
+
+	# Destinations : le carré SATOR, page 1 de son livre, sans épingle ; le Golem, encore vide.
+	var sator := QuestScript.destination("sator")
+	_check(not sator.is_empty() and sator.address.page == 0 and "".join(BookTextScript.page_lines_at(sator.address)).sha256_text() == sator.sha256,
+		"destination « sator » : la page 1 de son livre relue au service a son condensat")
+	_check(QuestScript.destination("golem").is_empty() and raw.destinations.golem == {}, "destination « golem » : vide pour l'instant")
+	var pinned_books := QuestScript.default_pins(entries).filter(func(p: Dictionary) -> bool: return p.kind == QuestScript.KIND_CATALOGUE).size()
+	_check(pinned_books == entries.size() and not books.has(BookTextScript.book_of(sator.get("address", {}))), "le livre du carré SATOR n'est pas épinglé")
 
 	var quest := QuestScript.from_entry(entries[0])
-	_check(quest != null and quest.pages.size() == 1 and quest.author == "Jorge Luis Borges", "quête d'une entrée du catalogue")
+	_check(quest != null and quest.pages == range(entries[0].page_count) and quest.book == entries[0].address and quest.author == "Jorge Luis Borges",
+		"quête d'une entrée du catalogue : son livre, ses pages")
 	var tool := FileAccess.get_file_as_string("res://tools/make_catalogue.py")
 	_check(tool.contains("KEY_NAMES = {\"QUETE\": \"%s\", \"EFFACER\": \"%s\"}" % [HudScript.QUEST_KEY_NAME, HudScript.CLEAR_KEY_NAME]),
 		"le mode d'emploi reçoit les noms des touches du Hud (%s, %s)" % [HudScript.QUEST_KEY_NAME, HudScript.CLEAR_KEY_NAME])
@@ -203,15 +278,16 @@ func _test_pins() -> void:
 	var quest := QuestScript.from_pin(restored[8], entries)
 	_check(quest != null and quest.title == "ma recherche" and quest.address().hexagon == target.hexagon, "une épingle de recherche rend sa quête")
 
-	for broken in ["{pas du json", "[]", "{\"version\": 99, \"pins\": []}"]:
+	var old_pins := JSON.stringify({"version": 1, "pins": [{"kind": "recherche", "title": "ancienne", "address": target}]})
+	for broken in ["{pas du json", "[]", "{\"version\": 99, \"pins\": []}", old_pins]:
 		_write(PINS_TEST_PATH, broken)
 		_check(QuestScript.load_pins(entries, PINS_TEST_PATH).size() == 9, "fichier abîmé (%s) → le catalogue" % broken.left(14))
-	_write(PINS_TEST_PATH, JSON.stringify({"version": 1, "pins": [
+	_write(PINS_TEST_PATH, JSON.stringify({"version": QuestScript.PINS_VERSION, "pins": [
 		{"kind": "catalogue", "entry": "inconnue"}, {"kind": "recherche", "title": "x", "address": {"hexagon": "z"}},
 		{"kind": "catalogue", "entry": "claude-sur-l-humour"}, 7, {"kind": "recherche", "title": "y", "address": target}]}))
 	var partial := QuestScript.load_pins(entries, PINS_TEST_PATH)
 	_check(partial.size() == 2 and partial[0].entry == "claude-sur-l-humour" and partial[1].title == "y", "épingles abîmées écartées une à une")
-	_write(PINS_TEST_PATH, JSON.stringify({"version": 1, "pins": []}))
+	_write(PINS_TEST_PATH, JSON.stringify({"version": QuestScript.PINS_VERSION, "pins": []}))
 	_check(QuestScript.load_pins(entries, PINS_TEST_PATH).is_empty(), "tout désépinglé reste désépinglé")
 
 	# Registre des livres manquants : une ligne par livre de stolen_books, sans dire de quelle notice.
@@ -277,6 +353,31 @@ func _test_hud() -> void:
 	_check(hud._arrow.mode == "bas" and hud._quest_glyph.text.is_empty(), "encart : cible deux niveaux plus bas, flèche vers le bas")
 	hud.set_address(7, -2)
 	_check(hud._arrow.mode == "plat", "encart : même étage, flèche couchée")
+	hud.set_address(8, -2)
+
+	# Adresse à 917 000 chiffres : forme « display » du service (signe, 4 premiers…4 derniers, nombre
+	# de chiffres) ; un pas avance les derniers chiffres et le guidage sans relire la coordonnée.
+	var huge: String = QuestScript.load_catalogue()[0].address.hexagon
+	var deep := "-" + huge
+	hud.set_address(huge, deep)
+	var shown := hud._address.text
+	var summary := BookTextScript.coordinate_summary(huge)
+	_check(shown == "Hexagone %s · niveau %s" % [BookTextScript.summary_text(summary), BookTextScript.summary_text(BookTextScript.coordinate_summary(deep))]
+		and shown.contains("…") and shown.contains("(9170") and shown.contains("niveau -"), "grande adresse affichée en abrégé : %s" % shown)
+	_check(hud._quest_hall.text.begins_with("couloir : ≈ 10^917") and hud._quest_hall.text.ends_with("vers −Z"), "encart : distance en ordre de grandeur (%s)" % hud._quest_hall.text)
+	var worst := 0
+	var h := huge
+	var l := deep
+	for step in [Vector2i(1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(-1, 0), Vector2i(0, 1)]:
+		h = BookTextScript.b25_add_small(h, step.x)
+		l = BookTextScript.b25_add_small(l, step.y)
+		var t := Time.get_ticks_usec()
+		hud.set_address(h, l, step)
+		worst = maxi(worst, Time.get_ticks_usec() - t)
+	var after := hud._address.text
+	var recomputed := "Hexagone %s · niveau %s" % [BookTextScript.summary_text(BookTextScript.coordinate_summary(h)), BookTextScript.summary_text(BookTextScript.coordinate_summary(l))]
+	_check(after == recomputed and after != shown, "cinq pas : l'adresse affichée suit (%s), comme la relecture par le service" % after)
+	_check(worst < 8000, "un pas de l'encart à 917 000 chiffres : %.2f ms au pire (budget 8 ms)" % (worst / 1000.0))
 	hud.set_address(8, -2)
 
 	# Carnet : touche cachée, mot écrit dans l'alphabet, invocation à l'espace.

@@ -6,7 +6,9 @@ extends Node3D
 ## L'origine du monde suit le bibliothécaire : quand il franchit le milieu d'un
 ## vestibule, la galerie qu'il atteint devient l'origine et tout se décale d'un
 ## pas ; de même d'un niveau quand il passe à mi-hauteur vers le niveau voisin.
-## Les coordonnées restent petites, quelle que soit la distance parcourue.
+## Les coordonnées restent petites, quelle que soit la distance parcourue ; l'adresse de
+## l'origine, elle, est un entier de toute taille (origin_hexagon_b25, origin_level_b25), jusqu'aux
+## ~917 000 chiffres décimaux d'une adresse trouvée par la recherche.
 ##
 ## Degrés de détail des galeries (dz : galeries le long du vestibule, dy : niveaux) :
 ## - complète, avec collisionneurs : dy = 0, |dz| ≤ 1 ;
@@ -30,6 +32,7 @@ const FarViewScript := preload("res://scripts/far_view.gd")
 const HudScript := preload("res://scripts/hud.gd")
 const PlayerScript := preload("res://scripts/player.gd")
 const ReaderScript := preload("res://scripts/reader.gd")
+const BookTextScript := preload("res://scripts/book_text.gd")
 
 const REACH_ALONG_HALL := 8    # galeries de chaque côté le long du vestibule : 8 × 12 m = 96 m
 const REACH_VERTICAL := 30     # niveaux au-dessus et au-dessous, par le puits : 30 × 3,4 m = 102 m
@@ -41,7 +44,17 @@ const DIAGONAL_REACH := 8      # diagonales vues à travers les puits voisins (v
 const FOG_COLOR := GalleryScript.FOG_COLOR
 const FOG_DENSITY := GalleryScript.FOG_DENSITY
 
-## Adresse de la galerie placée à l'origine du monde.
+## Adresse de la galerie placée à l'origine du monde : hexagone et niveau, entiers relatifs de
+## toute taille, en base 25 signée (BookText : la forme du fil et du catalogue). Un pas les
+## change de ±1 par BookText.b25_add_small : seule la queue de la chaîne change (une copie,
+## ~1,4 ms à 900 000 chiffres décimaux), si bien qu'on marche à toute adresse.
+var origin_hexagon_b25 := "0"
+var origin_level_b25 := "0"
+## Repère local des galeries (Gallery.hexagon et Gallery.level, noms des nœuds) : des int qui
+## suivent l'origine pas à pas. Ils valent la vraie coordonnée tant qu'elle tient dans un int —
+## c'est le cas du départ, tiré au hasard dans la plage des int comme avant ; après place_origin
+## sur une coordonnée plus grande, ils partent d'un petit entier tiré de la coordonnée (la graine
+## des hauteurs et des cuirs des livres en dépend, pas le texte des livres).
 var origin_hexagon: int
 var origin_level: int
 
@@ -54,7 +67,8 @@ var _galleries: Dictionary = {}   # case Vector2i(dz, dy) relative à l'origine 
 var _lit: Array[GalleryScript] = []     # galeries à vraies lampes (LIT et FULL)
 static var _lit_cells: Array[Vector2i] = []
 var _highlight: MeshInstance3D
-var _target: Dictionary = {}
+var _target: Dictionary = {}        # livre visé, tel que le rend la galerie (repère local)
+var _target_book: Dictionary = {}   # le même livre, à sa vraie adresse (base 25)
 var _mouse_captured := false
 
 
@@ -69,6 +83,8 @@ func _ready() -> void:
 	rng.randomize()
 	origin_hexagon = (rng.randi() << 30) ^ rng.randi()
 	origin_level = rng.randi() - (1 << 31)
+	origin_hexagon_b25 = BookTextScript.b25_from_int(origin_hexagon)
+	origin_level_b25 = BookTextScript.b25_from_int(origin_level)
 	_update_galleries()
 
 	player = PlayerScript.new()
@@ -90,7 +106,7 @@ func _ready() -> void:
 
 	hud = HudScript.new()
 	add_child(hud)
-	hud.set_address(origin_hexagon, origin_level)
+	hud.set_address(origin_hexagon_b25, origin_level_b25)
 	hud.set_target({})
 	reader = ReaderScript.new()
 	add_child(reader)
@@ -147,7 +163,7 @@ func _unhandled_input(event: InputEvent) -> void:
 func _open_book() -> void:
 	player.frozen = true
 	_release_mouse()
-	reader.open(_target)
+	reader.open(_target_book)
 
 
 func _close_book() -> void:
@@ -176,6 +192,7 @@ func _show_target(target: Dictionary) -> void:
 		target = {}
 	if target != _target:
 		_target = target
+		_target_book = target_address(target)
 		hud.set_target(target)
 	_highlight.visible = not target.is_empty()
 	if _highlight.visible:
@@ -184,20 +201,61 @@ func _show_target(target: Dictionary) -> void:
 		_highlight.global_transform = gallery.global_transform * book.scaled_local(Vector3(1.12, 1.04, 1.04))
 
 
+## La vraie adresse (base 25) d'un livre visé dans une galerie : {hexagon, level, wall, shelf,
+## book} ; {} sans livre. La galerie le désigne dans le repère local, à quelques cases de l'origine.
+func target_address(target: Dictionary) -> Dictionary:
+	if target.is_empty():
+		return {}
+	return {
+		"hexagon": BookTextScript.b25_add_small(origin_hexagon_b25, int(target.hexagon) - origin_hexagon),
+		"level": BookTextScript.b25_add_small(origin_level_b25, int(target.level) - origin_level),
+		"wall": target.wall, "shelf": target.shelf, "book": target.book,
+	}
+
+
+## Place l'origine du monde sur la galerie (hexagone, niveau), int ou chaînes base 25 de toute
+## taille, et reconstruit les galeries autour ; faux si une coordonnée est invalide.
+func place_origin(hexagon: Variant, level: Variant) -> bool:
+	var h := BookTextScript.b25(hexagon)
+	var l := BookTextScript.b25(level)
+	if h.is_empty() or l.is_empty():
+		return false
+	origin_hexagon_b25 = h
+	origin_level_b25 = l
+	origin_hexagon = _local_coordinate(h)
+	origin_level = _local_coordinate(l)
+	_update_galleries(Vector2i.ZERO, true)
+	if hud != null:
+		hud.set_address(origin_hexagon_b25, origin_level_b25)
+	_target = {}
+	_target_book = {}
+	return true
+
+
+## La coordonnée du repère local d'une vraie coordonnée : elle-même quand elle tient dans un int,
+## sinon un entier de 30 bits tiré de ses chiffres (même coordonnée, même entier).
+static func _local_coordinate(coordinate: String) -> int:
+	if BookTextScript.b25_fits_int(coordinate):
+		return BookTextScript.b25_to_int(coordinate)
+	return (coordinate.hash() & 0x3FFFFFFF) - (1 << 29)
+
+
 ## Fait de la galerie voisine (+1 ou −1 le long du vestibule) la nouvelle origine.
 func _shift(step: int) -> void:
 	origin_hexagon += step
+	origin_hexagon_b25 = BookTextScript.b25_add_small(origin_hexagon_b25, step)
 	player.position.z -= step * GalleryScript.PITCH
 	_update_galleries(Vector2i(step, 0))
-	hud.set_address(origin_hexagon, origin_level)
+	hud.set_address(origin_hexagon_b25, origin_level_b25, Vector2i(step, 0))
 
 
 ## Fait du niveau voisin (+1 au-dessus, −1 au-dessous) la nouvelle origine.
 func _shift_level(step: int) -> void:
 	origin_level += step
+	origin_level_b25 = BookTextScript.b25_add_small(origin_level_b25, step)
 	player.position.y -= step * GalleryScript.LEVEL_PITCH
 	_update_galleries(Vector2i(0, step))
-	hud.set_address(origin_hexagon, origin_level)
+	hud.set_address(origin_hexagon_b25, origin_level_b25, Vector2i(0, step))
 
 
 ## Degré de détail de la galerie décalée de (dz, dy) par rapport à l'origine, ou −1
@@ -252,15 +310,16 @@ static func lit_cells() -> Array[Vector2i]:
 ## décalage de l'origine de `moved` (galeries, niveaux). Une galerie dont la case reste
 ## dans le champ garde son adresse ; les autres servent aux cases nouvelles (même
 ## détail d'abord) : un pas ne change que des graines, des positions, et des enfants
-## qui passent par la réserve de Gallery.
-func _update_galleries(moved := Vector2i.ZERO) -> void:
+## qui passent par la réserve de Gallery. `readdress_all` : l'origine a sauté (place_origin),
+## toutes les galeries prennent une adresse nouvelle.
+func _update_galleries(moved := Vector2i.ZERO, readdress_all := false) -> void:
 	var cells := gallery_cells()
 	var placed: Dictionary = {}
 	var spares: Array = [[], [], []]   # par degré de détail
 	for old_cell: Vector2i in _galleries:
 		var cell := old_cell - moved
 		var gallery: GalleryScript = _galleries[old_cell]
-		if cells.has(cell):
+		if cells.has(cell) and not readdress_all:
 			placed[cell] = gallery
 		else:
 			spares[gallery.detail].append(gallery)

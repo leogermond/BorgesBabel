@@ -58,8 +58,11 @@ var _panel_box: VBoxContainer
 var _file_dialog: FileDialog
 var _text_edit: LineEdit
 var _pin_title_edit: LineEdit
-var _hexagon := 0
-var _level := 0
+## Galerie courante : hexagone et niveau en base 25 signée (BookText), et leurs résumés d'écran.
+var _hexagon := "0"
+var _level := "0"
+var _hexagon_summary: Dictionary = {}
+var _level_summary: Dictionary = {}
 var _guide: Dictionary = {}
 var _mouse_before := Input.MOUSE_MODE_VISIBLE
 ## Dernier mode de souris demandé par le panneau (le mode effectif reste VISIBLE sans fenêtre).
@@ -105,11 +108,38 @@ func _ready() -> void:
 	_refresh_widget()
 
 
-func set_address(hexagon: int, level: int) -> void:
-	_hexagon = hexagon
-	_level = level
-	_address.text = "Hexagone %d · niveau %d" % [hexagon, level]
-	_refresh_widget()
+## Affiche l'adresse de la galerie courante, hexagone et niveau en int ou en chaînes base 25.
+## Une coordonnée qui tient dans un int s'écrit en entier ; une plus grande, par la forme
+## « display » du service : signe, 4 premiers chiffres, 4 derniers, nombre de chiffres.
+## `moved` : le pas (galeries, niveaux) qui mène de l'adresse précédente à celle-ci ; les
+## derniers chiffres et le guidage suivent alors le pas sans relire les coordonnées (un pas reste
+## dans le budget d'une image même à 900 000 chiffres ; les chaînes, canoniques, ne sont alors pas
+## relues) ; sinon tout se recalcule.
+func set_address(hexagon: Variant, level: Variant, moved := Vector2i.ZERO) -> void:
+	var stepping := moved != Vector2i.ZERO and hexagon is String and level is String \
+		and not _hexagon_summary.is_empty() and not _level_summary.is_empty()
+	if stepping:
+		_hexagon = hexagon
+		_level = level
+		_hexagon_summary = _stepped_summary(_hexagon_summary, _hexagon, moved.x)
+		_level_summary = _stepped_summary(_level_summary, _level, moved.y)
+	else:
+		_hexagon = BookTextScript.b25(hexagon)
+		_level = BookTextScript.b25(level)
+		_hexagon_summary = BookTextScript.coordinate_summary(_hexagon)
+		_level_summary = BookTextScript.coordinate_summary(_level)
+	_address.text = "Hexagone %s · niveau %s" % [BookTextScript.summary_text(_hexagon_summary), BookTextScript.summary_text(_level_summary)]
+	_refresh_widget(moved if stepping else Vector2i.ZERO)
+
+
+## Le résumé d'écran d'une coordonnée après un pas : celui d'avant (pas nul sur cet axe), ou
+## avancé du pas quand il le permet (BookText.summary_step) ; sinon recalculé (exact en int, ou
+## par le service, une fois tous les 10 000 pas au plus).
+static func _stepped_summary(previous: Dictionary, coordinate: String, step: int) -> Dictionary:
+	if step == 0:
+		return previous
+	var next := BookTextScript.summary_step(previous, step)
+	return next if not next.is_empty() else BookTextScript.coordinate_summary(coordinate)
 
 
 ## Affiche la cote du livre visé, ou rien.
@@ -343,14 +373,14 @@ func _widget_label(size: int) -> Label:
 	return label
 
 
-func _refresh_widget() -> void:
+func _refresh_widget(moved := Vector2i.ZERO) -> void:
 	if _widget == null:
 		return
 	_widget.visible = quest != null
 	if quest == null:
 		_guide = {}
 		return
-	_guide = quest.guidance(_hexagon, _level)
+	_guide = quest.guidance(_hexagon, _level, moved)
 	_quest_title.text = quest.label()
 	_quest_hall.text = _guide.hall_text
 	_quest_level.text = _guide.level_text
@@ -542,7 +572,7 @@ func _rebuild_panel() -> void:
 			selector.add_child(_text("page", 14, Color(1, 1, 1, 0.7)))
 			for i in quest.pages.size():
 				var button := Button.new()
-				button.text = str(i + 1)
+				button.text = str(int(quest.pages[i]) + 1)
 				button.toggle_mode = true
 				button.button_pressed = i == quest.page_index
 				button.pressed.connect(set_quest_page.bind(i))
@@ -641,7 +671,7 @@ func _on_register_item_pressed(item: Dictionary) -> void:
 
 static func _search_context(target: Dictionary) -> String:
 	return "hexagone de %d chiffres · mur %d · étagère %d · livre %d · page %d" % [
-		QuestScript.dec_digits(target.hexagon), target.wall + 1, target.shelf + 1, target.book + 1, target.page + 1]
+		BookTextScript.b25_decimal_digits(target.hexagon), target.wall + 1, target.shelf + 1, target.book + 1, int(target.get("page", 0)) + 1]
 
 
 static func _heading(text: String) -> Label:

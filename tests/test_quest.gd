@@ -29,7 +29,18 @@ def digits10(x):
         p *= 10
         k += 1
     return k
-M1, M2 = 25 ** 8 - 1, 25 ** 8 + 1
+P, B = [2147483647, 2147483629], [1859140973, 1210359923]
+def fingerprint(text):
+    negative, magnitude = babel._parse_b25(text)
+    chunks = [babel.from_digits(magnitude[i:i + 8]) for i in range(0, len(magnitude), 8)]
+    sign = -1 if negative else (1 if magnitude else 0)
+    hashes = []
+    for p, b in zip(P, B):
+        h = 0
+        for c in reversed(chunks):
+            h = (h * b + c) % p
+        hashes.append(h)
+    return [sign] + hashes
 out = []
 for a, b, k in json.load(open(sys.argv[1], encoding='utf-8')):
     y = babel.b25_to_int(b)
@@ -39,10 +50,12 @@ for a, b, k in json.load(open(sys.argv[1], encoding='utf-8')):
         x = babel.b25_to_int(a)
     d = x - y
     exact = abs(d) < 25 ** 12
-    out.append({'a': babel.int_to_b25(x) if isinstance(a, dict) else a, 'add': babel.int_to_b25(x + k), 'sign_diff': (d > 0) - (d < 0),
+    a_text = babel.int_to_b25(x) if isinstance(a, dict) else a
+    add = babel.int_to_b25(x + k)
+    out.append({'a': a_text, 'add': add, 'sign_diff': (d > 0) - (d < 0),
                 'exact': exact, 'value': str(d) if exact else '', 'digits_diff': digits10(d),
                 'cmp': (x > y) - (x < y), 'sign': (x > 0) - (x < 0), 'digits': digits10(x),
-                'print': [x % M1, x % M2], 'print_add': [(x + k) % M1, (x + k) % M2]})
+                'print': fingerprint(a_text), 'print_add': fingerprint(add)})
 print(json.dumps(out))
 """
 const ENTRY_KEYS := ["id", "title", "author", "year", "language", "context", "group", "licence", "protected", "address", "page_count", "pages", "notice_book", "notice_hash"]
@@ -148,17 +161,57 @@ func _test_arithmetic() -> void:
 		var print_a := BookTextScript.b25_print(a)
 		var want_print := PackedInt64Array(want.print)
 		var want_add := PackedInt64Array(want.print_add)
-		if print_a != want_print or BookTextScript.print_add(print_a, k) != want_add \
+		if print_a != want_print or BookTextScript.print_at(BookTextScript.print_context(a, print_a), k) != want_add \
 				or BookTextScript.b25_print(BookTextScript.b25_add_small(a, k)) != want_add:
 			print_mismatches += 1
 			print("    empreinte : écart sur le cas %d (%d chiffres) : %s, attendu %s" % [i, a.length(), print_a, want_print])
 	_check(mismatches == 0, "±k, différence (signe, valeur exacte ou chiffres décimaux), comparaison, signe, chiffres : identiques à Python sur %d cas de 1 à 656 000 chiffres, dont 27 au ras de 10^12 … 10^20000" % cases.size())
-	_check(print_mismatches == 0, "empreintes (restes modulo 25^8 ∓ 1) : identiques à Python, et print_add(empreinte, k) = empreinte de la coordonnée ± k, relue (%d cas)" % cases.size())
+	_check(print_mismatches == 0, "empreintes (hachage polynomial des tranches) : identiques à Python, et print_at(contexte, k) = empreinte de la coordonnée ± k, relue (%d cas)" % cases.size())
+	_test_print_collisions(rng, huge)
 	var t_print := Time.get_ticks_usec()
 	BookTextScript._print_cache.clear()
 	BookTextScript.b25_print(huge)
 	print("    empreinte d'une coordonnée de 656 000 chiffres : %.1f ms" % ((Time.get_ticks_usec() - t_print) / 1000.0))
 	print("    différence résumée la plus lente : %.1f ms" % (worst_usec / 1000.0))
+
+
+## Empreintes : des coordonnées que l'ancienne empreinte (somme des tranches) confondait sont
+## distinctes ; l'empreinte suivie pas à pas (print_at, ±1 à ±9, à travers des retenues et des emprunts
+## sur des suites de tranches) égale celle de la coordonnée relue.
+func _test_print_collisions(rng: RandomNumberGenerator, huge: String) -> void:
+	var big := _b25_digits(rng, 2000)
+	var pairs := [["1", "1" + "0".repeat(16)], ["0", "o".repeat(16)], ["5", "4" + "0".repeat(15) + "1"],
+		[big, big.substr(8, 8) + big.left(8) + big.substr(16)],          # deux tranches échangées
+		[big, big + "0".repeat(16)], ["1" + "0".repeat(32), "1" + "0".repeat(16)],
+		[big.left(-16) + "0000000100000000", big.left(-16) + "0000000000000001"],
+		[huge, huge.left(-8) + "0".repeat(8)], ["-" + big, big]]
+	# L'ancienne empreinte était la valeur modulo (25^16 − 1)/2 : x et x + k·(25^16 − 1)/2 se confondaient.
+	var half := "6".repeat(16)   # (25^16 − 1)/2 = « 666…6 » en base 25
+	for i in 4:
+		var x := _b25_digits(rng, 40 + i * 300)
+		pairs.append([x, _add_b25(x, half)])
+	var collisions := 0
+	for pair: Array in pairs:
+		if BookTextScript.gallery_key(pair[0], "0") == BookTextScript.gallery_key(pair[1], "0"):
+			collisions += 1
+			print("    collision : %d et %d chiffres" % [pair[0].length(), pair[1].length()])
+	_check(collisions == 0, "%d paires que l'ancienne empreinte confondait (tranches déplacées, zéros de tête, multiples de (25^16 − 1)/2) : clés distinctes" % pairs.size())
+	var starts := ["1" + "o".repeat(40), "2" + "0".repeat(40), big.left(-24) + "o".repeat(24), big.left(-25) + "1" + "0".repeat(24),
+		"-" + big.left(-17) + "o".repeat(17), "-" + big.left(-20) + "1" + "0".repeat(19), "o".repeat(30), BookTextScript.b25_from_int(1 << 62),
+		huge.left(-40) + "o".repeat(40)]
+	var wrong := 0
+	for start: String in starts:
+		var context := BookTextScript.print_context(start, BookTextScript.b25_print(start))
+		for delta in range(-9, 10):
+			var target := BookTextScript.b25_add_small(start, delta)
+			if BookTextScript.print_at(context, delta) != BookTextScript.b25_print(target):
+				wrong += 1
+	_check(wrong == 0, "empreinte suivie de −9 à +9 à travers retenues et emprunts = empreinte relue (%d coordonnées, écarts : %d)" % [starts.size(), wrong])
+
+
+## Somme de deux nombres base 25 positifs (chiffres), pour les tests.
+static func _add_b25(x: String, y: String) -> String:
+	return BookTextScript._add_magnitudes(x, y)
 
 
 ## Un nombre de `count` chiffres base 25, sans zéro de tête.

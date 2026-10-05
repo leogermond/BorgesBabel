@@ -73,9 +73,13 @@ const LOG10_25_LO := -2.2902201796043677e-10
 ## décimaux se tranche exactement, et taille au plus (chiffres base 25) de ce calcul exact.
 const POW10_MARGIN := 1.0e-9
 const EXACT_DIGITS_LIMIT := 20000
-## Empreintes des coordonnées (b25_print) : restes modulo 25^8 − 1 et 25^8 + 1.
-const PRINT_M1 := 152587890624
-const PRINT_M2 := 152587890626
+## Empreintes des coordonnées (b25_print) : hachage polynomial des tranches de 8 chiffres base 25,
+## modulo deux nombres premiers de 31 bits, à deux bases fixes (voir b25_print).
+const PRINT_P: Array[int] = [2147483647, 2147483629]
+const PRINT_B: Array[int] = [1859140973, 1210359923]
+const PRINT_CHUNK := 152587890625               # 25^8 : une tranche
+const PRINT_CHUNK_MOD: Array[int] = [116551688, 116552966]          # 25^8 mod P
+const PRINT_INV_B1: Array[int] = [1721314116, 2016755104]           # (B − 1)^−1 mod P
 const PRINT_CACHE := 8
 ## Retenue « longue » (long_carry) : au-delà, main.gd prépare le pas d'avance, sur un fil.
 const LONG_CARRY := 1024
@@ -503,70 +507,166 @@ static func b25_difference(a: String, b: String) -> Dictionary:
 		return _sub_magnitudes(x.substr(p), y.substr(p)) if length - p <= EXACT_DIGITS_LIMIT else "")
 
 
-## Empreinte d'une coordonnée canonique : ses restes modulo PRINT_M1 = 25^8 − 1 et PRINT_M2 =
-## 25^8 + 1 (ensemble, le reste modulo (25^16 − 1)/2 ≈ 7·10^21). Deux coordonnées ont la même
-## empreinte seulement si elles diffèrent d'un multiple de ce nombre. C'est une fonction de la
-## valeur seule : l'empreinte de c ± k est celle de c, plus ou moins k (print_add, sans relire la
-## coordonnée), si bien que le jeu la suit pas à pas et qu'elle vaut, à l'arrivée, celle de la
-## chaîne relue en entier — quel que soit le chemin. Coût pour une grande coordonnée : les
-## chiffres lus 8 par 8 dans des entiers de 64 bits (to_int64_array), ~20 ms à 656 000 chiffres ;
-## les dernières empreintes calculées restent en mémoire (PRINT_CACHE).
+## Empreinte d'une coordonnée canonique : [signe, H₀, H₁], où H_j = Σ t_c · B_j^c mod P_j, t_c étant
+## les tranches de 8 chiffres base 25 de la valeur absolue (t₀ les 8 derniers chiffres, t₁ les 8
+## précédents…), B_j une base fixe et P_j un nombre premier de 31 bits. Fonction de la valeur
+## seule, elle distingue les positions (deux coordonnées qui ne diffèrent que par l'ordre de leurs
+## tranches, ou par des tranches nulles en tête, ont des empreintes différentes) ; deux coordonnées
+## distinctes n'ont la même qu'avec une probabilité de l'ordre de 2^−62. Elle se suit pas à pas
+## sans relire la coordonnée (print_context, print_at : seules la tranche t₀ et la retenue qui la
+## dépasse changent) et vaut, à l'arrivée, celle de la chaîne relue en entier — quel que soit le
+## chemin. Coût pour une grande coordonnée : les chiffres lus 8 par 8 dans des entiers de 64 bits
+## (to_int64_array), ~30 ms à 656 000 chiffres ; les dernières empreintes calculées restent en
+## mémoire (PRINT_CACHE).
 static func b25_print(text: String) -> PackedInt64Array:
 	if b25_fits_int(text):
-		var v := b25_to_int(text)
-		return PackedInt64Array([posmod(v, PRINT_M1), posmod(v, PRINT_M2)])
+		return _print_of_int(b25_to_int(text))
 	if _print_cache.has(text):
 		return _print_cache[text]
 	var negative := text.begins_with("-")
 	var bytes := text.to_ascii_buffer()
 	var start := 1 if negative else 0
 	var head := (bytes.size() - start) % 8
-	var first := 0   # les chiffres de tête qui ne remplissent pas un mot de 8
+	var first := 0   # les chiffres de tête qui ne remplissent pas une tranche
 	for i in range(start, start + head):
 		var c := bytes[i]
 		first = first * 25 + (c - 48 if c <= 57 else c - 87)
 	var words := bytes.slice(start + head).to_int64_array()
-	# Mot k (octet 0 = chiffre de poids fort, petit-boutiste) ; son rang compté depuis le poids
-	# faible est count − 1 − k : 25^8 ≡ 1 (mod M1) et ≡ −1 (mod M2).
-	var count := words.size()
-	var even := 0   # mots de rang pair
-	var odd := 0
-	var k := 0
+	var p0: int = PRINT_P[0]
+	var p1: int = PRINT_P[1]
+	var b0: int = PRINT_B[0]
+	var b1: int = PRINT_B[1]
+	var h0 := first % p0
+	var h1 := first % p1
 	for word in words:
-		# Chiffres d'un octet : '0'-'9' → 0-9, 'a'-'o' (bit 6) → 10-24 ; puis assemblage par paires.
+		# Chiffres d'un octet : '0'-'9' → 0-9, 'a'-'o' (bit 6) → 10-24 ; puis assemblage par paires
+		# (octet 0 = chiffre de poids fort, petit-boutiste) : la valeur de la tranche, < 25^8.
 		var v: int = (word & 0x0F0F0F0F0F0F0F0F) + 9 * ((word >> 6) & 0x0101010101010101)
 		v = (v & 0x00FF00FF00FF00FF) * 25 + ((v >> 8) & 0x00FF00FF00FF00FF)
 		v = (v & 0x0000FFFF0000FFFF) * 625 + ((v >> 16) & 0x0000FFFF0000FFFF)
 		v = (v & 0xFFFFFFFF) * 390625 + (v >> 32)
-		if (count - 1 - k) & 1 == 0:
-			even += v
-		else:
-			odd += v
-		k += 1
-	if count & 1 == 0:   # rang de la tête : count
-		even += first
-	else:
-		odd += first
-	var r1 := posmod(even + odd, PRINT_M1)
-	var r2 := posmod(even - odd, PRINT_M2)
-	var result := PackedInt64Array([posmod(-r1, PRINT_M1), posmod(-r2, PRINT_M2)]) if negative \
-		else PackedInt64Array([r1, r2])
+		h0 = (h0 * b0 + v % p0) % p0
+		h1 = (h1 * b1 + v % p1) % p1
+	var result := PackedInt64Array([-1 if negative else 1, h0, h1])
 	if _print_cache.size() >= PRINT_CACHE:
 		_print_cache.erase(_print_cache.keys()[0])
 	_print_cache[text] = result
 	return result
 
 
-## L'empreinte de c + delta, d'après celle de c (voir b25_print).
-static func print_add(print: PackedInt64Array, delta: int) -> PackedInt64Array:
-	return PackedInt64Array([posmod(print[0] + delta, PRINT_M1), posmod(print[1] + delta, PRINT_M2)])
+static func _print_of_int(value: int) -> PackedInt64Array:
+	var magnitude := absi(value) if value != -9223372036854775807 - 1 else 0
+	var chunks := PackedInt64Array()
+	while magnitude > 0:
+		chunks.append(magnitude % PRINT_CHUNK)
+		@warning_ignore("integer_division")
+		magnitude /= PRINT_CHUNK
+	var result := PackedInt64Array([signi(value), 0, 0])
+	for j in 2:
+		var h := 0
+		for c in range(chunks.size() - 1, -1, -1):
+			h = (h * PRINT_B[j] + chunks[c] % PRINT_P[j]) % PRINT_P[j]
+		result[j + 1] = h
+	return result
+
+
+## Ce qu'il faut savoir d'une coordonnée pour l'empreinte de ses voisines (print_at) : sa valeur
+## quand elle tient dans un int ; sinon son empreinte, sa tranche t₀ (8 derniers chiffres) et le
+## nombre de tranches entières de « o » (retenue) et de « 0 » (emprunt) juste au-dessus. Coût : 8
+## chiffres et quelques dizaines de lectures, sauf longue suite de « o » ou de « 0 » (rstrip natif).
+static func print_context(text: String, print: PackedInt64Array) -> Dictionary:
+	if b25_fits_int(text):
+		return {"value": b25_to_int(text)}
+	var length := text.length()
+	var tail := 0
+	for i in range(length - 8, length):
+		tail = tail * 25 + _digit(text, i)
+	return {"sign": print[0], "h": [print[1], print[2]], "tail": tail,
+		"run_o": _chunk_run(text, 111), "run_0": _chunk_run(text, 48)}
+
+
+## Le contexte de la coordonnée + delta (`text`, déjà calculée), d'après celui de la coordonnée :
+## sans débordement de t₀, les tranches au-dessus ne changent pas (aucune relecture) ; sinon, ou
+## pour une petite coordonnée, print_context.
+static func print_context_step(context: Dictionary, delta: int, text: String) -> Dictionary:
+	var print := print_at(context, delta)
+	if context.has("value") or b25_fits_int(text):
+		return print_context(text, print)
+	var t: int = int(context.tail) + delta * int(context.sign)
+	if t < 0 or t >= PRINT_CHUNK:
+		return print_context(text, print)
+	return {"sign": print[0], "h": [print[1], print[2]], "tail": t, "run_o": context.run_o, "run_0": context.run_0}
+
+
+## Tranches entières faites du seul chiffre `code` (« o » ou « 0 ») juste au-dessus de t₀.
+static func _chunk_run(text: String, code: int) -> int:
+	var top := text.length() - 8   # position (exclue) du haut de t₀
+	var start := 1 if text.begins_with("-") else 0
+	var run := 0
+	while run < 64 and top - 1 - run >= start and text.unicode_at(top - 1 - run) == code:
+		run += 1
+	if run == 64:
+		run = top - text.left(top).rstrip(char(code)).length()
+	@warning_ignore("integer_division")
+	return run / 8
+
+
+## L'empreinte de la coordonnée + delta (|delta| < 25^8), d'après le contexte de la coordonnée
+## (print_context) : t₀ change ; une retenue (ou un emprunt) passe aux tranches suivantes, dont les
+## r premières, toutes « oooooooo » (ou « 00000000 »), deviennent 0 (ou 25^8 − 1) et la suivante
+## gagne (ou perd) 1 : ΔH = Δt₀ ∓ (25^8 − 1)·Σ_{c=1..r} B^c ± B^(r+1).
+static func print_at(context: Dictionary, delta: int) -> PackedInt64Array:
+	if context.has("value"):
+		return _print_of_int(int(context.value) + delta)
+	if delta == 0:
+		return PackedInt64Array([context.sign, context.h[0], context.h[1]])
+	var step: int = delta * int(context.sign)   # sur la valeur absolue
+	var t: int = int(context.tail) + step
+	var result := PackedInt64Array([context.sign, 0, 0])
+	for j in 2:
+		var p: int = PRINT_P[j]
+		var change := 0
+		if t >= 0 and t < PRINT_CHUNK:
+			change = posmod(step, p)
+		elif t >= PRINT_CHUNK:
+			var r: int = context.run_o
+			change = posmod(step - PRINT_CHUNK, p)
+			change = (change + p - _mulmod(PRINT_CHUNK_MOD[j] - 1, _geometric(j, r), p) + _powmod(PRINT_B[j], r + 1, p)) % p
+		else:
+			var r: int = context.run_0
+			change = posmod(step + PRINT_CHUNK, p)
+			change = (change + _mulmod(PRINT_CHUNK_MOD[j] - 1, _geometric(j, r), p) + p - _powmod(PRINT_B[j], r + 1, p)) % p
+		result[j + 1] = (int(context.h[j]) + change) % p
+	return result
+
+
+## Σ_{c=1..r} B_j^c mod P_j.
+static func _geometric(j: int, r: int) -> int:
+	var p: int = PRINT_P[j]
+	var b: int = PRINT_B[j]
+	return _mulmod(_mulmod(b, (_powmod(b, r, p) + p - 1) % p, p), PRINT_INV_B1[j], p)
+
+
+static func _mulmod(a: int, b: int, p: int) -> int:
+	return (a % p) * (b % p) % p   # deux facteurs < 2^31 : produit < 2^62
+
+
+static func _powmod(b: int, e: int, p: int) -> int:
+	var result := 1
+	var base := b % p
+	while e > 0:
+		if e & 1:
+			result = result * base % p
+		base = base * base % p
+		e >>= 1
+	return result
 
 
 ## Clé d'une galerie, d'après les empreintes de son hexagone et de son niveau : elle ne dépend que
 ## des vraies coordonnées. Les titres des dos (BookSpine) et la graine des livres (Gallery) en
 ## sont tirés.
 static func gallery_key_of(hexagon_print: PackedInt64Array, level_print: PackedInt64Array) -> String:
-	return "%x.%x.%x.%x" % [hexagon_print[0], hexagon_print[1], level_print[0], level_print[1]]
+	return "%d.%x.%x|%d.%x.%x" % [hexagon_print[0], hexagon_print[1], hexagon_print[2], level_print[0], level_print[1], level_print[2]]
 
 
 ## Clé de la galerie (hexagone, niveau) : int ou chaînes base 25 de toute taille.

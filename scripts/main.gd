@@ -58,11 +58,14 @@ var origin_level_b25 := "0"
 ## voit n'en dépend : graine des livres et titres des dos se tirent de la clé de chaque galerie.
 var origin_hexagon: int
 var origin_level: int
-## Empreintes des vraies coordonnées de l'origine (BookText.b25_print) : elles suivent les pas
-## (print_add) et donnent la clé de chaque galerie (Gallery.place), celle qu'on obtiendrait en
-## relisant la coordonnée entière : même galerie, même aspect, quel que soit le chemin.
-var origin_hexagon_print := PackedInt64Array([0, 0])
-var origin_level_print := PackedInt64Array([0, 0])
+## Empreintes des vraies coordonnées de l'origine (BookText.b25_print) et leur contexte
+## (BookText.print_context) : elles suivent les pas (print_at) et donnent la clé de chaque galerie
+## (Gallery.place), celle qu'on obtiendrait en relisant la coordonnée entière : même galerie, même
+## aspect, quel que soit le chemin.
+var origin_hexagon_print := PackedInt64Array([1, 0, 0])
+var origin_level_print := PackedInt64Array([1, 0, 0])
+var _hexagon_context: Dictionary = {}
+var _level_context: Dictionary = {}
 ## Pas préparés d'avance, par axe (« hexagon », « level ») : pas (±1) → coordonnée voisine prête
 ## (String), ou calcul en cours sur un fil du moteur ({task, result}). Le pas en arrière est la
 ## coordonnée d'où l'on vient ; le pas en avant ne se prépare que lorsqu'une retenue doit traverser
@@ -97,8 +100,7 @@ func _ready() -> void:
 	origin_level = rng.randi() - (1 << 31)
 	origin_hexagon_b25 = BookTextScript.b25_from_int(origin_hexagon)
 	origin_level_b25 = BookTextScript.b25_from_int(origin_level)
-	origin_hexagon_print = BookTextScript.b25_print(origin_hexagon_b25)
-	origin_level_print = BookTextScript.b25_print(origin_level_b25)
+	_set_prints(BookTextScript.b25_print(origin_hexagon_b25), BookTextScript.b25_print(origin_level_b25))
 	_update_galleries()
 
 	player = PlayerScript.new()
@@ -248,8 +250,7 @@ func place_origin(hexagon: Variant, level: Variant) -> bool:
 	origin_level_b25 = l
 	origin_hexagon = _local_coordinate(h)
 	origin_level = _local_coordinate(l)
-	origin_hexagon_print = BookTextScript.b25_print(h)
-	origin_level_print = BookTextScript.b25_print(l)
+	_set_prints(BookTextScript.b25_print(h), BookTextScript.b25_print(l))
 	for axis: String in _prepared:
 		_drop_prepared(axis)
 		for step: int in [1, -1]:
@@ -274,7 +275,8 @@ static func _local_coordinate(coordinate: String) -> int:
 func _shift(step: int) -> void:
 	origin_hexagon += step
 	origin_hexagon_b25 = _stepped("hexagon", origin_hexagon_b25, step)
-	origin_hexagon_print = BookTextScript.print_add(origin_hexagon_print, step)
+	_hexagon_context = BookTextScript.print_context_step(_hexagon_context, step, origin_hexagon_b25)
+	origin_hexagon_print = _print_of(_hexagon_context)
 	player.position.z -= step * GalleryScript.PITCH
 	_update_galleries(Vector2i(step, 0))
 	hud.set_address(origin_hexagon_b25, origin_level_b25, Vector2i(step, 0))
@@ -284,7 +286,8 @@ func _shift(step: int) -> void:
 func _shift_level(step: int) -> void:
 	origin_level += step
 	origin_level_b25 = _stepped("level", origin_level_b25, step)
-	origin_level_print = BookTextScript.print_add(origin_level_print, step)
+	_level_context = BookTextScript.print_context_step(_level_context, step, origin_level_b25)
+	origin_level_print = _print_of(_level_context)
 	player.position.y -= step * GalleryScript.LEVEL_PITCH
 	_update_galleries(Vector2i(0, step))
 	hud.set_address(origin_hexagon_b25, origin_level_b25, Vector2i(0, step))
@@ -424,8 +427,21 @@ func _update_galleries(moved := Vector2i.ZERO, readdress_all := false) -> void:
 ## les chaînes de l'origine, partagées sans copie, le décalage, et la clé tirée des empreintes.
 func place_at(cell: Vector2i) -> Dictionary:
 	return GalleryScript.place_of(origin_hexagon_b25, cell.x, origin_level_b25, cell.y,
-		BookTextScript.gallery_key_of(BookTextScript.print_add(origin_hexagon_print, cell.x),
-			BookTextScript.print_add(origin_level_print, cell.y)))
+		BookTextScript.gallery_key_of(BookTextScript.print_at(_hexagon_context, cell.x),
+			BookTextScript.print_at(_level_context, cell.y)))
+
+
+## Empreintes de l'origine après un saut (les chaînes origin_*_b25 sont déjà à jour) et leur
+## contexte pour les galeries voisines ; un pas les fait suivre par BookText.print_context_step.
+func _set_prints(hexagon_print: PackedInt64Array, level_print: PackedInt64Array) -> void:
+	_hexagon_context = BookTextScript.print_context(origin_hexagon_b25, hexagon_print)
+	_level_context = BookTextScript.print_context(origin_level_b25, level_print)
+	origin_hexagon_print = hexagon_print
+	origin_level_print = level_print
+
+
+static func _print_of(context: Dictionary) -> PackedInt64Array:
+	return BookTextScript.print_at(context, 0)
 
 
 ## Part réelle de chaque vraie lampe, selon sa distance à l'œil (voir Gallery.real_weight).

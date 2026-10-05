@@ -37,7 +37,7 @@ func _check_titles() -> void:
 	_check(BookSpineScript.display_title(BookSpineScript.title(_key(7, -2), 1, 3, 12)) == BookTextScript.title_at(BookTextScript.address(7, -2, 1, 3, 12, 99)),
 		"BookSpine.title et BookText.title_at s'accordent (la page est ignorée)")
 	_check(_key(7, -2) == BookTextScript.gallery_key("7", "-2") and _key(INT_MAX, 3) == BookTextScript.gallery_key(BookTextScript.b25(INT_MAX), "3")
-			and _key(0, 1) != _key(1, 0) and _key(0, 0) != _key(BookTextScript.PRINT_M1, 0),
+			and _key(0, 1) != _key(1, 0) and _key(0, 0) != _key(152587890624, 0) and _key(1, 0) != _key(-1, 0),
 		"clé de galerie : la même pour un int et sa chaîne base 25, distincte d'une galerie voisine")
 	# Valeurs figées : le titre ne dépend que de SHA-256, identique sur toute machine.
 	print("    titres de référence : « %s », « %s »" % [BookSpineScript.title(_key(0, 0), 0, 0, 0), BookSpineScript.title(_key(1, 1), 1, 1, 1)])

@@ -30,7 +30,7 @@ direct au GPU et la souris reste libre ; le Godot Windows capture la souris et r
 | Suppr | effacer la quête en cours |
 
 Le jeu n'affiche aucune aide de commande (ni sous le lecteur, ni ailleurs) : le mode d'emploi est
-un livre de la Bibliothèque, l'entrée « Mode d'emploi de la Bibliothèque » du catalogue.
+un livre de la Bibliothèque, l'entrée « Mode d'emploi de Babel » du catalogue.
 
 La quête en cours se garde d'une session à l'autre (`user://quete_en_cours.json`), son
 effacement aussi ; au premier lancement (rien d'enregistré), c'est « La biblioteca de Babel ».
@@ -136,7 +136,9 @@ d'environ 917 000 chiffres décimaux chacun. Le détail (rang, région, mélange
 de `python/babel.py`.
 
 - **Texte.** Le texte cherché est normalisé : minuscules, accents retirés, œ → oe, æ → ae,
-  ß → ss, k et q → c, w → v, y → i, blancs → espace, autres caractères retirés ; puis complété par
+  ß → ss, k et q → c, w → v, y → i, blancs → espace ; apostrophes et traits d'union ou tirets →
+  espace, « : » et « ; » → « , », « ! » « ? » « … » → « . », guillemets retirés (les espaces
+  répétées ne sont pas fondues), autres caractères retirés ; puis complété par
   des espaces jusqu'à la fin du livre. La recherche rend l'unique livre qui contient ce texte suivi
   seulement d'espaces ; un texte de plusieurs pages occupe les pages 0, 1, 2 … du même livre. Au-delà
   de 1 312 000 symboles (un livre), la suite est ignorée et la réponse le signale.

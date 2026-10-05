@@ -38,6 +38,18 @@ const ACCENTS := {
 	"w": "ŵẁẃẅ", "y": "ýÿŷỳỹỷ", "z": "źżžẓ",
 }
 const LIGATURES := {"œ": "oe", "æ": "ae", "ß": "ss", "k": "c", "q": "c", "w": "v", "y": "i"}
+## Les blancs de Python (str.isspace) : tous deviennent une espace.
+const WHITESPACE := ["\t", "\n", "\u000b", "\u000c", "\r", "\u001c", "\u001d", "\u001e", "\u001f", "\u0085", "\u00a0",
+	"\u1680", "\u2000", "\u2001", "\u2002", "\u2003", "\u2004", "\u2005", "\u2006", "\u2007", "\u2008", "\u2009",
+	"\u200a", "\u2028", "\u2029", "\u202f", "\u205f", "\u3000"]
+## Ponctuation ramenée à l'alphabet, comme babel.py (_PUNCTUATION) : apostrophes et traits d'union
+## → espace, « : » « ; » → « , », « ! » « ? » « … » → « . » ; les guillemets sont retirés.
+const PUNCTUATION := {
+	"'": " ", "’": " ", "ʼ": " ", "‘": " ",
+	"-": " ", "‐": " ", "‑": " ", "–": " ", "—": " ",
+	":": ",", ";": ",",
+	"!": ".", "?": ".", "…": ".",
+}
 
 ## Le mot en cours, normalisé.
 var word := ""
@@ -189,8 +201,8 @@ static func normalize(text: String) -> String:
 	var out := ""
 	for c in text.to_lower():
 		var base: String = _base.get(c, c)
-		var mapped: String = LIGATURES.get(base, base)
-		if mapped in ["\t", "\n", "\r", "\u00a0", "\u202f"]:
+		var mapped: String = LIGATURES.get(base, PUNCTUATION.get(base, base))
+		if mapped in WHITESPACE:
 			mapped = " "
 		for s in mapped:
 			if ALPHABET.contains(s):

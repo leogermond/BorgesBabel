@@ -429,10 +429,15 @@ def test_search_of_a_book_shows_that_book():
 
 
 @pytest.mark.parametrize("raw,expected", [
-    ("Été À L'ÎLE", "ete a lile"),
+    ("Été À L'ÎLE", "ete a l ile"),
     ("kiwi quay yoyo", "civi cuai ioio"),
     ("cœur, æther. Straße", "coeur, aether. strasse"),
-    ("ligne 1\nligne\t2 !?;:", "ligne  ligne  "),
+    ("ligne 1\nligne\t2", "ligne  ligne "),
+    ("l'espace d'or, ouvrez-le ; lui-même", "l espace d or, ouvrez le , lui meme"),
+    ("l’aube ʼ‘ — un–deux ‐ trois‑", "l aube      un deux   trois "),
+    ("image : le jeu ; fin", "image , le jeu , fin"),
+    ("quoi ? non ! voir… ok...", "cuoi . non . voir. oc..."),
+    ("« cité » \"ici\" “là” ‹x› 12 %", " cite  ici la x  "),
     ("ñandú çà", "nandu ca"),
 ])
 def test_normalize(raw, expected):

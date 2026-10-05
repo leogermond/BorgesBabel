@@ -95,8 +95,11 @@ Image cherchée (image_grid, fit_samples, quantize_samples)
 Normalisation d'un texte cherché (normalize)
     minuscules ; accents retirés (décomposition Unicode NFD, marques combinantes ôtées) ;
     œ → oe, æ → ae, ß → ss ; k → c, q → c, w → v, y → i ; tout blanc (espace, tabulation,
-    retour à la ligne) → espace ; les autres caractères (chiffres, apostrophes, ! ? ; : …)
-    sont retirés. Au-delà de M = 1 312 000 symboles, la suite est ignorée.
+    retour à la ligne) → espace ; ponctuation : apostrophes (' ’ ʼ ‘) et traits d'union ou
+    tirets (- ‐ ‑ – —) → espace, « : » et « ; » → « , », « ! » « ? » « … » → « . » (« … » donne
+    un seul « . »), guillemets et apostrophes doubles (« » " “ ” ‹ ›) retirés ; les autres
+    caractères (chiffres, symboles…) sont retirés. Les espaces répétées ne sont pas fondues : la
+    recherche reste exacte. Au-delà de M = 1 312 000 symboles, la suite est ignorée.
 Remplissage (pad) : le texte normalisé est complété par des espaces jusqu'à M symboles.
 
 Coordonnées sur le fil : base 25 signée
@@ -1022,6 +1025,13 @@ def page_lines(address: Address, page: int) -> list[str]:
 # --- Texte --------------------------------------------------------------------------------
 
 _LIGATURES = {"œ": "oe", "æ": "ae", "ß": "ss", "k": "c", "q": "c", "w": "v", "y": "i"}
+## Ponctuation ramenée à l'alphabet (les guillemets « » " “ ” ‹ › n'y sont pas : retirés).
+_PUNCTUATION = {
+    "'": " ", "’": " ", "ʼ": " ", "‘": " ",
+    "-": " ", "‐": " ", "‑": " ", "–": " ", "—": " ",
+    ":": ",", ";": ",",
+    "!": ".", "?": ".", "…": ".",
+}
 
 
 def normalize(text: str) -> str:
@@ -1035,7 +1045,7 @@ def normalize_all(text: str) -> str:
     for char in unicodedata.normalize("NFD", text.lower()):
         if unicodedata.combining(char):
             continue
-        char = _LIGATURES.get(char, char)
+        char = _LIGATURES.get(char) or _PUNCTUATION.get(char, char)
         if char.isspace():
             out.append(" ")
         elif all(c in ALPHABET for c in char):

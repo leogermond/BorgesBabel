@@ -73,6 +73,7 @@ func _initialize() -> void:
 	QuestScript.user_dir = USER_TEST_DIR
 	_clear_user_dir()
 	_test_arithmetic()
+	_test_normalize_crosscheck()
 	_test_guidance()
 	_test_catalogue()
 	_test_pins()
@@ -87,6 +88,73 @@ func _initialize() -> void:
 	print("test_quest : %s" % ("OK" if _failures == 0 else "%d échec(s)" % _failures))
 	BookTextScript.shutdown()
 	quit(1 if _failures else 0)
+
+
+# --- Normalisation : le même texte, normalisé par le carnet (GDScript) et par babel.py -----------
+
+const NORMALIZE_CASES_PATH := "user://test_quete_normalize.json"
+const NORMALIZE_SCRIPT_PATH := "user://test_quete_normalize.py"
+const NORMALIZE_CHECK := """
+import json, sys
+sys.path.insert(0, sys.argv[2])
+import babel
+with open(sys.argv[1], encoding="ascii") as f:
+    texts = [bytes.fromhex(line.strip()).decode("utf-8") for line in f if line.strip()]
+print(json.dumps([babel.normalize_all(t) for t in texts]))
+"""
+
+
+func _test_normalize_crosscheck() -> void:
+	# Cas écrits : apostrophes et traits d'union → espace, « : » « ; » → « , », « ! » « ? » « … » → « . »,
+	# guillemets retirés, espaces répétées gardées.
+	var written := {
+		"l'espace d'or, ouvrez-le ; lui-même": "l espace d or, ouvrez le , lui meme",
+		"l’aube ʼ‘ — un–deux ‐ trois‑": "l aube      un deux   trois ",
+		"image : le jeu ; fin": "image , le jeu , fin",
+		"quoi ? non ! voir… ok...": "cuoi . non . voir. oc...",
+		"« cité » \"ici\" “là” ‹x› 12 %": " cite  ici la x  ",
+		"Été À L'ÎLE, kiwi quay yoyo, cœur æther Straße": "ete a l ile, civi cuai ioio, coeur aether strasse",
+	}
+	var cases := []
+	for text: String in written:
+		_check(CarnetScript.normalize(text) == written[text], "normalisation du carnet : « %s »" % text.c_escape())
+		cases.append(text)
+	# Chaque caractère de U+0020 à U+00FF et de la ponctuation générale, seul et entre deux lettres.
+	var sweep := ""
+	for code in range(0x20, 0x100):
+		sweep += String.chr(code)
+	for code in range(0x2010, 0x2027):
+		sweep += String.chr(code)
+	for code in [0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x1c, 0x1d, 0x1e, 0x1f, 0x1680, 0x2000, 0x2005, 0x200a, 0x2028, 0x2029, 0x205f, 0x3000]:
+		sweep += String.chr(code)
+	for c in sweep:
+		cases.append(c)
+		cases.append("a%sb" % c)
+	cases.append(sweep)
+	var file := FileAccess.open(NORMALIZE_CASES_PATH, FileAccess.WRITE)
+	for text: String in cases:
+		file.store_line(text.to_utf8_buffer().hex_encode())   # un texte par ligne, en hexadécimal
+	file.close()
+	file = FileAccess.open(NORMALIZE_SCRIPT_PATH, FileAccess.WRITE)
+	file.store_string(NORMALIZE_CHECK)
+	file.close()
+	var command: Array = BookTextScript._interpreters()[0]
+	var args := PackedStringArray(command.slice(1))
+	args.append_array([ProjectSettings.globalize_path(NORMALIZE_SCRIPT_PATH), ProjectSettings.globalize_path(NORMALIZE_CASES_PATH),
+		ProjectSettings.globalize_path("res://python")])
+	var output := []
+	var code := OS.execute(command[0], args, output, true)
+	var want: Variant = JSON.parse_string(output[0] if code == 0 and not output.is_empty() else "")
+	_check(want is Array and want.size() == cases.size(), "Python normalise les mêmes %d textes (code %d)" % [cases.size(), code])
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(NORMALIZE_CASES_PATH))
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(NORMALIZE_SCRIPT_PATH))
+	if not want is Array or want.size() != cases.size():
+		return
+	var different := []
+	for i in cases.size():
+		if CarnetScript.normalize(cases[i]) != want[i]:
+			different.append(cases[i].c_escape())
+	_check(different.is_empty(), "le carnet (GDScript) et babel.py normalisent à l'identique (écarts : %s)" % [different.slice(0, 5)])
 
 
 # --- Arithmétique -------------------------------------------------------------------------------
@@ -659,10 +727,10 @@ func _test_hud() -> void:
 	_type(hud, "babel ")
 	_check(_jumps.is_empty() and carnet.word.is_empty() and carnet.is_open(), "« babel␠ » n'émet rien, efface le mot, le carnet reste ouvert")
 	_type(hud, "Kyw,Q1é!Æ")
-	_check(carnet.word == "civ,ceae", "symboles normalisés, autres ignorés (lu : %s)" % carnet.word)
+	_check(carnet.word == "civ,ce.ae", "symboles normalisés, autres ignorés (lu : %s)" % carnet.word)
 	_type(hud, "\b\b\b")
-	_check(carnet.word == "civ,c", "retour arrière efface (lu : %s)" % carnet.word)
-	_type(hud, "\b\b\b\b\bZAHIR\n")
+	_check(carnet.word == "civ,ce", "retour arrière efface (lu : %s)" % carnet.word)
+	_type(hud, "\b\b\b\b\b\bZAHIR\n")
 	_check(_jumps == ["puits"] and not carnet.is_open(), "« ZAHIR » puis Entrée émet « puits »")
 	_jumps.clear()
 	_key(hud, CarnetScript.CARNET_KEY, true)

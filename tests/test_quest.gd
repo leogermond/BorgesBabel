@@ -291,7 +291,7 @@ func _test_catalogue() -> void:
 		"catalogue sous forme compacte : %.2f Mo (≤ 2 Mo), lu en %.0f ms (≤ 0,5 s), l'ancien JSON retiré" % [size / 1.0e6, load_ms])
 	var titles := entries.map(func(e: Dictionary) -> String: return e.title)
 	_check(titles == ["La biblioteca de Babel", "El Aleph", "El Zahir", "Tlön, Uqbar, Orbis Tertius", "El Golem",
-		"Mode d'emploi de la Bibliothèque", "Sur la vertu", "Sur l'humour"], "catalogue : 8 entrées dans l'ordre (lu : %s)" % [titles])
+		"Mode d'emploi de Babel", "Sur la vertu", "Sur l'humour"], "catalogue : 8 entrées dans l'ordre (lu : %s)" % [titles])
 	var raw: Dictionary = QuestScript._read_document(QuestScript.CATALOGUE_PATH)
 	_check(int(raw.version) == QuestScript.CATALOGUE_VERSION and raw.keys().size() == 5, "catalogue version %d : entries, stolen_books, destinations" % QuestScript.CATALOGUE_VERSION)
 	var extra := []
@@ -309,8 +309,8 @@ func _test_catalogue() -> void:
 	_check(borges.size() == 5 and borges.all(func(e: Dictionary) -> bool: return e.protected and e.page_count >= 2 and e.pages.size() == e.page_count),
 		"5 livres protégés de Borges : la citation et la loi en page 1, le texte français ensuite (pages : %s)" % [borges.map(func(e: Dictionary) -> int: return e.page_count)])
 	var claude := entries.filter(func(e: Dictionary) -> bool: return e.author == "Claude")
-	_check(claude.size() == 3 and claude.all(func(e: Dictionary) -> bool: return e.licence == "texte original écrit pour le jeu" and e.pages.size() == 1),
-		"3 textes de Claude, un livre d'une page chacun, « texte original écrit pour le jeu »")
+	_check(claude.size() == 3 and claude.all(func(e: Dictionary) -> bool: return e.licence == "texte original écrit pour le jeu" and e.page_count >= 1 and e.pages.size() == e.page_count),
+		"3 textes de Claude, un livre chacun (pages : %s), « texte original écrit pour le jeu »" % [claude.map(func(e: Dictionary) -> int: return e.page_count)])
 	var books := {}
 	for entry: Dictionary in entries:
 		_check(not entry.author.strip_edges().is_empty() and not entry.context.strip_edges().is_empty(), "%s : auteur et contexte présents" % entry.title)
@@ -355,9 +355,103 @@ func _test_catalogue() -> void:
 	_check(quest != null and quest.pages == range(entries[0].page_count) and quest.book == entries[0].address and quest.author == "Jorge Luis Borges",
 		"quête d'une entrée du catalogue : son livre, ses pages")
 	var tool := FileAccess.get_file_as_string("res://tools/make_catalogue.py")
-	_check(tool.contains("KEY_NAMES = {\"QUETE\": \"%s\", \"EFFACER\": \"%s\"}" % [HudScript.QUEST_KEY_NAME, HudScript.CLEAR_KEY_NAME]),
-		"le mode d'emploi reçoit les noms des touches du Hud (%s, %s)" % [HudScript.QUEST_KEY_NAME, HudScript.CLEAR_KEY_NAME])
+	_check(not tool.contains("KEY_NAMES") and not tool.contains("fill_key_names") and tool.contains("FORBIDDEN_LETTERS = \"qkwy\"")
+		and tool.contains("NO_FORBIDDEN_LETTERS = (\"mode_d_emploi\",)"),
+		"l'outil ne remplace plus de marques : le mode d'emploi est vérifié sans q, k, w, y")
+	_test_catalogue_layout(entries)
 	_check(QuestScript.load_catalogue("res://absent.json").is_empty(), "catalogue absent → aucune entrée")
+
+
+# --- Mise en page des textes du catalogue ---------------------------------------------------------
+
+const SOURCES_PATH := "res://tools/.travail/sources.txt"
+## Source de chaque entrée (clés de tools/make_catalogue.py), dans l'ordre du catalogue.
+const SOURCE_KEYS := ["borges_babel_fr", "borges_aleph_fr", "borges_zahir_fr", "borges_tlon_fr", "borges_golem_fr",
+	"mode_d_emploi", "sur_la_vertu", "sur_l_humour"]
+
+
+## Les lignes de 80 symboles du texte d'une entrée (pages relues au service) : à partir de la page 2
+## pour Borges (la page 1 est la citation et la loi), de la page 1 sinon.
+func _text_lines(entry: Dictionary) -> Array:
+	var lines := []
+	for page in range(1 if entry.author == "Jorge Luis Borges" else 0, entry.page_count):
+		lines.append_array(BookTextScript.page_lines_at(entry.address, page))
+	return lines
+
+
+## Les mots lus ligne à ligne, un à un (une ligne se lit entre ses espaces).
+func _read_words(lines: Array) -> Array:
+	var out := []
+	for line: String in lines:
+		for word in line.split(" ", false):
+			out.append(word)
+	return out
+
+
+## Rang du premier mot lu qui n'est pas celui de la source (un mot coupé d'une ligne à l'autre
+## en donne deux morceaux) ; -1 si les mots lus sont exactement ceux de la source.
+func _first_mismatch(read: Array, expected: Array) -> int:
+	for i in mini(read.size(), expected.size()):
+		if read[i] != expected[i]:
+			return i
+	return -1 if read.size() == expected.size() else mini(read.size(), expected.size())
+
+
+func _test_catalogue_layout(entries: Array) -> void:
+	# Contre-épreuve : un mot coupé d'une ligne à l'autre est bien vu.
+	var expected_demo := ["abc", "def", "ghi", "jkl"]
+	_check(_first_mismatch(_read_words(["abc def".rpad(80), "ghi jkl".rpad(80)]), expected_demo) == -1
+		and _first_mismatch(_read_words(["abc de".rpad(80), "f ghi jkl".rpad(80)]), expected_demo) == 1,
+		"contre-épreuve : un mot coupé en fin de ligne est détecté")
+	var sources := {}
+	if FileAccess.file_exists(SOURCES_PATH):
+		for row in FileAccess.get_file_as_string(SOURCES_PATH).split("
+"):
+			if not row.strip_edges().is_empty() and not row.begins_with("#"):
+				sources[row.get_slice(" ", 0)] = row.substr(row.find(" ") + 1).strip_edges()
+	for index in entries.size():
+		var entry: Dictionary = entries[index]
+		var lines := _text_lines(entry)
+		var label: String = entry.title
+		var shapes_ok := true
+		for number in lines.size():
+			var line: String = lines[number]
+			shapes_ok = shapes_ok and line.length() == 80
+			if number % 40 == 0 and line.strip_edges().is_empty():
+				shapes_ok = false
+		_check(shapes_ok, "%s : lignes de 80 symboles, aucune page ne commence par une ligne blanche" % label)
+		var first: String = lines[0]
+		var left := first.length() - first.lstrip(" ").length()
+		var right := first.length() - first.rstrip(" ").length()
+		_check(not first.strip_edges().is_empty() and left >= 1 and absi(left - right) <= 1,
+			"%s : la première ligne du texte (son titre) est centrée" % label)
+		_check(_has_blank_between_paragraphs(lines), "%s : des lignes blanches séparent les paragraphes" % label)
+		var key: String = SOURCE_KEYS[index]
+		if not sources.has(key) or not FileAccess.file_exists(sources[key]):
+			print("    (source %s absente : mots coupés non vérifiés contre la source)" % key)
+			continue
+		var expected := []
+		var text := FileAccess.get_file_as_string(sources[key]).replace("
+", " ").replace("	", " ")
+		for token in text.split(" ", false):
+			for word in CarnetScript.normalize(token).split(" ", false):
+				expected.append(word)
+		var mismatch := _first_mismatch(_read_words(lines), expected)
+		_check(mismatch == -1, "%s : aucune ligne ne commence ni ne finit par un mot coupé (%d mots de la source, écart au rang %d)" % [label, expected.size(), mismatch])
+
+
+## Au moins une ligne blanche entre deux lignes de texte (les paragraphes ne sont pas collés).
+func _has_blank_between_paragraphs(lines: Array) -> bool:
+	var seen_text := false
+	var seen_blank_after := false
+	for line: String in lines:
+		if line.strip_edges().is_empty():
+			seen_blank_after = seen_blank_after or seen_text
+		elif seen_blank_after:
+			return true
+		else:
+			seen_text = true
+	return false
 
 
 # --- Épingles -----------------------------------------------------------------------------------
@@ -504,7 +598,7 @@ func _test_hud() -> void:
 
 	# Adresse à 917 000 chiffres : forme « display » du service (signe, 4 premiers…4 derniers, nombre
 	# de chiffres) ; un pas avance les derniers chiffres et le guidage sans relire la coordonnée.
-	var huge: String = QuestScript.load_catalogue()[0].address.hexagon
+	var huge: String = QuestScript.load_catalogue()[0].address.hexagon.trim_prefix("-")
 	var deep := "-" + huge
 	var t_jump := Time.get_ticks_usec()
 	hud.set_address(huge, deep)
@@ -629,9 +723,9 @@ func _test_hud() -> void:
 	_check(hud.pins.size() == 9, "désépingler depuis le Hud")
 	hud.restore_pins()
 	_check(hud.pins.size() == 10 and hud.pins[9].kind == QuestScript.KIND_REGISTER and hud.pins[0].entry == "borges-biblioteca-de-babel", "rétablir depuis le Hud")
-	_check(hud.start_pin(hud.pins[5]) and hud.quest.title == "Mode d'emploi de la Bibliothèque", "un clic sur une épingle démarre sa quête")
+	_check(hud.start_pin(hud.pins[5]) and hud.quest.title == "Mode d'emploi de Babel", "un clic sur une épingle démarre sa quête")
 
-	_check(not hud.start_pin(hud.pins[9]) and hud.quest.title == "Mode d'emploi de la Bibliothèque", "le registre lui-même ne démarre rien")
+	_check(not hud.start_pin(hud.pins[9]) and hud.quest.title == "Mode d'emploi de Babel", "le registre lui-même ne démarre rien")
 	for item: Dictionary in hud.register_items():
 		hud.start_register_item(item)
 		var t := hud.quest.address()

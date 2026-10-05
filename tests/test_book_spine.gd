@@ -24,6 +24,8 @@ func _initialize() -> void:
 	_check_layout()
 	_check_shader()
 	_check_gallery_bytes()
+	_check_flag_retry()
+	BookTextScript.shutdown()
 	print("test_book_spine : %s" % ("OK" if _failures == 0 else "%d échec(s)" % _failures))
 	quit(1 if _failures else 0)
 
@@ -300,6 +302,50 @@ func _check_gallery_bytes() -> void:
 	var task := WorkerThreadPool.add_task(func() -> void: out["bytes"] = BookSpineScript.gallery_title_bytes(_key(INT_MAX, -3)))
 	WorkerThreadPool.wait_for_task_completion(task)
 	_check(out.get("bytes") == bytes, "calcul identique sur un fil de WorkerThreadPool")
+
+
+## Genres des livres manquants (service absent) : les titres se posent sans filets, puis, le
+## service revenu, les genres se redemandent et complètent la texture déjà posée.
+func _check_flag_retry() -> void:
+	var saved_retry := GalleryScript.flag_retry_ms
+	GalleryScript.flag_retry_ms = 200
+	print("  (erreurs attendues ci-dessous : interpréteur volontairement introuvable)")
+	ProjectSettings.set_setting(BookTextScript.PYTHON_SETTING, "/chemin/introuvable/python3")
+	BookTextScript.restart()
+	var gallery := GalleryScript.create(17, -3, GalleryScript.Detail.LIT)
+	_pump_until(func() -> bool: return gallery.titles_ready(), 10000)
+	var key: String = gallery.place.key
+	var bytes := gallery.titles_texture().get_image().get_data() if gallery.titles_ready() else PackedByteArray()
+	var flagged := 0
+	for i in 640:
+		flagged += int(BookSpineScript.decode_image_flag(bytes, i))
+	_check(gallery.titles_ready() and flagged == 0 and GalleryScript.flags_pending().has(key),
+		"service absent : titres posés sans filets, genres à redemander")
+	ProjectSettings.set_setting(BookTextScript.PYTHON_SETTING, "")
+	BookTextScript.restart()
+	_pump_until(func() -> bool: return GalleryScript.flags_pending().is_empty(), 20000)
+	var flags := BookTextScript.gallery_image_books(17, -3)
+	bytes = gallery.titles_texture().get_image().get_data()
+	var wrong := 0
+	flagged = 0
+	for i in 640:
+		var flag := BookSpineScript.decode_image_flag(bytes, i)
+		flagged += int(flag)
+		if flag != (i < flags.size() and bool(flags[i])):
+			wrong += 1
+	_check(GalleryScript.flags_pending().is_empty() and flags.size() == 640 and flagged > 0 and wrong == 0,
+		"service revenu : les genres redemandés complètent la texture posée (%d livres d'images, écarts : %d)" % [flagged, wrong])
+	_check(BookSpineScript.decode_title(bytes, 77) == BookSpineScript.title(key, 0, 2, 13), "les titres restent")
+	GalleryScript.flag_retry_ms = saved_retry
+	gallery.free()
+	GalleryScript.release_pool()
+
+
+func _pump_until(done: Callable, limit_msec: int) -> void:
+	var t0 := Time.get_ticks_msec()
+	while not done.call() and Time.get_ticks_msec() - t0 < limit_msec:
+		GalleryScript.pump_titles()
+		OS.delay_msec(10)
 
 
 func _key(hexagon: Variant, level: Variant) -> String:

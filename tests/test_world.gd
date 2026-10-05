@@ -6,6 +6,7 @@ extends SceneTree
 const GalleryScript := preload("res://scripts/gallery.gd")
 const BookTextScript := preload("res://scripts/book_text.gd")
 const QuestScript := preload("res://scripts/quest.gd")
+const BookSpineScript := preload("res://scripts/book_spine.gd")
 ## Budget d'un pas (vestibule ou niveau), celui de test_depth : moins d'une demi-image à 60 i/s.
 const SHIFT_BUDGET_USEC := 8000
 # 17 galeries sur 3 niveaux le long du vestibule, 6 niveaux du puits en galeries entières,
@@ -88,6 +89,7 @@ func _initialize() -> void:
 		"la balustrade arrête le bibliothécaire (z = %.2f)" % player.position.z)
 
 	await _test_far_walk(main, player)
+	_test_same_gallery(main)
 
 	print("test_world : %s" % ("OK" if _failures == 0 else "%d échec(s)" % _failures))
 	BookTextScript.shutdown()
@@ -147,6 +149,65 @@ func _test_far_walk(main: Node3D, player: CharacterBody3D) -> void:
 	main.reader.turn(1)
 	_check(main.reader._text.text.replace("\n", "").sha256_text() == entry.pages[1].sha256, "page 2 : le texte continue")
 	main.reader.close()
+
+
+## Une galerie a le même aspect quel que soit le chemin qui y mène : atteinte à pied (pas de
+## vestibule et de niveau) ou d'un saut (place_origin), ses livres ont la même graine (hauteurs,
+## cuirs) et les mêmes titres — de part et d'autre de 2^62, à 917 000 chiffres, et à travers une
+## retenue sur toute la coordonnée.
+func _test_same_gallery(main: Node3D) -> void:
+	var far: Dictionary = QuestScript.load_catalogue()[0].address
+	var limit := BookTextScript.b25_from_int(1 << 62)
+	var carry := "1" + "o".repeat(655998)       # +1 : « 2000… », retenue sur 655 998 chiffres
+	var routes := [
+		["2^62", BookTextScript.b25_add_small(limit, -2), BookTextScript.b25_add_small("-" + limit, 2), Vector2i(4, -3)],
+		["917 000 chiffres", far.hexagon, far.level, Vector2i(3, 2)],
+		["retenue", carry, BookTextScript.b25_neg(carry), Vector2i(1, -1)],
+	]
+	for route: Array in routes:
+		var label: String = route[0]
+		var moves: Vector2i = route[3]
+		main.place_origin(route[1], route[2])
+		for _i in absi(moves.x):
+			main._shift(signi(moves.x))
+		for _i in absi(moves.y):
+			main._shift_level(signi(moves.y))
+		var walked := _looks(main)
+		var h := BookTextScript.b25_add_small(route[1], moves.x)
+		var l := BookTextScript.b25_add_small(route[2], moves.y)
+		_check(main.origin_hexagon_b25 == h and main.origin_level_b25 == l, "%s : la marche arrive à la galerie visée" % label)
+		main.place_origin(h, l)
+		var jumped := _looks(main)
+		var same := 0
+		for cell: Vector2i in walked:
+			if walked[cell] == jumped.get(cell):
+				same += 1
+		_check(same == walked.size() and walked.size() == 7,
+			"%s : %d galeries sur %d identiques à pied et d'un saut (clé, graine du nuanceur, hauteurs, cuirs, titres)" % [label, same, walked.size()])
+		var origin: Gallery = main._galleries[Vector2i.ZERO]
+		origin.load_titles_now()
+		var bytes := origin.titles_texture().get_image().get_data()
+		var book: Dictionary = main.target_address({"hexagon": origin.hexagon, "level": origin.level, "wall": 2, "shelf": 1, "book": 9})
+		_check(BookSpineScript.display_title(BookSpineScript.decode_title(bytes, (2 * 5 + 1) * 32 + 9)) == BookTextScript.title_at(book),
+			"%s : le titre du dos est celui du lecteur (BookText.title_at de la vraie adresse)" % label)
+	main.place_origin(0, 0)
+
+
+## Aspect des galeries proches de l'origine : case → [clé, graine du nuanceur, hauteurs, cuirs, titres].
+func _looks(main: Node3D) -> Dictionary:
+	var looks := {}
+	for cell: Vector2i in [Vector2i.ZERO, Vector2i(1, 0), Vector2i(-1, 0), Vector2i(2, 0), Vector2i(0, 1), Vector2i(0, -1), Vector2i(1, 1)]:
+		var gallery: Gallery = main._galleries[cell]
+		var material: ShaderMaterial = gallery.get_node("Books").material_override
+		var seed: int = gallery.book_seed()
+		var colors := []
+		for i in 640:
+			colors.append(GalleryScript.book_color(seed, i))
+		var titles := []
+		for book in 640:
+			titles.append(BookSpineScript.title(gallery.place.key, book / 160, (book / 32) % 5, book % 32))
+		looks[cell] = [gallery.place.key, material.get_shader_parameter("seed"), gallery.book_heights(), colors, titles]
+	return looks
 
 
 ## Pas de vestibule et de niveau, aller et retour : {hall, level : pires temps, median : médiane}, en µs.

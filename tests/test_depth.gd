@@ -18,6 +18,8 @@ const BookTextScript := preload("res://scripts/book_text.gd")
 const AmbientSpeakerScript := preload("res://scripts/ambient_speaker.gd")
 const TITLE_SAMPLES := 24          # titres relus par galerie LIT ou FULL
 const SETTLE_LIMIT_MSEC := 60000   # attente au plus des titres préparés
+const PUMP_BUDGET_USEC := 2000     # travail des titres sur le fil principal, par image
+const PUMP_FRAMES := 40            # images par vestibule dans la marche de _check_pump
 
 var _failures := 0
 
@@ -53,6 +55,7 @@ func _initialize() -> void:
 			await _steps(1)
 	_report_times("pas de vestibule", times)
 	_check(main.origin_hexagon == origin_hexagon, "retour à l'hexagone de départ après %d pas" % (2 * CROSSINGS))
+	await _check_pump(main)
 	_check_layout(main, "après %d pas de vestibule" % (2 * CROSSINGS))
 
 	# Changements de niveau : le bibliothécaire monté ou descendu d'un niveau d'un coup.
@@ -338,6 +341,29 @@ func _check_continuity(main: Node, player: CharacterBody3D) -> void:
 		% [Gallery.TITLE_FADE_END, gold_jumps])
 	if shaded:
 		_check_real_lamps(main, player)
+
+
+## Coût des titres sur le fil principal en marchant : huit vestibules dans un sens puis dans
+## l'autre, PUMP_FRAMES images par vestibule (le temps d'une traversée à pied, à peu près) ; à
+## chaque image, le temps de Gallery.pump_titles (relevé des calculs et des genres des livres
+## arrivés, lancement des suivants). Le service d'arrière-plan et les fils du moteur font le
+## reste : aucune image ne doit y passer plus de PUMP_BUDGET_USEC.
+func _check_pump(main: Node) -> void:
+	await _titles_settled(main)
+	var samples: Array[int] = []
+	for step: int in [1, -1]:
+		for _i in 8:
+			main._shift(step)
+			for _f in PUMP_FRAMES:
+				await process_frame
+				samples.append(Gallery.last_pump_usec)
+	await _titles_settled(main)
+	samples.sort()
+	var p99: int = samples[int(samples.size() * 0.99)]
+	var worst: int = samples[-1]
+	print("  titres en marchant : %d images, pump_titles p99 %.3f ms, pire %.3f ms" % [samples.size(), p99 / 1000.0, worst / 1000.0])
+	_check(p99 <= PUMP_BUDGET_USEC and worst <= PUMP_BUDGET_USEC,
+		"titres et genres des livres hors du fil principal : pump_titles au plus %.0f ms par image (p99 %.3f ms, pire %.3f ms)" % [PUMP_BUDGET_USEC / 1000.0, p99 / 1000.0, worst / 1000.0])
 
 
 ## Attend que tous les titres soient calculés et posés, fondus d'arrivée compris.

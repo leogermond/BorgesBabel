@@ -580,7 +580,7 @@ func load_titles_now() -> void:
 static func prefetch_titles(origin_hexagon: int, origin_level: int, cells: Array) -> void:
 	var queue: Array = []
 	var queued := {}
-	_title_waiting = _title_waiting.filter(func(g: Object) -> bool:
+	_title_waiting = _title_waiting.filter(func(g: Variant) -> bool:
 		return is_instance_valid(g) and g.detail >= Detail.LIT and not g.titles_ready())
 	_title_waiting.sort_custom(func(a: Node3D, b: Node3D) -> bool:
 		return a.position.length_squared() < b.position.length_squared())
@@ -652,7 +652,7 @@ static func _store_titles(key: String, bytes: PackedByteArray) -> void:
 	while _title_cache.size() > TITLE_CACHE_SIZE:
 		_title_cache.erase(_title_cache.keys()[0])
 	var still: Array = []
-	for gallery: Object in _title_waiting:
+	for gallery: Variant in _title_waiting:   # une galerie libérée en attente : sautée
 		if not is_instance_valid(gallery) or gallery.detail < Detail.LIT or gallery.titles_ready():
 			continue
 		if _title_key(gallery.hexagon, gallery.level) == key:

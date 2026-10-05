@@ -111,7 +111,7 @@ static func has_speaker(cell: Vector2i) -> bool:
 
 ## Les haut-parleurs vivants (dans l'arbre), retirés ou non.
 static func speakers() -> Array:
-	return _speakers.filter(func(s: Object) -> bool: return is_instance_valid(s))
+	return _speakers.filter(func(s: Variant) -> bool: return is_instance_valid(s))
 
 
 ## Gain linéaire du modèle d'atténuation du moteur à la distance donnée (inverse de la distance, plafonné à max_db,

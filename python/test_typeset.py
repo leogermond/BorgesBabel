@@ -110,5 +110,25 @@ def test_no_dangling_elision_at_a_line_end():
 
 
 def test_fold_table_is_up_to_date():
+    """scripts/fold_table.gd est la copie de la table épinglée python/fold_data.py (toute version de Python)."""
     import make_fold_table
     make_fold_table.main(["--check"])
+
+
+def test_normalisation_reads_the_pinned_table_not_unicodedata():
+    """Même résultat pour tous les joueurs : babel.py n'importe pas unicodedata, il lit python/fold_data.py."""
+    source = (Path(__file__).resolve().parent / "babel.py").read_text(encoding="utf-8")
+    assert "unicodedata" not in source.replace("aucun unicodedata", "")
+    assert b.fold_char("\u00c9") == "e" and b.fold_char("\u01fd") == "\u00e6" and b.fold_char("\u0301") == ""
+    assert b.fold_char("A") == "a" and b.fold_char("\u0398") == "\u0398" and b.fold_char("\U0001d165") == ""
+    assert b.normalize_all("\u0898 \u00ab \u0301 a \u00bb ; \u00c9t\u00e9") == " a, ete"
+
+
+def test_pinned_table_matches_unicodedata():
+    """La table épinglée est ce que donne unicodedata : vérifié seulement sous la version d'Unicode épinglée."""
+    import unicodedata
+    import fold_data
+    import make_fold_table
+    if unicodedata.unidata_version != fold_data.UNICODE_VERSION:
+        pytest.skip(f"unicodedata {unicodedata.unidata_version}, table épinglée sur Unicode {fold_data.UNICODE_VERSION}")
+    make_fold_table.main(["--check-data"])

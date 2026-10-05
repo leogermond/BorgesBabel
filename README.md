@@ -357,8 +357,12 @@ fonctionnement, pour qui développe.
 - `scripts/reader.gd` : fenêtre de lecture.
 - `scripts/hud.gd` : adresse, réticule, livre visé, encart et panneau de quête, quête gardée.
 - `scripts/carnet.gd` : le carnet (invocations) et sa normalisation du texte, étape pour étape celle de `python/babel.py`.
-- `scripts/fold_table.gd` : table de pliage du carnet (minuscule, décomposition NFD, marques combinantes ôtées), **générée** par
-  `tools/make_fold_table.py` d'après `babel.fold_char` pour tous les points de code qui comptent (1 413 entrées, chargée en ~12 ms) ;
-  `python3 tools/make_fold_table.py --check` vérifie qu'elle est à jour, et test_quest compare les deux normalisations sur plus de 34 000
-  textes (toutes les marques combinantes, tous les plans).
+- `scripts/fold_table.gd` : table de pliage du carnet (minuscule, décomposition NFD, marques combinantes ôtées, et la liste des blancs),
+  copie de la table **épinglée** `python/fold_data.py` que lit aussi `python/babel.py` : la normalisation ne dépend d'aucune
+  version d'Unicode ni de Python (le pliage ne passe plus par `unicodedata` à l'exécution), donc tous les joueurs obtiennent la
+  même chose, et la recherche et le carnet s'accordent. 1 413 entrées (Unicode 14.0.0), 18 Ko, chargée par le jeu en ~12 ms.
+  `tools/make_fold_table.py` écrit le fichier GDScript d'après `fold_data.py` ; `--check` vérifie qu'il est à jour (toute version
+  de Python), `--check-data` que `fold_data.py` est ce que donne `unicodedata` (seulement sous la version épinglée), `--pin`
+  le récrit (pour changer de version d'Unicode, à dessein : les adresses des textes accentués changeraient). test_quest compare
+  les deux normalisations sur plus de 30 000 textes (toutes les marques combinantes, tous les plans).
 - `scripts/quest.gd` : quête, guidage, catalogue, épingles, fichiers du joueur.

@@ -28,15 +28,11 @@ const PAPER_BORDER := Color(0.45, 0.32, 0.2)
 const INK := Color(0.16, 0.11, 0.07)
 const CARET_PERIOD := 0.53
 const FADE_SECONDS := 0.45
-## Étape 1 de la normalisation : minuscule, décomposition NFD, marques combinantes ôtées. Table de
-## tous les points de code dont le pliage compte, générée de babel.fold_char (python/babel.py) par
-## tools/make_fold_table.py ; absent de la table, un caractère reste tel quel.
+## Étape 1 de la normalisation : minuscule, décomposition NFD, marques combinantes ôtées, et les blancs.
+## Table ÉPINGLÉE, la même que lit python/babel.py (python/fold_data.py), copiée par tools/make_fold_table.py
+## dans scripts/fold_table.gd ; absent de la table, un caractère reste tel quel.
 const FoldTable := preload("res://scripts/fold_table.gd")
 const LIGATURES := {"œ": "oe", "æ": "ae", "ß": "ss", "k": "c", "q": "c", "w": "v", "y": "i"}
-## Les blancs de Python (str.isspace) : tous deviennent une espace.
-const WHITESPACE := ["\t", "\n", "\u000b", "\u000c", "\r", "\u001c", "\u001d", "\u001e", "\u001f", "\u0085", "\u00a0",
-	"\u1680", "\u2000", "\u2001", "\u2002", "\u2003", "\u2004", "\u2005", "\u2006", "\u2007", "\u2008", "\u2009",
-	"\u200a", "\u2028", "\u2029", "\u202f", "\u205f", "\u3000"]
 ## Ponctuation ramenée à l'alphabet, comme babel.py (_PUNCTUATION) : apostrophes et traits d'union
 ## → espace, « : » « ; » → « , », « ! » « ? » « … » → « . » ; les guillemets sont retirés.
 ## Leur conversion efface les blancs qui précèdent (typographie française : « galerie : son »).
@@ -204,7 +200,7 @@ static func normalize(text: String) -> String:
 			folded = String.chr(code + 32)   # capitales ASCII ; le reste vient de la table
 		for base in folded:
 			var mapped: String = LIGATURES.get(base, PUNCTUATION.get(base, base))
-			var blank: bool = base == " " or base in WHITESPACE
+			var blank: bool = base in FoldTable.BLANKS
 			if blank and after_opening:
 				continue
 			after_opening = OPENING.contains(base)

@@ -1,7 +1,7 @@
 extends RefCounted
-## Table de pliage du carnet, générée par tools/make_fold_table.py d'après babel.fold_char
-## (python/babel.py) : ne pas éditer. Point de code → minuscule décomposée (NFD), marques
-## combinantes ôtées, pour tout point de code que ce pliage rend différent pour la normalisation.
+## Table de pliage du carnet, générée par tools/make_fold_table.py d'après python/fold_data.py (la table
+## épinglée que lit aussi python/babel.py) : ne pas éditer. Point de code → minuscule décomposée (NFD),
+## marques combinantes ôtées, pour tout point de code que ce pliage rend différent pour la normalisation.
 ## Absent : le caractère reste (les capitales ASCII passent en minuscules dans Carnet.normalize).
 
 const FOLD := {
@@ -183,3 +183,6 @@ const FOLD := {
 	0x1e8d1: "", 0x1e8d2: "", 0x1e8d3: "", 0x1e8d4: "", 0x1e8d5: "", 0x1e8d6: "", 0x1e944: "", 0x1e945: "",
 	0x1e946: "", 0x1e947: "", 0x1e948: "", 0x1e949: "", 0x1e94a: "",
 }
+
+## Les blancs de la normalisation (babel._BLANKS) : tous deviennent une espace.
+const BLANKS := ["\u0009", "\u000a", "\u000b", "\u000c", "\u000d", "\u001c", "\u001d", "\u001e", "\u001f", " ", "\u0085", "\u00a0", "\u1680", "\u2000", "\u2001", "\u2002", "\u2003", "\u2004", "\u2005", "\u2006", "\u2007", "\u2008", "\u2009", "\u200a", "\u2028", "\u2029", "\u202f", "\u205f", "\u3000"]

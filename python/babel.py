@@ -94,7 +94,9 @@ Image cherchée (image_grid, fit_samples, quantize_samples)
 
 Normalisation d'un texte cherché (normalize)
     minuscules ; accents retirés (décomposition Unicode NFD, marques combinantes ôtées : fold_char,
-    caractère par caractère, étape 1, dont le carnet du jeu lit la table) ;
+    caractère par caractère, étape 1) d'après la table ÉPINGLÉE de python/fold_data.py, que lit
+    aussi le carnet du jeu (scripts/fold_table.gd) : le résultat ne dépend d'aucune version d'Unicode
+    ni de Python installée ;
     œ → oe, æ → ae, ß → ss ; k → c, q → c, w → v, y → i ; tout blanc (espace, tabulation,
     retour à la ligne) → espace ; ponctuation : apostrophes (' ’ ʼ ‘) et traits d'union ou
     tirets (- ‐ ‑ – —) → espace, « : » et « ; » → « , », « ! » « ? » « … » → « . » (« … » donne
@@ -157,17 +159,17 @@ from __future__ import annotations
 import argparse
 import base64
 import decimal
-import functools
 import hashlib
 import json
 import math
 import struct
 import sys
-import unicodedata
 import zlib
 from collections import OrderedDict
 from dataclasses import dataclass
 from functools import lru_cache
+
+from fold_data import FOLD as _FOLD   # table de pliage épinglée (python/fold_data.py)
 
 # Les petites conversions int ↔ texte de plus de 4300 chiffres (pages, constantes) restent permises.
 if hasattr(sys, "set_int_max_str_digits"):
@@ -1043,12 +1045,21 @@ _PUNCTUATION = {
 }
 
 
-@functools.lru_cache(maxsize=None)
+## Les blancs de la normalisation (ceux de str.isspace) : tous deviennent une espace. Liste figée, comme
+## la table de pliage : aucune version d'Unicode n'y change rien (tools/make_fold_table.py --check-data).
+_BLANKS = frozenset("\t\n\x0b\x0c\r\x1c\x1d\x1e\x1f \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006"
+                    "\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000")
+
+
 def fold_char(char: str) -> str:
     """Un caractère passé en minuscules, décomposé (NFD), marques combinantes ôtées : « É » → « e »,
-    « ǽ » → « æ ». C'est la première étape de la normalisation ; le carnet du jeu (GDScript) en lit
-    la table, générée de cette fonction par tools/make_fold_table.py (scripts/fold_table.gd)."""
-    return "".join(c for c in unicodedata.normalize("NFD", char.lower()) if not unicodedata.combining(c))
+    « ǽ » → « æ », une marque → «  ». Première étape de la normalisation, lue dans la table épinglée
+    python/fold_data.py (aucun unicodedata à l'exécution) ; un caractère qu'elle ne cite pas reste tel
+    quel, sauf les capitales ASCII."""
+    folded = _FOLD.get(char)
+    if folded is not None:
+        return folded
+    return chr(ord(char) + 32) if "A" <= char <= "Z" else char
 
 
 def normalize(text: str) -> str:
@@ -1064,15 +1075,16 @@ def normalize_all(text: str) -> str:
     for source in text:
         for raw in fold_char(source):      # étape 1 : minuscule, décomposition, marques combinantes ôtées
             char = _LIGATURES.get(raw) or _PUNCTUATION.get(raw, raw)
-            if after_opening and raw.isspace():
+            blank = raw in _BLANKS
+            if after_opening and blank:
                 continue
             after_opening = raw in _OPENING
             if raw in _SPACE_BEFORE:
                 del out[len(out) - blanks:]
                 blanks = 0
-            if char.isspace():
+            if char in _BLANKS:
                 out.append(" ")
-                blanks = blanks + 1 if raw.isspace() else 0
+                blanks = blanks + 1 if blank else 0
             elif all(c in ALPHABET for c in char):
                 out.append(char)
                 blanks = 0

@@ -403,7 +403,8 @@ func _update_galleries(moved := Vector2i.ZERO, readdress_all := false) -> void:
 				gallery.readdress(origin_hexagon + cell.x, origin_level + cell.y, detail as GalleryScript.Detail, place_at(cell))
 			placed[cell] = gallery
 		else:
-			gallery.place = place_at(cell)   # même galerie, décrite depuis la nouvelle origine
+			# Même galerie, même clé : seule sa description passe aux chaînes de la nouvelle origine.
+			gallery.place = GalleryScript.place_of(origin_hexagon_b25, cell.x, origin_level_b25, cell.y, gallery.place.key)
 			if gallery.detail != detail:
 				gallery.set_detail(detail as GalleryScript.Detail)
 		gallery.position = Vector3(0.0, cell.y * GalleryScript.LEVEL_PITCH, cell.x * GalleryScript.PITCH)

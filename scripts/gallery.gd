@@ -134,7 +134,7 @@ const TITLE_FADE_BEGIN := 24.0
 const TITLE_FADE_END := 32.0
 const TITLE_APPEAR := 0.5            # s : fondu d'arrivée des titres calculés en retard
 const TITLE_CACHE_SIZE := 160        # galeries dont les titres restent en mémoire (7,5 Ko chacune)
-const TITLE_JOBS := 2                # galeries en cours au plus (titres sur les fils du moteur, genres en arrière-plan)
+const TITLE_JOBS := 1                # galerie en cours au plus (titres sur un fil du moteur, genres en arrière-plan) : un seul calcul à la fois gêne le moins les pas
 
 const LEATHER: Array[Color] = [
 	Color(0.42, 0.12, 0.08), Color(0.30, 0.18, 0.10), Color(0.16, 0.24, 0.14),

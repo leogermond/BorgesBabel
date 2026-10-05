@@ -169,6 +169,11 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from functools import lru_cache
 
+import os as _os
+
+# Le dossier du script, même si Python ignore le chemin du script (-P, -I, PYTHONSAFEPATH).
+if _os.path.dirname(_os.path.abspath(__file__)) not in sys.path:
+    sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 from fold_data import FOLD as _FOLD   # table de pliage épinglée (python/fold_data.py)
 
 # Les petites conversions int ↔ texte de plus de 4300 chiffres (pages, constantes) restent permises.

@@ -374,6 +374,8 @@ func _test_invocations(main: Node3D) -> void:
 	_type("tlon ")
 	var first_index := _index(aimed)
 	_check(main.carried_book == aimed and main.reader.visible, "« tlon␠ », carnet ouvert sur le lecteur : le livre lu est emporté")
+	_check(main._carried_key == BookTextScript.gallery_key(aimed.hexagon, aimed.level),
+		"la clé de la galerie du livre emporté, prise à la galerie visée, est celle de ses vraies coordonnées")
 	_check(QuestScript.load_carried(main.carried_path) == aimed, "le livre emporté est enregistré (%s)" % main.carried_path.get_file())
 	_check(gallery.missing_books() == PackedInt32Array([first_index]) and _missing_flags(gallery) == [first_index],
 		"un vide sur l'étagère : le livre emporté est marqué absent dans la texture de sa galerie (rang %d)" % first_index)

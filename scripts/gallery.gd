@@ -1151,6 +1151,8 @@ static func release_pool() -> void:
 	_title_waiting.clear()
 	_flag_retry.clear()
 	_shown.clear()
+	_missing = {}
+	_missing_checked = {}
 
 
 func _new_interior() -> Node:

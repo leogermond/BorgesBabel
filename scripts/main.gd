@@ -119,6 +119,7 @@ var last_travel_usec := 0
 var _traveling := false
 var _fade: ColorRect
 var _carried_key := ""                 # clé de la galerie du livre emporté
+var _reader_key := ""                  # clé de la galerie du livre ouvert, quand elle est connue
 var _stolen_keyed: Array = []          # livres volés du catalogue, chacun avec la clé de sa galerie
 var _missing_task := -1                # calcul de ces clés sur un fil du moteur (~0,5 s), ou −1
 var _missing_holder := {}
@@ -233,14 +234,16 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _open_book() -> void:
-	_open_address(_target_book)
+	_open_address(_target_book, 0, _target.gallery.place.key if not _target.is_empty() else "")
 
 
-## Ouvre le livre `book` (vraie adresse) dans le lecteur, à la page `page`.
-func _open_address(book: Dictionary, page := 0) -> void:
+## Ouvre le livre `book` (vraie adresse) dans le lecteur, à la page `page` ; `key`, la clé de sa
+## galerie quand on la connaît (livre visé, livre emporté) : « tlon » n'a pas à la recalculer.
+func _open_address(book: Dictionary, page := 0, key := "") -> void:
 	player.frozen = true
 	_release_mouse()
 	reader.open(book, page)
+	_reader_key = key
 
 
 func _close_book() -> void:
@@ -355,14 +358,17 @@ func steal_open_book() -> void:
 		if RETURN_CARRIED_ON_TLON:
 			set_carried_book({})
 		return
-	set_carried_book(book)
+	set_carried_book(book, _reader_key)
 
 
 ## Le livre emporté devient `book` ({} : aucun) : enregistré, son vide posé sur son étagère, celui
-## du livre précédent comblé.
-func set_carried_book(book: Dictionary) -> void:
+## du livre précédent comblé. `key` : la clé de sa galerie, si elle est connue (sinon calculée :
+## ~50 ms à 917 000 chiffres).
+func set_carried_book(book: Dictionary, key := "") -> void:
 	carried_book = BookTextScript.book_of(book) if not book.is_empty() else {}
-	_carried_key = BookTextScript.gallery_key(carried_book.hexagon, carried_book.level) if not carried_book.is_empty() else ""
+	_carried_key = ""
+	if not carried_book.is_empty():
+		_carried_key = key if not key.is_empty() else BookTextScript.gallery_key(carried_book.hexagon, carried_book.level)
 	if not QuestScript.save_carried(carried_book, carried_path):
 		push_warning("livre emporté non enregistré : %s" % carried_path)
 	_apply_missing()
@@ -371,7 +377,7 @@ func set_carried_book(book: Dictionary) -> void:
 ## La touche du carnet, carnet ouvert : le livre emporté s'ouvre dans le lecteur (rien sans livre).
 func open_carried_book() -> void:
 	if not carried_book.is_empty() and not _traveling:
-		_open_address(carried_book)
+		_open_address(carried_book, 0, _carried_key)
 
 
 ## Les clés des galeries des livres volés du catalogue et du livre emporté (enregistré), calculées

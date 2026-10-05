@@ -134,7 +134,8 @@ def test_b25_wire_form():
             b.Address(bad, 0, 0, 0, 0)
 
 
-@pytest.mark.parametrize("bad", ["1\t2", "1\x002", "\x01", "-\x05", "12\n", " 12", "1 2", "+\x18", "1\x7f"])
+@pytest.mark.parametrize("bad", ["1\t2", "1\x002", "\x01", "-\x05", "12\n", " 12", "1 2", "+\x18", "1\x7f",
+                                 "K", "1K", "-K0", "İ"])
 def test_b25_rejects_control_and_foreign_characters(bad):
     """Un octet de contrôle vaut déjà moins de 25 : il ne doit pas passer pour un chiffre."""
     with pytest.raises(b.BabelError):
@@ -157,13 +158,37 @@ def test_decimal_slow_path_round_trip(size):
     assert b.decimal_to_b25(str(value)) == text
 
 
-@given(st.integers(-25 ** 300, 25 ** 300) | st.sampled_from(
-    [10 ** k + d for k in (60, 61, 100, 333) for d in (-1, 0, 1)] + [-(10 ** 70) + 1, 25 ** 49, 25 ** 48 - 1]))
+def _expected_summary(value, exact=None):
+    exact = exact if exact is not None else str(abs(value))
+    return {"sign": (value > 0) - (value < 0), "digits": len(exact), "lead": exact[:4], "tail": exact[-4:],
+            "low": exact[-18:].rjust(18, "0")}
+
+
+@given(st.integers(-25 ** 300, 25 ** 300) | st.integers(-10 ** 4000, 10 ** 4000) | st.sampled_from(
+    [10 ** k + d for k in (60, 61, 100, 333, 3000) for d in (-1, 0, 1)] + [-(10 ** 70) + 1, 25 ** 49, 25 ** 48 - 1]))
 def test_coordinate_summary_matches_decimal(value):
-    exact = str(abs(value))
-    summary = b.coordinate_summary(b.int_to_b25(value))
-    assert summary == {"sign": (value > 0) - (value < 0), "digits": len(exact), "lead": exact[:4],
-                       "tail": exact[-4:]}
+    assert b.coordinate_summary(b.int_to_b25(value)) == _expected_summary(value)
+
+
+@pytest.mark.parametrize("k", [4000, 20000])
+@pytest.mark.parametrize("delta", [-1, 0, 1])
+def test_coordinate_summary_at_a_power_of_ten(k, delta):
+    """Au ras d'une puissance de dix, l'estimation par logarithmes ne tranche pas : calcul exact."""
+    for sign in (1, -1):
+        value = sign * (10 ** k + delta)
+        exact = b.b25_to_decimal(b.int_to_b25(abs(value)))
+        assert b.coordinate_summary(b.int_to_b25(value)) == _expected_summary(value, exact)
+
+
+@pytest.mark.slow
+def test_coordinate_summary_just_below_the_largest_power_of_ten():
+    """10^917000 − 1 : 917 000 neuf (le résumé en comptait un de trop, « 1000…9999 »)."""
+    below = b.decimal_to_b25("9" * 917000)
+    assert b.coordinate_summary(below) == {"sign": 1, "digits": 917000, "lead": "9999", "tail": "9999",
+                                           "low": "9" * 18}
+    power = b.decimal_to_b25("1" + "0" * 917000)
+    assert b.coordinate_summary("-" + power) == {"sign": -1, "digits": 917001, "lead": "1000", "tail": "0000",
+                                                 "low": "0" * 18}
 
 
 def test_coordinate_summary_of_a_huge_coordinate():
@@ -171,7 +196,7 @@ def test_coordinate_summary_of_a_huge_coordinate():
     summary = b.coordinate_summary(text)
     assert summary["sign"] == -1 and summary["digits"] == 917046
     exact = b.b25_to_decimal(text)
-    assert summary["lead"] == exact[1:5] and summary["tail"] == exact[-4:]
+    assert summary["lead"] == exact[1:5] and summary["tail"] == exact[-4:] and summary["low"] == exact[-18:]
     assert b.short_coordinate(text) == f"-{exact[1:5]}…{exact[-4:]} (917046 chiffres)"
 
 
@@ -826,7 +851,7 @@ def test_serve_protocol():
     assert by_id[5]["is_image"] == [book.is_image, book.is_image, None]
     display = by_id[6]
     assert display["full"] == python_address.full(4) and "hexagone" in display["short"]
-    assert display["hexagon"] == {"sign": -1, "digits": 30, "lead": "1234", "tail": "7890"}
+    assert display["hexagon"] == {"sign": -1, "digits": 30, "lead": "1234", "tail": "7890", "low": "345678901234567890"}
     assert len(by_id[7]["palette"]) == 25 and by_id[7]["width"] == 50 and by_id[7]["height"] == 64
     assert by_id[8]["exists"] is True and by_id[8]["is_image"] is book.is_image and by_id[8]["key"] == page["key"]
     assert [p["page"] for p in by_id[9]["pages"]] == [0, 409, 4]

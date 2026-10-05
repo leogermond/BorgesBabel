@@ -1606,9 +1606,14 @@ static func pending() -> int:
 ## la réponse porte « is_image » (640 valeurs) ou « error ». Les coordonnées (base 25, toute
 ## taille) se calculent sur le fil.
 static func submit_gallery_flags(hexagon_base: String, dh: int, level_base: String, dl: int, after := Callable()) -> int:
-	return submit(func() -> String:   # ligne écrite telle quelle : chiffres 0-9, a-o et « - », rien à échapper
-		return '{"op":"is_image_book","gallery":{"hexagon":"' + BookTextScript.b25_add_small(hexagon_base, dh) \
-			+ '","level":"' + BookTextScript.b25_add_small(level_base, dl) + '"}}', -1, after)
+	return submit(BookTextScript._gallery_flags_line.bind(hexagon_base, dh, level_base, dl), -1, after)
+
+
+## La ligne de la requête des genres d'une galerie (sur le fil d'arrière-plan) : écrite telle
+## quelle, les coordonnées n'ayant que des chiffres 0-9, a-o et « - », rien à échapper.
+static func _gallery_flags_line(hexagon_base: String, dh: int, level_base: String, dl: int) -> String:
+	return '{"op":"is_image_book","gallery":{"hexagon":"' + b25_add_small(hexagon_base, dh) \
+		+ '","level":"' + b25_add_small(level_base, dl) + '"}}'
 
 
 ## Les commandes du service d'arrière-plan : hors de Windows, chacune d'abord précédée de `nice`

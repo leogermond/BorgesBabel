@@ -706,14 +706,19 @@ static func pump_titles() -> void:
 		var key: String = entry.key
 		# Titres (SHA-256 des 640 adresses) et genres, tout sur le fil d'arrière-plan.
 		var ticket := BookTextScript.submit_gallery_flags(entry.hexagon, entry.dh, entry.level, entry.dl,
-			func(flags_response: Dictionary) -> Dictionary:
-				var title_bytes := BookSpineScript.gallery_title_bytes(key)
-				var flags := GalleryScript._flags_of(flags_response)
-				if not flags.is_empty():
-					BookSpineScript.set_image_flags(title_bytes, flags)
-				return {"title_bytes": title_bytes, "flags_ok": not flags.is_empty()})
+			GalleryScript._titles_of.bind(key))
 		_title_jobs.append({"key": key, "place": entry, "ticket": ticket})
 	last_pump_usec = Time.get_ticks_usec() - started
+
+
+## Sur le fil d'arrière-plan : les titres de la galerie `key`, avec les genres de la réponse du
+## service (fonction statique, sans fermeture : rien n'est partagé avec le fil principal).
+static func _titles_of(flags_response: Dictionary, key: String) -> Dictionary:
+	var title_bytes := BookSpineScript.gallery_title_bytes(key)
+	var flags := _flags_of(flags_response)
+	if not flags.is_empty():
+		BookSpineScript.set_image_flags(title_bytes, flags)
+	return {"title_bytes": title_bytes, "flags_ok": not flags.is_empty()}
 
 
 ## Les 640 genres d'une réponse du service, ou [] (erreur, réponse incomplète).

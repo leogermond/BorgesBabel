@@ -96,6 +96,8 @@ const START_RETRY_MAX_MS := 60000
 const RESOLVE_TIMEOUT_MS := 5000
 ## Descendants d'un processus relevés au plus (_kill_tree).
 const KILL_TREE_LIMIT := 64
+## Délai de pgrep (descendants d'un processus hors de Linux).
+const PGREP_TIMEOUT_MS := 1000
 ## Service d'arrière-plan : priorité basse (nice) et période de son chien de garde.
 const BACKGROUND_NICENESS := 10
 const BACKGROUND_POLL_USEC := 2000
@@ -106,6 +108,8 @@ static var search_timeout_ms := 10000
 static var start_timeout_ms := 20000
 ## Attente avant de relancer un service qui ne s'est pas lancé à temps (doublée à chaque échec).
 static var start_retry_ms := 5000
+## Attente au plus du fil principal pendant un lancement (le reste se fait sur un fil).
+static var main_start_wait_ms := 2000
 
 ## Dernière erreur du service (vide quand tout va bien).
 static var last_error := ""
@@ -121,7 +125,13 @@ static var _start_failure := ""          # dernier lancement trop lent (réessay
 static var _start_code := "unavailable"  # code d'erreur du dernier lancement manqué
 static var _retry_at_msec := 0
 static var _start_backoff_ms := 0
-static var _direct_commands: Dictionary = {}   # commande du lanceur `py` → python.exe (direct_command)
+static var _direct_commands: Dictionary = {}
+# Lancement du service du fil principal, sur un fil (voir _start).
+static var _launcher: Thread
+static var _launch_mutex := Mutex.new()
+static var _launch_done := false
+static var _launch_result: Dictionary = {}
+static var _launcher_pid := -1   # commande du lanceur `py` → python.exe (direct_command)
 # Service d'arrière-plan (voir submit) : état partagé avec son fil, sous _bg_mutex.
 static var _bg_mutex := Mutex.new()
 static var _bg_semaphore := Semaphore.new()
@@ -217,6 +227,8 @@ static func summary_text(summary: Dictionary) -> String:
 		return "?"
 	if summary.has("value"):
 		return str(summary.value)
+	if str(summary.get("lead", "")).is_empty():   # provisoire (Hud) : le nombre de chiffres seul
+		return "%s… (%d chiffres)" % ["-" if int(summary.sign) < 0 else "", int(summary.digits)]
 	return "%s%s…%s (%d chiffres)" % ["-" if int(summary.sign) < 0 else "", summary.lead, summary.tail, int(summary.digits)]
 
 
@@ -1099,6 +1111,7 @@ static func search_image_file(path: String) -> Dictionary:
 ## Arrête le service, et celui d'arrière-plan (appelé à la fermeture du jeu par l'autoload
 ## BabelService). Toute la famille de processus du service est arrêtée (voir _kill_tree).
 static func shutdown() -> void:
+	_stop_launcher()
 	if _pid > 0:
 		_kill_tree(_pid)
 	_pid = -1
@@ -1246,7 +1259,33 @@ static func _start() -> bool:
 		last_error = "%s ; nouvel essai dans %.0f s" % [_start_failure, ceilf((_retry_at_msec - now) / 1000.0)]
 		_start_code = "start_timeout"
 		return false
-	var launched := _launch(_launch_commands(), ProjectSettings.globalize_path(SCRIPT_PATH), start_timeout_ms)
+	# Le lancement (fork, interpréteur, ping) se fait sur un fil ; le fil principal l'attend au plus
+	# main_start_wait_ms, puis rend la main (« se lance ») : le lancement continue, la requête
+	# suivante le retrouve.
+	if _launcher == null:
+		_launch_done = false
+		_launch_result = {}
+		_launcher_pid = -1
+		var commands := _launch_commands()
+		var script := ProjectSettings.globalize_path(SCRIPT_PATH)
+		var timeout := start_timeout_ms
+		_launcher = Thread.new()
+		_launcher.start(func() -> void:
+			var result := BookTextScript._launch(commands, script, timeout, BookTextScript._publish_launcher_pid)
+			BookTextScript._launch_mutex.lock()
+			BookTextScript._launch_result = result
+			BookTextScript._launch_done = true
+			BookTextScript._launch_mutex.unlock())
+	var deadline := Time.get_ticks_msec() + main_start_wait_ms
+	while not _launched() and Time.get_ticks_msec() < deadline:
+		OS.delay_msec(2)
+	if not _launched():
+		last_error = "le service Python se lance encore (plus de %.1f s) : nouvel essai à la prochaine requête" % (main_start_wait_ms / 1000.0)
+		_start_code = "starting"
+		return false
+	_launcher.wait_to_finish()
+	_launcher = null
+	var launched := _launch_result
 	if launched.has("error"):
 		_start_code = launched.code
 		if launched.code == "start_timeout":
@@ -1268,6 +1307,34 @@ static func _start() -> bool:
 	_retry_at_msec = 0
 	last_error = ""
 	return true
+
+
+static func _launched() -> bool:
+	_launch_mutex.lock()
+	var done := _launch_done
+	_launch_mutex.unlock()
+	return done
+
+
+static func _publish_launcher_pid(pid: int) -> void:
+	_launch_mutex.lock()
+	_launcher_pid = pid
+	_launch_mutex.unlock()
+
+
+## Arrête un lancement en cours (shutdown) : son processus et sa famille, puis le fil.
+static func _stop_launcher() -> void:
+	if _launcher == null:
+		return
+	_launch_mutex.lock()
+	var pid := _launcher_pid
+	_launch_mutex.unlock()
+	_kill_tree(pid)   # le ping en attente finit aussitôt
+	_launcher.wait_to_finish()
+	_launcher = null
+	var result := _launch_result
+	if result.has("pid") and OS.is_process_running(int(result.pid)):
+		_kill_tree(int(result.pid))
 
 
 ## Lance `python … babel.py serve` avec la première commande qui répond au ping :
@@ -1358,13 +1425,15 @@ static func launcher_selector(arg: String) -> bool:
 ## qu'il vit, la lecture bloquée ne finit pas. Windows : `taskkill /T /F` (l'arbre entier). Linux :
 ## les descendants relevés dans /proc (fichiers children, à défaut le parent de chaque processus),
 ## macOS et autres : `pgrep -P` ; tous relevés avant le premier arrêt (un orphelin change de
-## parent), puis le processus et ses descendants arrêtés (SIGKILL).
+## parent), puis le processus et ses descendants arrêtés (SIGKILL). Rien n'attend sans borne : taskkill
+## se lance sans être attendu (OS.create_process), pgrep sous un chien de garde. Un processus déjà
+## fini (et attendu par le moteur) n'est pas visé : son numéro peut désigner un autre processus.
 static func _kill_tree(pid: int) -> void:
-	if pid <= 0:
+	if pid <= 0 or not OS.is_process_running(pid):
 		return
 	if OS.get_name() == "Windows":
-		OS.execute("taskkill", ["/T", "/F", "/PID", str(pid)])
-		if OS.is_process_running(pid):
+		# /T suit les liens de parenté : le lanceur doit vivre encore quand taskkill les relève.
+		if OS.create_process("taskkill", ["/T", "/F", "/PID", str(pid)]) < 0:
 			OS.kill(pid)
 		return
 	var family := descendants(pid)
@@ -1406,11 +1475,19 @@ static func _children(pid: int) -> PackedInt64Array:
 					if fields.size() > 1 and int(fields[1]) == pid:
 						children.append(int(entry))
 		return children
-	var output := []
-	OS.execute("pgrep", ["-P", str(pid)], output)
-	for line in "".join(output).split("\n", false):
-		if line.strip_edges().is_valid_int():
-			children.append(int(line.strip_edges()))
+	var process := OS.execute_with_pipe("pgrep", ["-P", str(pid)])
+	if process.is_empty():
+		return children
+	var watchdog := Watchdog.new(Watchdog.POLL_USEC, false)   # pgrep seul, sans sa famille
+	watchdog.start(process.pid, PGREP_TIMEOUT_MS)
+	var pipe: FileAccess = process.stdio
+	while true:
+		var line := pipe.get_line().strip_edges()
+		if line.is_empty() and (pipe.eof_reached() or pipe.get_error() != OK):
+			break
+		if line.is_valid_int():
+			children.append(int(line))
+	watchdog.finish()
 	return children
 
 
@@ -1680,11 +1757,13 @@ class Watchdog:
 	var _pid := -1
 	var _deadline := 0
 	var _poll_usec := POLL_USEC
+	var _tree := true
 
 	## `poll_usec` : période de surveillance (plus longue pour le service d'arrière-plan, que rien
-	## n'attend : moins de réveils).
-	func _init(poll_usec := POLL_USEC) -> void:
+	## n'attend : moins de réveils) ; `tree` : arrêter aussi les descendants (_kill_tree).
+	func _init(poll_usec := POLL_USEC, tree := true) -> void:
 		_poll_usec = poll_usec
+		_tree = tree
 
 	func start(pid: int, timeout_ms: int) -> void:
 		_pid = pid
@@ -1709,7 +1788,10 @@ class Watchdog:
 			var fire := _fired
 			_mutex.unlock()
 			if fire:
-				BookTextScript._kill_tree(_pid)   # le processus et ses descendants (lanceur)
+				if _tree:
+					BookTextScript._kill_tree(_pid)   # le processus et ses descendants (lanceur)
+				elif OS.is_process_running(_pid):
+					OS.kill(_pid)
 				return
 			if done:
 				return

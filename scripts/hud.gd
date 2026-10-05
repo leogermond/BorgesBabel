@@ -129,12 +129,21 @@ func set_address(hexagon: Variant, level: Variant, moved := Vector2i.ZERO) -> vo
 		_cancel_summary_requests()
 		_hexagon = BookTextScript.b25(hexagon)
 		_level = BookTextScript.b25(level)
-		_hexagon_summary = BookTextScript.coordinate_summary(_hexagon)
-		_level_summary = BookTextScript.coordinate_summary(_level)
-		if _hexagon.length() > BookTextScript.SMALL_SUMMARY_DIGITS + 1 or _level.length() > BookTextScript.SMALL_SUMMARY_DIGITS + 1:
-			BookTextScript.warm_up()   # les résumés débordés se recalculeront en arrière-plan
+		_hexagon_summary = _fresh_summary("hexagon", _hexagon)
+		_level_summary = _fresh_summary("level", _level)
 	_show_address()
 	_refresh_widget(moved if stepping else Vector2i.ZERO)
+
+
+## Le résumé d'une coordonnée lue d'un coup (saut) : calcul local pour une petite ; pour une
+## grande, un résumé provisoire (signe et nombre de chiffres, sans les chiffres de tête ni de
+## queue) et la forme « display » demandée au service d'arrière-plan : le fil principal n'attend pas.
+func _fresh_summary(axis: String, coordinate: String) -> Dictionary:
+	if coordinate.length() <= BookTextScript.SMALL_SUMMARY_DIGITS + 1:
+		return BookTextScript.coordinate_summary(coordinate)
+	_summary_requests[axis] = [BookTextScript.submit(BookTextScript.display_request(coordinate)), 0]
+	return {"sign": BookTextScript.b25_sign(coordinate), "digits": BookTextScript.b25_decimal_digits(coordinate),
+		"lead": "", "tail": "", "pending": true}
 
 
 func _show_address() -> void:
@@ -151,6 +160,8 @@ func _stepped_summary(axis: String, previous: Dictionary, coordinate: String, st
 		return previous
 	if _summary_requests.has(axis):
 		_summary_requests[axis][1] += step
+	if not previous.is_empty() and not previous.has("low"):
+		return previous   # provisoire : le résumé arrive en arrière-plan, avancé des pas faits d'ici là
 	var next := BookTextScript.summary_step(previous, step)
 	if not next.is_empty():
 		return next

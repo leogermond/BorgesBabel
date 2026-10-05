@@ -81,7 +81,11 @@ direct au GPU et la souris reste libre ; le Godot Windows capture la souris et r
   de ±1 à chaque pas sans les relire, et les affiche en abrégé, « 1096…5346 (917047 chiffres) » :
   les 18 derniers chiffres suivent le pas, le reste se recalcule en arrière-plan quand ils
   débordent ; une retenue qui traverse toute la coordonnée se prépare d'avance sur un fil. Une
-  coordonnée qui tient dans un entier (jusqu'à 2^62) s'écrit en entier.
+  coordonnée qui tient dans un entier (jusqu'à 2^62) s'écrit en entier. Après un saut, l'adresse
+  s'affiche d'abord en nombre de chiffres seul, le temps que le service d'arrière-plan la résume.
+  La distance du guidage de quête (« ≈ 10^N ») a un nombre de chiffres exact, tranché au ras d'une
+  puissance de dix jusqu'à 20 000 chiffres base 25 (~28 000 chiffres décimaux) ; au-delà, il peut
+  différer d'une unité quand la distance est à moins de 10^−9 près (en relatif) d'une puissance de dix.
 - Un livre sur 144 exactement est un livre d'images, reconnu à son contenu (ses deux premiers
   symboles autres que l'espace sont des signes) et calculé depuis l'adresse sans calculer le livre :
   chacune de ses pages se lit comme une image de 50 × 64 pixels, un symbole par pixel, dans une
@@ -95,7 +99,8 @@ direct au GPU et la souris reste libre ; le Godot Windows capture la souris et r
   recherche, 20 s au lancement) est arrêté, avec tous ses processus (un interpréteur lancé par un
   lanceur, `uv run` par exemple) : la page affiche l'erreur, le jeu ne se fige pas, et le service
   est relancé à la requête suivante ; après un lancement trop lent, la relance attend quelques
-  secondes (5 s, doublées à chaque nouvel échec). Seul un Python absent reste un échec durable.
+  secondes (5 s, doublées à chaque nouvel échec). Seul un Python absent reste un échec durable. Le
+  lancement se fait sur un fil : le jeu ne l'attend que 2 s au plus, puis continue.
 
 ## Recherche inverse
 

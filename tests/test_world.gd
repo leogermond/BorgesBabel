@@ -124,6 +124,10 @@ func _test_far_walk(main: Node3D, player: CharacterBody3D) -> void:
 	var h := BookTextScript.b25_add_small(target.hexagon, 1)
 	var l := BookTextScript.b25_add_small(target.level, -1)
 	_check(main.origin_hexagon_b25 == h and main.origin_level_b25 == l, "un pas +1 galerie, −1 niveau : l'adresse suit exactement")
+	player.position = Vector3(0.0, 0.05, 3.2)   # au milieu de la nouvelle galerie : aucun pas pendant l'attente
+	var t_wait := Time.get_ticks_msec()
+	while main.hud.address_pending() and Time.get_ticks_msec() - t_wait < 20000:
+		await process_frame
 	var expected := "Hexagone %s · niveau %s" % [BookTextScript.summary_text(BookTextScript.coordinate_summary(h)), BookTextScript.summary_text(BookTextScript.coordinate_summary(l))]
 	_check(main.hud._address.text == expected, "l'adresse affichée suit les pas, comme la relecture par le service : %s" % main.hud._address.text)
 	main._shift(-1)

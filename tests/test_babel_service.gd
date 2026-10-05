@@ -240,6 +240,26 @@ func _check_launchers() -> void:
 	OS.delay_msec(BookTextScript.start_retry_ms + 100)
 	_check(BookTextScript.page_lines(0, 0, 0, 0, 0, 0)[0].length() == 80 and BookTextScript.last_error.is_empty(),
 		"après un lancement trop lent, le service se relance de lui-même (sans restart)")
+	# Lancement long : le fil principal ne l'attend que main_start_wait_ms, le lancement continue sur
+	# son fil ; restart() l'arrête, lui et sa famille.
+	var saved_wait := BookTextScript.main_start_wait_ms
+	BookTextScript.main_start_wait_ms = 300
+	BookTextScript.start_timeout_ms = 5000
+	var slower := _launcher("babel_lanceur_tres_lent.sh", "sleep 41.73 &\nwait\n")
+	ProjectSettings.set_setting(BookTextScript.PYTHON_SETTING, "\"%s\"" % slower)
+	BookTextScript.restart()
+	start = Time.get_ticks_usec()
+	lines = BookTextScript.page_lines(0, 0, 0, 0, 0, 0)
+	var wait_ms := _ms(start)
+	_check(wait_ms < 800.0 and lines[0].begins_with("Bibliothèque indisponible") and BookTextScript.last_error.contains("se lance encore"),
+		"lancement long : le fil principal rend la main après %.0f ms (au plus 300 ms d'attente), « se lance encore »" % wait_ms)
+	start = Time.get_ticks_usec()
+	BookTextScript.restart()
+	_check(_ms(start) < 500.0 and not _running("sleep 41.73"), "restart() arrête le lancement en cours et sa famille (%.0f ms)" % _ms(start))
+	BookTextScript.main_start_wait_ms = saved_wait
+	BookTextScript.start_timeout_ms = SHORT_TIMEOUT_MS
+	ProjectSettings.set_setting(BookTextScript.PYTHON_SETTING, "")
+	DirAccess.remove_absolute(slower)
 
 	# Lanceur dont l'enfant est le service : il répond au ping, puis dort pendant une requête.
 	print("  (erreurs attendues ci-dessous : service muet derrière un lanceur)")

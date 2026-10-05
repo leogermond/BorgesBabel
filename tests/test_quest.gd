@@ -472,7 +472,15 @@ func _test_hud() -> void:
 	# de chiffres) ; un pas avance les derniers chiffres et le guidage sans relire la coordonnée.
 	var huge: String = QuestScript.load_catalogue()[0].address.hexagon
 	var deep := "-" + huge
+	var t_jump := Time.get_ticks_usec()
 	hud.set_address(huge, deep)
+	var jump_ms := (Time.get_ticks_usec() - t_jump) / 1000.0
+	var provisional := hud._address.text
+	_check(hud.address_pending() and provisional.contains("… (9170") and provisional.contains("niveau -…"),
+		"saut à 917 000 chiffres : adresse provisoire (%s), résumé demandé en arrière-plan, sans requête au service sur le fil principal (%.2f ms, guidage compris)" % [provisional, jump_ms])
+	var t_wait := Time.get_ticks_msec()
+	while hud.address_pending() and Time.get_ticks_msec() - t_wait < 20000:
+		await process_frame
 	var shown := hud._address.text
 	var summary := BookTextScript.coordinate_summary(huge)
 	_check(shown == "Hexagone %s · niveau %s" % [BookTextScript.summary_text(summary), BookTextScript.summary_text(BookTextScript.coordinate_summary(deep))]

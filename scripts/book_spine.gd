@@ -209,7 +209,7 @@ static func decode_image_flag(bytes: PackedByteArray, book := 0) -> bool:
 static func set_image_flags(bytes: PackedByteArray, image_books: Array) -> void:
 	for i in mini(image_books.size(), bytes.size() / BYTES_PER_BOOK):
 		var at := i * BYTES_PER_BOOK + 2   # octet 2 du mot 0 : bits 16 à 23
-		if bool(image_books[i]):
+		if image_books[i] == true:   # null : emplacement vide (hors de la région habitée), pas de livre d'images
 			bytes[at] |= 1 << (IMAGE_BIT - 16)
 		else:
 			bytes[at] &= ~(1 << (IMAGE_BIT - 16))
@@ -238,7 +238,7 @@ static func gallery_title_bytes(gallery_key: String, image_books: Array = []) ->
 	for wall in WALLS:
 		for shelf in SHELVES:
 			for book in BOOKS:
-				var image := i < image_books.size() and bool(image_books[i])
+				var image: bool = i < image_books.size() and image_books[i] == true
 				_encode(_indices(prefix + "%d|%d|%d" % [wall, shelf, book]), image, bytes, i * BYTES_PER_BOOK)
 				i += 1
 	return bytes

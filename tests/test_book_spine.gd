@@ -348,7 +348,7 @@ func _check_flag_retry() -> void:
 	for i in 640:
 		var flag := BookSpineScript.decode_image_flag(bytes, i)
 		flagged += int(flag)
-		if flag != (i < flags.size() and bool(flags[i])):
+		if flag != (i < flags.size() and flags[i] == true):
 			wrong += 1
 	_check(GalleryScript.flags_pending().is_empty() and flags.size() == 640 and flagged > 0 and wrong == 0,
 		"service revenu : les genres redemandés complètent la texture posée (%d livres d'images, écarts : %d)" % [flagged, wrong])

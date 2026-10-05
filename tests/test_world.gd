@@ -90,7 +90,7 @@ func _initialize() -> void:
 		"la balustrade arrête le bibliothécaire (z = %.2f)" % player.position.z)
 
 	await _test_far_walk(main, player)
-	_test_same_gallery(main)
+	await _test_same_gallery(main)
 
 	_check(await AmbientSpeakerScript.silence_all(self), "sortie : les haut-parleurs se taisent, le serveur audio rend leurs lectures")
 	print("test_world : %s" % ("OK" if _failures == 0 else "%d échec(s)" % _failures))
@@ -198,7 +198,31 @@ func _test_same_gallery(main: Node3D) -> void:
 		var book: Dictionary = main.target_address({"hexagon": origin.hexagon, "level": origin.level, "wall": 2, "shelf": 1, "book": 9})
 		_check(BookSpineScript.display_title(BookSpineScript.decode_title(bytes, (2 * 5 + 1) * 32 + 9)) == BookTextScript.title_at(book),
 			"%s : le titre du dos est celui du lecteur (BookText.title_at de la vraie adresse)" % label)
+	await _test_empty_region(main)
 	main.place_origin(0, 0)
+
+
+## Au-delà de la région habitée, les emplacements sont vides : le service rend null pour leur genre.
+## Les galeries s'y construisent et reçoivent leurs titres sans erreur (null : pas de livre d'images).
+func _test_empty_region(main: Node3D) -> void:
+	var hexagon := "1" + "o".repeat(656000)
+	var level := "-1" + "0".repeat(656000)
+	_check(main.place_origin(hexagon, level), "l'origine se place hors de la région habitée")
+	var flags := BookTextScript.gallery_image_books(hexagon, level)
+	_check(flags.size() == 640 and flags.all(func(f: Variant) -> bool: return f == null), "le service y rend 640 emplacements vides (null)")
+	var t0 := Time.get_ticks_msec()
+	var ready := false
+	while Time.get_ticks_msec() - t0 < 60000 and not ready:
+		await process_frame
+		ready = GalleryScript.titles_idle() and main._galleries.values().all(func(g: Gallery) -> bool:
+			return g.detail < GalleryScript.Detail.LIT or g.titles_ready())
+	var origin: Gallery = main._galleries[Vector2i.ZERO]
+	var bytes := origin.titles_texture().get_image().get_data() if origin.titles_ready() else PackedByteArray()
+	var flagged := 0
+	for i in 640:
+		flagged += int(BookSpineScript.decode_image_flag(bytes, i))
+	_check(ready and bytes.size() == 640 * 12 and flagged == 0 and GalleryScript.flags_pending().is_empty(),
+		"hors de la région habitée : titres posés sans erreur, aucun filet de livre d'images, aucun genre à redemander")
 
 
 ## Aspect des galeries proches de l'origine : case → [clé, graine du nuanceur, hauteurs, cuirs, titres].

@@ -427,7 +427,7 @@ func _check_titles(main: Node) -> void:
 		for i in 640:
 			var flag := BookSpineScript.decode_image_flag(bytes, i)
 			flagged += int(flag)
-			if flag != (i < flags.size() and bool(flags[i])):
+			if flag != (i < flags.size() and flags[i] == true):
 				wrong += 1
 	_check(texture != null and flags.size() == 640 and wrong == 0 and flagged > 0,
 		"livres d'images de la galerie d'origine : %d drapeaux (filets dorés) dans la texture, comme le service (écarts : %d)" % [flagged, wrong])

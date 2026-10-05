@@ -131,6 +131,8 @@ func set_address(hexagon: Variant, level: Variant, moved := Vector2i.ZERO) -> vo
 		_level = BookTextScript.b25(level)
 		_hexagon_summary = BookTextScript.coordinate_summary(_hexagon)
 		_level_summary = BookTextScript.coordinate_summary(_level)
+		if _hexagon.length() > BookTextScript.SMALL_SUMMARY_DIGITS + 1 or _level.length() > BookTextScript.SMALL_SUMMARY_DIGITS + 1:
+			BookTextScript.warm_up()   # les résumés débordés se recalculeront en arrière-plan
 	_show_address()
 	_refresh_widget(moved if stepping else Vector2i.ZERO)
 

@@ -206,11 +206,18 @@ func _test_guidance() -> void:
 # --- Catalogue ----------------------------------------------------------------------------------
 
 func _test_catalogue() -> void:
+	QuestScript._catalogues.clear()
+	var t0 := Time.get_ticks_usec()
 	var entries := QuestScript.load_catalogue()
+	var load_ms := (Time.get_ticks_usec() - t0) / 1000.0
+	var size := FileAccess.get_file_as_bytes(QuestScript.CATALOGUE_PATH).size()
+	print("    catalogue : %.2f Mo sur disque, lu en %.0f ms" % [size / 1.0e6, load_ms])
+	_check(size <= 2_000_000 and load_ms <= 500.0 and not FileAccess.file_exists("res://data/quetes/catalogue.json"),
+		"catalogue sous forme compacte : %.2f Mo (≤ 2 Mo), lu en %.0f ms (≤ 0,5 s), l'ancien JSON retiré" % [size / 1.0e6, load_ms])
 	var titles := entries.map(func(e: Dictionary) -> String: return e.title)
 	_check(titles == ["La biblioteca de Babel", "El Aleph", "El Zahir", "Tlön, Uqbar, Orbis Tertius", "El Golem",
 		"Mode d'emploi de la Bibliothèque", "Sur la vertu", "Sur l'humour"], "catalogue : 8 entrées dans l'ordre (lu : %s)" % [titles])
-	var raw: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(QuestScript.CATALOGUE_PATH))
+	var raw: Dictionary = QuestScript._read_document(QuestScript.CATALOGUE_PATH)
 	_check(int(raw.version) == QuestScript.CATALOGUE_VERSION and raw.keys().size() == 5, "catalogue version %d : entries, stolen_books, destinations" % QuestScript.CATALOGUE_VERSION)
 	var extra := []
 	for entry: Dictionary in raw.entries:
@@ -295,7 +302,29 @@ func _test_pins() -> void:
 	_check(QuestScript.save_pins(pins, PINS_TEST_PATH), "épingles enregistrées")
 	var again := QuestScript.load_pins(entries, PINS_TEST_PATH)
 	_check(again.map(func(p: Dictionary) -> String: return p.id) == pins.map(func(p: Dictionary) -> String: return p.id), "épingles relues à l'identique")
-	var stored: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(PINS_TEST_PATH))
+	# Épingles de livres trouvés (~1,3 Mo d'adresse chacun) : forme compacte, relues à l'identique ;
+	# un fichier d'épingles en JSON simple (version précédente du jeu) se relit aussi.
+	var far_pins := pins.duplicate()
+	for i in 3:
+		var a: Dictionary = entries[i].address.merged({"page": i})
+		far_pins = QuestScript.add_pin(far_pins, QuestScript.search_pin("lointaine %d" % i, a, i + 1))
+	var t_save := Time.get_ticks_usec()
+	_check(QuestScript.save_pins(far_pins, PINS_TEST_PATH), "épingles lointaines enregistrées")
+	var save_ms := (Time.get_ticks_usec() - t_save) / 1000.0
+	var far_size := FileAccess.get_file_as_bytes(PINS_TEST_PATH).size()
+	var far_again := QuestScript.load_pins(entries, PINS_TEST_PATH)
+	var same_far := far_again.size() == far_pins.size()
+	for i in mini(far_again.size(), far_pins.size()):
+		same_far = same_far and far_again[i].id == far_pins[i].id and far_again[i].get("address") == far_pins[i].get("address") \
+			and far_again[i].get("pages") == far_pins[i].get("pages")
+	_check(same_far and far_size < 1_000_000, "3 épingles de 1,3 Mo d'adresse : %.2f Mo sur disque (enregistrées en %.0f ms), relues à l'identique" % [far_size / 1.0e6, save_ms])
+	var plain := FileAccess.open(PINS_TEST_PATH, FileAccess.WRITE)
+	plain.store_string(JSON.stringify({"version": QuestScript.PINS_VERSION, "pins": [{"kind": QuestScript.KIND_SEARCH, "title": "ancienne", "address": target}]}))
+	plain.close()
+	var legacy := QuestScript.load_pins(entries, PINS_TEST_PATH)
+	_check(legacy.size() == 1 and legacy[0].title == "ancienne" and legacy[0].pages == 1, "épingles en JSON simple (version précédente) relues")
+	QuestScript.save_pins(pins, PINS_TEST_PATH)
+	var stored: Dictionary = QuestScript._read_document(PINS_TEST_PATH)
 	var search_stored: Array = stored.pins.filter(func(p: Dictionary) -> bool: return p.kind == QuestScript.KIND_SEARCH)
 	var stored_keys: Array = search_stored[0].keys() if search_stored.size() == 1 else []
 	stored_keys.sort()
@@ -470,7 +499,7 @@ func _test_hud() -> void:
 
 	_check(hud.search_typed("la bibliotheque de babel") and hud.quest.title == "texte saisi", "un texte tapé démarre une quête")
 	_check(hud.pin_current("babel tapé"), "la recherche s'épingle")
-	var stored := FileAccess.get_file_as_string(PINS_TEST_PATH)
+	var stored := JSON.stringify(QuestScript._read_document(PINS_TEST_PATH))
 	_check(stored.contains("babel tapé") and not stored.contains("la bibliotheque de babel"), "le fichier d'épingles garde le titre, jamais le texte")
 	_check(not hud.search_typed("   ") and hud.last_error == "texte vide", "texte vide refusé")
 	# Un texte de plusieurs pages : la quête propose les pages qu'il occupe, l'épingle les garde.
@@ -574,6 +603,12 @@ func _mouse(_hud: Hud) -> bool:
 ## (résumé provisoire, recalcul en arrière-plan) : chaque pas sous 8 ms, l'adresse finale égale à
 ## la relecture complète.
 func _test_address_steps(hud: Hud, huge: String, deep: String) -> void:
+	# Le service d'arrière-plan tourne déjà dans le jeu (titres des dos dès la première image) : son
+	# lancement (un fork du moteur) ne doit pas tomber dans les pas mesurés.
+	BookTextScript.warm_up()
+	var t_warm := Time.get_ticks_msec()
+	while BookTextScript.pending() > 0 and Time.get_ticks_msec() - t_warm < 20000:
+		await process_frame
 	var limit := BookTextScript.b25_from_int(1 << 62)
 	var h := BookTextScript.b25_add_small(limit, -2)
 	hud.set_address(h, "3")

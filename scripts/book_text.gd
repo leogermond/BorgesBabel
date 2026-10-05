@@ -1375,6 +1375,16 @@ static func submit(request: Variant, timeout := -1) -> int:
 	return ticket
 
 
+## Lance le service d'arrière-plan s'il ne tourne pas encore (une requête « ping » dont la réponse
+## est jetée) : son lancement (un fork du moteur) a lieu tout de suite plutôt qu'au milieu d'un pas.
+static func warm_up() -> void:
+	if _bg_thread == null:
+		var ticket := submit({"op": "ping"})
+		_bg_mutex.lock()
+		_bg_cancelled[ticket] = true   # la requête part, sa réponse est jetée
+		_bg_mutex.unlock()
+
+
 ## La réponse d'un ticket (retirée de la mémoire), ou null tant qu'elle n'est pas arrivée.
 static func take(ticket: int) -> Variant:
 	_bg_mutex.lock()

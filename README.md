@@ -305,6 +305,13 @@ coordonnées de ~656 000 chiffres, qui partagent presque toutes leurs chiffres d
 s'enregistrent sous la même forme. `python3 tools/make_catalogue.py --from <catalogue>` récrit un
 catalogue existant (livres relus à leur adresse, aller-retour vérifié).
 
+Les textes des livres du catalogue sont composés en lignes de 80 symboles par `tools/make_catalogue.py` (aucun mot
+coupé, titre et intertitres centrés, paragraphes séparés par une ligne blanche, aucune page ouverte par une ligne
+blanche ; une élision ou un mot à trait d'union court ne se sépare pas en fin de ligne). Le mode d'emploi, « Mode d'emploi
+de Babel », s'écrit sans les lettres q, k, w, y (la normalisation les change en c, v, i : elles créeraient des fautes) et
+l'outil refuse une source qui en contient, accentuée ou non. `python3 tools/preview_book.py "<titre>"` (ou `--all`) relit un
+livre à son adresse et en écrit un aperçu page par page sous `.foreman/scratch/`, pour vérifier la mise en page à l'œil.
+
 ## Secrets (développeurs)
 
 Rien de ce qui suit n'apparaît dans le jeu (aucune aide, aucun indice à l'écran) : c'est le
@@ -349,5 +356,9 @@ fonctionnement, pour qui développe.
 - `scripts/book_text.gd` : texte des pages.
 - `scripts/reader.gd` : fenêtre de lecture.
 - `scripts/hud.gd` : adresse, réticule, livre visé, encart et panneau de quête, quête gardée.
-- `scripts/carnet.gd` : le carnet (invocations).
+- `scripts/carnet.gd` : le carnet (invocations) et sa normalisation du texte, étape pour étape celle de `python/babel.py`.
+- `scripts/fold_table.gd` : table de pliage du carnet (minuscule, décomposition NFD, marques combinantes ôtées), **générée** par
+  `tools/make_fold_table.py` d'après `babel.fold_char` pour tous les points de code qui comptent (1 413 entrées, chargée en ~12 ms) ;
+  `python3 tools/make_fold_table.py --check` vérifie qu'elle est à jour, et test_quest compare les deux normalisations sur plus de 34 000
+  textes (toutes les marques combinantes, tous les plans).
 - `scripts/quest.gd` : quête, guidage, catalogue, épingles, fichiers du joueur.

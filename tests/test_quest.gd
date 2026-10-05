@@ -138,31 +138,59 @@ func _test_normalize_crosscheck() -> void:
 		cases.append(c)
 		cases.append("a%sb" % c)
 	cases.append(sweep)
-	# Chaînes au hasard (graine fixe) : lettres, lettres accentuées, marques combinantes après chaque signe
-	# et chaque guillemet, blancs (insécables compris), « ; » grec, apostrophes, traits d'union.
+	# Les points de code que Python plie ou range parmi les marques (toutes classes combinantes, tous plans).
+	var interpreter: Array = BookTextScript._interpreters()[0]
+	var list_args := PackedStringArray(interpreter.slice(1))
+	list_args.append_array([ProjectSettings.globalize_path("res://tools/make_fold_table.py"), "--lists"])
+	var listing := []
+	var list_code := OS.execute(interpreter[0], list_args, listing, true)
+	var lists: Variant = JSON.parse_string(listing[0] if list_code == 0 and not listing.is_empty() else "")
+	_check(lists is Dictionary and lists.combining.size() > 800 and lists.fold.size() > 1000,
+		"Python liste ses marques combinantes (%d) et les points de code qu'il plie (%d)" % [lists.combining.size() if lists is Dictionary else 0, lists.fold.size() if lists is Dictionary else 0])
+	var marks := []
+	var folding := []
+	if lists is Dictionary:
+		for code: Variant in lists.combining:
+			marks.append(int(code))
+		for code: Variant in lists.fold:
+			folding.append(int(code))
+	# Le cas relevé : une marque combinante hors U+0300–036F après « ; chaque marque, après chaque ouverture.
+	cases.append("«\u20d0 x")
+	for code: int in marks:
+		cases.append("« %s x" % String.chr(code))
+		cases.append("‹%s x » y" % String.chr(code))
+	for code: int in folding:
+		cases.append("a%s ; b" % String.chr(code))
+	# Chaînes au hasard (graine fixe) : tous plans, marques de toutes classes après chaque signe et guillemet,
+	# lettres, accents, blancs (insécables compris), « ; » grec, apostrophes, traits d'union.
 	var specials := ["'", "’", "ʼ", "‘", "-", "‐", "‑", "–", "—", ":", ";", "!", "?", "…", "«", "»", "‹", "›", "\"", "“", "”",
 		",", ".", " ", " ", "\t", "\n", "\u00a0", "\u202f", "\u037e", "\u2003", "\u3000", "\u0085", "1", "%", "œ", "æ", "ß", "k", "q", "w", "y"]
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 7311
-	for _i in 3000:
+	var random_count := 0
+	for _i in 12000:
 		var text := ""
 		for _j in rng.randi_range(1, 24):
-			var pick := rng.randi() % 10
+			var pick := rng.randi() % 12
 			if pick < 3:
 				text += specials[rng.randi() % specials.size()]
-			elif pick < 4:
-				text += String.chr(rng.randi_range(0x300, 0x36f))                       # marque combinante
-			elif pick < 5:
+			elif pick < 5 and not marks.is_empty():
+				text += String.chr(marks[rng.randi() % marks.size()])                    # marque combinante, toute classe
+			elif pick < 6:
 				text += String.chr(0x41 + rng.randi() % 26)                              # capitale
 			elif pick < 7:
 				text += String.chr(0x61 + rng.randi() % 26)
-			elif pick < 8:
-				text += String.chr(rng.randi_range(0xc0, 0x250))                         # Latin-1, A, B
-			elif pick < 9:
-				text += String.chr(rng.randi_range(0x1e00, 0x1eff))                      # Latin additionnel
+			elif pick < 8 and not folding.is_empty():
+				text += String.chr(folding[rng.randi() % folding.size()])                # un caractère que Python plie
+			elif pick < 10:
+				var code := rng.randi_range(1, 0x10ffff)                                 # tous plans
+				while code >= 0xd800 and code < 0xe000:
+					code = rng.randi_range(1, 0x10ffff)
+				text += String.chr(code)
 			else:
-				text += specials[rng.randi() % specials.size()] + String.chr(rng.randi_range(0x300, 0x36f))
+				text += specials[rng.randi() % specials.size()] + (String.chr(marks[rng.randi() % marks.size()]) if not marks.is_empty() else "")
 		cases.append(text)
+		random_count += 1
 	var file := FileAccess.open(NORMALIZE_CASES_PATH, FileAccess.WRITE)
 	for text: String in cases:
 		file.store_line(text.to_utf8_buffer().hex_encode())   # un texte par ligne, en hexadécimal

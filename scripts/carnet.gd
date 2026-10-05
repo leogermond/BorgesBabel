@@ -28,8 +28,9 @@ const PAPER_BORDER := Color(0.45, 0.32, 0.2)
 const INK := Color(0.16, 0.11, 0.07)
 const CARET_PERIOD := 0.53
 const FADE_SECONDS := 0.45
-## Étape 1 de la normalisation : minuscule, décomposition NFD, marques combinantes ôtées. Table
-## générée de babel.fold_char (python/babel.py) par tools/make_fold_table.py.
+## Étape 1 de la normalisation : minuscule, décomposition NFD, marques combinantes ôtées. Table de
+## tous les points de code dont le pliage compte, générée de babel.fold_char (python/babel.py) par
+## tools/make_fold_table.py ; absent de la table, un caractère reste tel quel.
 const FoldTable := preload("res://scripts/fold_table.gd")
 const LIGATURES := {"œ": "oe", "æ": "ae", "ß": "ss", "k": "c", "q": "c", "w": "v", "y": "i"}
 ## Les blancs de Python (str.isspace) : tous deviennent une espace.
@@ -190,14 +191,17 @@ func submit() -> void:
 
 
 ## Le texte ramené à l'alphabet de 25 symboles, étape pour étape comme babel.normalize_all : chaque
-## caractère est d'abord plié (table FOLD, sinon minuscule), puis ses caractères suivent les règles
+## caractère est d'abord plié (table FOLD ; capitales ASCII → minuscules ; sinon inchangé), puis ses caractères suivent les règles
 ## de ligatures, de ponctuation et de blancs.
 static func normalize(text: String) -> String:
 	var out := ""
 	var blanks := 0   # blancs de la source qui terminent `out` (ceux qu'un « : ; ! ? … » efface)
 	var after_opening := false   # le caractère précédent est un « ou un ‹ : les blancs qui suivent s'effacent
 	for source in text:
-		var folded: String = FoldTable.FOLD.get(source, source.to_lower())
+		var code := source.unicode_at(0)
+		var folded: String = FoldTable.FOLD.get(code, source)
+		if code >= 0x41 and code <= 0x5a:
+			folded = String.chr(code + 32)   # capitales ASCII ; le reste vient de la table
 		for base in folded:
 			var mapped: String = LIGATURES.get(base, PUNCTUATION.get(base, base))
 			var blank: bool = base == " " or base in WHITESPACE

@@ -102,7 +102,9 @@ Normalisation d'un texte cherché (normalize)
     les blancs qui le précèdent immédiatement (espaces, insécables U+00A0 et U+202F compris, comme
     en typographie française) sont retirés : « galerie : son » → « galerie, son ». Les espaces
     répétées ne sont pas fondues : la
-    recherche reste exacte. Au-delà de M = 1 312 000 symboles, la suite est ignorée.
+    recherche reste exacte. Les guillemets français portent leurs espaces intérieures : en retirant
+    « ou ‹, les blancs qui le suivent sont retirés ; en retirant » ou ›, ceux qui le précèdent :
+    « dit « mot », puis » → « dit mot, puis ». Au-delà de M = 1 312 000 symboles, la suite est ignorée.
 Remplissage (pad) : le texte normalisé est complété par des espaces jusqu'à M symboles.
 
 Coordonnées sur le fil : base 25 signée
@@ -1029,7 +1031,8 @@ def page_lines(address: Address, page: int) -> list[str]:
 
 _LIGATURES = {"œ": "oe", "æ": "ae", "ß": "ss", "k": "c", "q": "c", "w": "v", "y": "i"}
 ## Ponctuation ramenée à l'alphabet (les guillemets « » " “ ” ‹ › n'y sont pas : retirés).
-_SPACE_BEFORE = ":;!?…"     # leur conversion efface les blancs qui précèdent
+_SPACE_BEFORE = ":;!?…»›"   # leur conversion (ou leur retrait, pour » ›) efface les blancs qui précèdent
+_OPENING = "«‹"              # leur retrait efface les blancs qui suivent
 _PUNCTUATION = {
     "'": " ", "’": " ", "ʼ": " ", "‘": " ",
     "-": " ", "‐": " ", "‑": " ", "–": " ", "—": " ",
@@ -1047,12 +1050,17 @@ def normalize_all(text: str) -> str:
     """Comme normalize, sans limite de longueur."""
     out: list[str] = []
     blanks = 0          # blancs de la source qui terminent `out` (ceux qu'un « : ; ! ? … » efface)
+    after_opening = False   # le caractère précédent est un « ou un ‹ : les blancs qui suivent s'effacent
     for raw in unicodedata.normalize("NFD", text.lower()):
         if unicodedata.combining(raw):
             continue
         char = _LIGATURES.get(raw) or _PUNCTUATION.get(raw, raw)
+        if after_opening and raw.isspace():
+            continue
+        after_opening = raw in _OPENING
         if raw in _SPACE_BEFORE:
             del out[len(out) - blanks:]
+            blanks = 0
         if char.isspace():
             out.append(" ")
             blanks = blanks + 1 if raw.isspace() else 0

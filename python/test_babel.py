@@ -437,10 +437,13 @@ def test_search_of_a_book_shows_that_book():
     ("l’aube ʼ‘ — un–deux ‐ trois‑", "l aube      un deux   trois "),
     ("image : le jeu ; fin", "image, le jeu, fin"),
     ("galerie : son hexagone", "galerie, son hexagone"),
+    ("dit « mot », puis", "dit mot, puis"),
+    ("dit\u00a0«\u00a0mot\u202f»\u00a0; ‹ x › fin", "dit mot, x fin"),
+    ("dit \"mot\" , puis “x” ”", "dit mot , puis x "),
     ("quoi ? a ; b x\u00a0: z\u202f! z", "cuoi. a, b x, z. z"),
     ("l'étage \u00a0\n ; suite", "l etage, suite"),
     ("quoi ? non ! voir… ok...", "cuoi. non. voir. oc..."),
-    ("« cité » \"ici\" “là” ‹x› 12 %", " cite  ici la x  "),
+    ("« cité » \"ici\" “là” ‹x› 12 %", "cite ici la x  "),
     ("ñandú çà", "nandu ca"),
 ])
 def test_normalize(raw, expected):

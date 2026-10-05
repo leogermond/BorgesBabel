@@ -114,9 +114,12 @@ func _test_normalize_crosscheck() -> void:
 		"galerie : son hexagone": "galerie, son hexagone",
 		"quoi ? a ; b x\u00a0: z\u202f! z": "cuoi. a, b x, z. z",
 		"x : z": "x, z",
+		"dit « mot », puis": "dit mot, puis",
+		"dit\u00a0«\u00a0mot\u202f»\u00a0; ‹ x › fin": "dit mot, x fin",
+		"dit \"mot\" , puis “x” ”": "dit mot , puis x ",
 		"l'étage \u00a0\n ; suite": "l etage, suite",
 		"quoi ? non ! voir… ok...": "cuoi. non. voir. oc...",
-		"« cité » \"ici\" “là” ‹x› 12 %": " cite  ici la x  ",
+		"« cité » \"ici\" “là” ‹x› 12 %": "cite ici la x  ",
 		"Été À L'ÎLE, kiwi quay yoyo, cœur æther Straße": "ete a l ile, civi cuai ioio, coeur aether strasse",
 	}
 	var cases := []

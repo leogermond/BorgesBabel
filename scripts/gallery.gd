@@ -544,6 +544,7 @@ var _speaker: AmbientSpeakerScript          # haut-parleur d'ambiance du vestibu
 var _missing_books := PackedInt32Array()    # rangs des livres absents (volés) de la galerie
 var _titles_bytes := PackedByteArray()      # titres posés (ceux de _titles_key), sans les absents
 var _texture_marks := false                 # la texture branchée marque des livres absents
+var _faces_shown := Vector4i(-1, -1, -1, -1)  # livres absents donnés au matériau des façades
 
 
 ## Une galerie au repère local (p_hexagon, p_level), à la vraie adresse `p_place` (place_of) ;
@@ -599,8 +600,7 @@ func readdress(p_hexagon: int, p_level: int, p_detail: Detail, p_place: Dictiona
 		_titles_key = ""
 		_set_titles_alpha(0.0)
 		_missing_books = _missing_in(place)
-		if _face_material != null:
-			_face_material.set_shader_parameter("missing", _missing_faces())
+		_show_missing_faces()
 	set_detail(p_detail)
 
 
@@ -924,10 +924,18 @@ func refresh_missing() -> void:
 	if books == _missing_books:
 		return
 	_missing_books = books
-	if _face_material != null:
-		_face_material.set_shader_parameter("missing", _missing_faces())
+	_show_missing_faces()
 	if _book_material != null:
 		_set_texture(_titles_bytes if _titles_key == place.key else PackedByteArray())
+
+
+## Donne aux façades peintes les livres absents, seulement quand ils changent (un pas readresse
+## des dizaines de galeries, presque toujours sans livre absent).
+func _show_missing_faces() -> void:
+	var faces := _missing_faces()
+	if _face_material != null and faces != _faces_shown:
+		_face_material.set_shader_parameter("missing", faces)
+		_faces_shown = faces
 
 
 ## Les quatre premiers livres absents, pour les façades peintes (−1 : aucun). Plus de quatre livres
@@ -1118,7 +1126,7 @@ func _fit(node: Node) -> void:
 	elif node.name == "Faces":
 		if _face_material == null:
 			_face_material = _seeded_material("FACES")
-			_face_material.set_shader_parameter("missing", _missing_faces())
+			_show_missing_faces()
 		node.material_override = _face_material
 
 

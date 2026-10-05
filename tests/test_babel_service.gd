@@ -140,6 +140,9 @@ func _init() -> void:
 	BookTextScript.restart()
 	_check(BookTextScript.page_lines(0, 0, 0, 0, 0, 0)[0].length() == 80 and BookTextScript.last_error.is_empty(), "après le service muet, le vrai service revient")
 
+	_check_launchers()
+	_check_background()
+
 	# Sans Python : la page affiche l'erreur, le jeu continue.
 	print("  (erreurs attendues ci-dessous : interpréteur volontairement introuvable)")
 	ProjectSettings.set_setting(BookTextScript.PYTHON_SETTING, "/chemin/introuvable/python3")
@@ -202,6 +205,124 @@ func _check_image_parity() -> void:
 	print("  6000 × 4000 : requête de %d octets préparée en %.1f ms, search_image %.1f ms" % [payload, request_ms, _ms(start)])
 	_check(payload < 300_000, "6000 × 4000 : requête bornée (%d octets < 300 000)" % payload)
 	_check(not spot.is_empty() and BookTextScript.image_books([spot])[0], "6000 × 4000 : adresse dans un livre d'images")
+
+
+## Lanceurs : un interpréteur lancé par un lanceur (comme `py -3` sous Windows, `uv run` ailleurs)
+## est un enfant qui tient le même tube. Le chien de garde arrête toute la famille : la lecture
+## bloquée rend la main au délai, au lancement comme pendant une requête. Un lancement trop lent
+## se réessaie après un délai (et le message le dit) ; ce n'est pas « Python introuvable ».
+func _check_launchers() -> void:
+	var saved := [BookTextScript.timeout_ms, BookTextScript.start_timeout_ms, BookTextScript.start_retry_ms]
+	BookTextScript.timeout_ms = SHORT_TIMEOUT_MS
+	BookTextScript.start_timeout_ms = SHORT_TIMEOUT_MS
+	BookTextScript.start_retry_ms = 300
+
+	# Lanceur qui ne lance rien de bon : un enfant tient la sortie et dort.
+	print("  (erreurs attendues ci-dessous : lanceur volontairement muet au lancement)")
+	var slow := _launcher("babel_lanceur_lent.sh", "sleep 47.31 &\nwait\n")
+	ProjectSettings.set_setting(BookTextScript.PYTHON_SETTING, "\"%s\"" % slow)
+	BookTextScript.restart()
+	var start := Time.get_ticks_usec()
+	var lines := BookTextScript.page_lines(0, 0, 0, 0, 0, 0)
+	var start_ms := _ms(start)
+	print("  lanceur muet au lancement : page rendue en %.0f ms (délai %d ms)" % [start_ms, SHORT_TIMEOUT_MS])
+	_check(start_ms >= SHORT_TIMEOUT_MS and start_ms < SHORT_TIMEOUT_MS + 1500 and lines[0].begins_with("Bibliothèque indisponible"),
+		"lanceur dont l'enfant tient le tube : le lancement rend la main au délai (%.0f ms)" % start_ms)
+	_check(not _running("sleep 47.31"), "lanceur muet : l'enfant est arrêté avec lui")
+	_check(BookTextScript.last_error.contains("ne s'est pas lancé") and not BookTextScript.last_error.contains("introuvable"),
+		"lancement trop lent : le message le dit, sans parler de Python introuvable : « %s »" % BookTextScript.last_error)
+	start = Time.get_ticks_usec()
+	BookTextScript.page_lines(0, 0, 0, 0, 0, 0)
+	_check(_ms(start) < 100.0 and BookTextScript.last_error.contains("nouvel essai") and not BookTextScript.last_error.contains("introuvable"),
+		"pendant le délai de relance : échec immédiat (%.0f ms), « nouvel essai » : « %s »" % [_ms(start), BookTextScript.last_error])
+	# Le vrai Python revient sans restart() : la requête suivante, après le délai, relance le service.
+	ProjectSettings.set_setting(BookTextScript.PYTHON_SETTING, "")
+	OS.delay_msec(BookTextScript.start_retry_ms + 100)
+	_check(BookTextScript.page_lines(0, 0, 0, 0, 0, 0)[0].length() == 80 and BookTextScript.last_error.is_empty(),
+		"après un lancement trop lent, le service se relance de lui-même (sans restart)")
+
+	# Lanceur dont l'enfant est le service : il répond au ping, puis dort pendant une requête.
+	print("  (erreurs attendues ci-dessous : service muet derrière un lanceur)")
+	var asleep := "import sys,json,time;sys.stdin.readline();print(json.dumps(dict(protocol=%d)),flush=True);sys.stdin.readline();time.sleep(53.17)" % BookTextScript.PROTOCOL
+	var child := _launcher("babel_lanceur_enfant.sh", "python3 -c '%s' &\nwait\n" % asleep)
+	ProjectSettings.set_setting(BookTextScript.PYTHON_SETTING, "\"%s\"" % child)
+	BookTextScript.restart()
+	start = Time.get_ticks_usec()
+	lines = BookTextScript.page_lines(0, 0, 0, 0, 0, 0)
+	var mute_ms := _ms(start)
+	print("  service muet derrière un lanceur : page rendue en %.0f ms (délai %d ms)" % [mute_ms, SHORT_TIMEOUT_MS])
+	_check(mute_ms >= SHORT_TIMEOUT_MS and mute_ms < SHORT_TIMEOUT_MS + 1500 and BookTextScript.last_error.contains("n'a pas répondu"),
+		"service muet derrière un lanceur : la lecture rend la main au délai (%.0f ms)" % mute_ms)
+	_check(not _running("time.sleep(53.17)"), "service muet derrière un lanceur : l'interpréteur enfant est arrêté")
+	_check(BookTextScript.descendants(OS.get_process_id()).size() >= 0 and BookTextScript.launcher_selector("-3")
+			and BookTextScript.launcher_selector("-3.12-64") and BookTextScript.launcher_selector("-V:3.12")
+			and not BookTextScript.launcher_selector("-u") and not BookTextScript.launcher_selector("-X"),
+		"sélecteurs de version du lanceur `py` reconnus (retirés de la commande directe)")
+
+	BookTextScript.timeout_ms = saved[0]
+	BookTextScript.start_timeout_ms = saved[1]
+	BookTextScript.start_retry_ms = saved[2]
+	ProjectSettings.set_setting(BookTextScript.PYTHON_SETTING, "")
+	BookTextScript.restart()
+	DirAccess.remove_absolute(slow)
+	DirAccess.remove_absolute(child)
+
+
+## Service d'arrière-plan : les genres des livres d'une galerie arrivent par ticket, comme le
+## service du fil principal les donne ; le fil principal lit des pages pendant ce temps ; arrêté,
+## le service rend une erreur aux requêtes en file.
+func _check_background() -> void:
+	var start := Time.get_ticks_usec()
+	var tickets := [BookTextScript.submit_gallery_flags("h", 0, "-3", 0), BookTextScript.submit_gallery_flags("g", 1, "-2", -1)]
+	var submit_ms := _ms(start)
+	var lines := BookTextScript.page_lines(5, 5, 0, 0, 0, 0)
+	var flags := []
+	var deadline := Time.get_ticks_msec() + 20000
+	while flags.size() < tickets.size() and Time.get_ticks_msec() < deadline:
+		var response: Variant = BookTextScript.take(tickets[flags.size()])
+		if response == null:
+			OS.delay_msec(5)
+		else:
+			flags.append(response.get("is_image", []))
+	_check(submit_ms < 2.0 and lines[0].length() == 80, "deux requêtes en arrière-plan : %.2f ms sur le fil principal, qui lit une page entre-temps" % submit_ms)
+	var expected := BookTextScript.gallery_image_books(17, -3)
+	_check(flags.size() == 2 and flags[0] == expected and flags[1] == expected and expected.size() == 640,
+		"genres d'une galerie par le service d'arrière-plan = ceux du fil principal (h = 17, coordonnée calculée sur le fil)")
+	var held := BookTextScript.submit({"op": "ping"})
+	BookTextScript.cancel(held)
+	var late := []
+	for i in 4:
+		late.append(BookTextScript.submit({"op": "is_image_book", "gallery": {"hexagon": str(i), "level": "0"}}))
+	BookTextScript.shutdown()
+	var stopped := 0
+	for ticket: int in late:
+		var response: Variant = BookTextScript.take(ticket)
+		if response is Dictionary and (response.has("is_image") or response.get("code") == "stopped"):
+			stopped += 1
+	_check(stopped == late.size() and BookTextScript.take(held) == null and BookTextScript.pending() == 0,
+		"arrêt : chaque requête en file a sa réponse ou l'erreur « stopped », un ticket annulé n'en a pas")
+
+
+func _launcher(file_name: String, body: String) -> String:
+	var path := OS.get_cache_dir().path_join(file_name)
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	file.store_string("#!/bin/sh\n" + body)
+	file.close()
+	OS.execute("chmod", ["+x", path])
+	return path
+
+
+## Vrai si un processus dont la ligne de commande contient `marker` tourne encore.
+func _running(marker: String) -> bool:
+	OS.delay_msec(100)
+	var output := []
+	var pattern := "[%s]%s" % [marker[0], marker.substr(1)]   # ne se reconnaît pas lui-même (sh -c)
+	OS.execute("pgrep", ["-f", pattern], output)
+	if not "".join(output).strip_edges().is_empty():
+		var listing := []
+		OS.execute("pgrep", ["-af", pattern], listing)
+		print("    encore là : %s" % "".join(listing).strip_edges().replace("\n", " / "))
+	return not "".join(output).strip_edges().is_empty()
 
 
 ## Une image de test : bandes de couleur et rectangles semi-transparents (remplissages rapides).

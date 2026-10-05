@@ -53,11 +53,16 @@ var origin_hexagon_b25 := "0"
 var origin_level_b25 := "0"
 ## Repère local des galeries (Gallery.hexagon et Gallery.level, noms des nœuds) : des int qui
 ## suivent l'origine pas à pas. Ils valent la vraie coordonnée tant qu'elle tient dans un int —
-## c'est le cas du départ, tiré au hasard dans la plage des int comme avant ; après place_origin
-## sur une coordonnée plus grande, ils partent d'un petit entier tiré de la coordonnée (la graine
-## des hauteurs et des cuirs des livres en dépend, pas le texte des livres).
+## c'est le cas du départ, tiré au hasard dans la plage des int ; après place_origin sur une
+## coordonnée plus grande, ils partent d'un petit entier tiré de la coordonnée. Rien de ce qui se
+## voit n'en dépend : graine des livres et titres des dos se tirent de la clé de chaque galerie.
 var origin_hexagon: int
 var origin_level: int
+## Empreintes des vraies coordonnées de l'origine (BookText.b25_print) : elles suivent les pas
+## (print_add) et donnent la clé de chaque galerie (Gallery.place), celle qu'on obtiendrait en
+## relisant la coordonnée entière : même galerie, même aspect, quel que soit le chemin.
+var origin_hexagon_print := PackedInt64Array([0, 0])
+var origin_level_print := PackedInt64Array([0, 0])
 
 var player: PlayerScript
 var hud: HudScript
@@ -86,6 +91,8 @@ func _ready() -> void:
 	origin_level = rng.randi() - (1 << 31)
 	origin_hexagon_b25 = BookTextScript.b25_from_int(origin_hexagon)
 	origin_level_b25 = BookTextScript.b25_from_int(origin_level)
+	origin_hexagon_print = BookTextScript.b25_print(origin_hexagon_b25)
+	origin_level_print = BookTextScript.b25_print(origin_level_b25)
 	_update_galleries()
 
 	player = PlayerScript.new()
@@ -226,6 +233,8 @@ func place_origin(hexagon: Variant, level: Variant) -> bool:
 	origin_level_b25 = l
 	origin_hexagon = _local_coordinate(h)
 	origin_level = _local_coordinate(l)
+	origin_hexagon_print = BookTextScript.b25_print(h)
+	origin_level_print = BookTextScript.b25_print(l)
 	_update_galleries(Vector2i.ZERO, true)
 	if hud != null:
 		hud.set_address(origin_hexagon_b25, origin_level_b25)
@@ -246,6 +255,7 @@ static func _local_coordinate(coordinate: String) -> int:
 func _shift(step: int) -> void:
 	origin_hexagon += step
 	origin_hexagon_b25 = BookTextScript.b25_add_small(origin_hexagon_b25, step)
+	origin_hexagon_print = BookTextScript.print_add(origin_hexagon_print, step)
 	player.position.z -= step * GalleryScript.PITCH
 	_update_galleries(Vector2i(step, 0))
 	hud.set_address(origin_hexagon_b25, origin_level_b25, Vector2i(step, 0))
@@ -255,6 +265,7 @@ func _shift(step: int) -> void:
 func _shift_level(step: int) -> void:
 	origin_level += step
 	origin_level_b25 = BookTextScript.b25_add_small(origin_level_b25, step)
+	origin_level_print = BookTextScript.print_add(origin_level_print, step)
 	player.position.y -= step * GalleryScript.LEVEL_PITCH
 	_update_galleries(Vector2i(0, step))
 	hud.set_address(origin_hexagon_b25, origin_level_b25, Vector2i(0, step))
@@ -331,13 +342,15 @@ func _update_galleries(moved := Vector2i.ZERO, readdress_all := false) -> void:
 		if gallery == null:
 			gallery = _take_spare(spares, detail)
 			if gallery == null:
-				gallery = GalleryScript.create(origin_hexagon + cell.x, origin_level + cell.y, detail as GalleryScript.Detail)
+				gallery = GalleryScript.create(origin_hexagon + cell.x, origin_level + cell.y, detail as GalleryScript.Detail, place_at(cell))
 				add_child(gallery)
 			else:
-				gallery.readdress(origin_hexagon + cell.x, origin_level + cell.y, detail as GalleryScript.Detail)
+				gallery.readdress(origin_hexagon + cell.x, origin_level + cell.y, detail as GalleryScript.Detail, place_at(cell))
 			placed[cell] = gallery
-		elif gallery.detail != detail:
-			gallery.set_detail(detail as GalleryScript.Detail)
+		else:
+			gallery.place = place_at(cell)   # même galerie, décrite depuis la nouvelle origine
+			if gallery.detail != detail:
+				gallery.set_detail(detail as GalleryScript.Detail)
 		gallery.position = Vector3(0.0, cell.y * GalleryScript.LEVEL_PITCH, cell.x * GalleryScript.PITCH)
 		gallery.set_speaker(AmbientSpeakerScript.has_speaker(cell))   # musique : vestibules du niveau, ±30 m
 	for pool: Array in spares:
@@ -347,8 +360,16 @@ func _update_galleries(moved := Vector2i.ZERO, readdress_all := false) -> void:
 	_lit.clear()
 	for cell: Vector2i in lit_cells():
 		_lit.append(placed[cell])
-	GalleryScript.prefetch_titles(origin_hexagon, origin_level, lit_cells())   # titres du prochain pas
+	GalleryScript.prefetch_titles(place_at, lit_cells())   # titres du prochain pas
 	_update_lamps()
+
+
+## La vraie adresse de la galerie de la case `cell` (dz, dy) relative à l'origine (Gallery.place_of) :
+## les chaînes de l'origine, partagées sans copie, le décalage, et la clé tirée des empreintes.
+func place_at(cell: Vector2i) -> Dictionary:
+	return GalleryScript.place_of(origin_hexagon_b25, cell.x, origin_level_b25, cell.y,
+		BookTextScript.gallery_key_of(BookTextScript.print_add(origin_hexagon_print, cell.x),
+			BookTextScript.print_add(origin_level_print, cell.y)))
 
 
 ## Part réelle de chaque vraie lampe, selon sa distance à l'œil (voir Gallery.real_weight).

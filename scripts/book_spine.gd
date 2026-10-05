@@ -2,9 +2,11 @@ class_name BookSpine
 extends RefCounted
 ## Dos des livres : titre court en lettres dorées, composé en Lora.
 ##
-## Le titre se tire de l'adresse du livre seule (hexagone, niveau, mur, étagère, livre), jamais
-## de son contenu : SHA-256 de l'adresse, puis un tirage simple d'octets parmi les 25 symboles.
-## Le même livre porte donc toujours le même titre, sur toute machine.
+## Le titre se tire de l'adresse du livre seule, jamais de son contenu : SHA-256 de
+## « dos|clé de la galerie|mur|étagère|livre », puis un tirage simple d'octets parmi les 25
+## symboles. La clé de la galerie (BookText.gallery_key) ne dépend que des vraies coordonnées
+## (hexagone et niveau, entiers de toute taille) : le même livre porte donc toujours le même
+## titre, sur toute machine, qu'on arrive à sa galerie en marchant ou d'un saut.
 ##
 ## Affichage : le nuanceur des livres de gallery.gd (variante BOOKS de Gallery.LIBRARY_SHADER)
 ## dessine le titre sur la face du dos, à partir d'un atlas des 47 glyphes de Lora rendu une fois
@@ -59,16 +61,10 @@ static var _advances := PackedFloat32Array()
 
 # --- Titres ---------------------------------------------------------------------------------
 
-## Le titre du livre désigné : 6 à 16 symboles, ni espace en tête ni en queue.
-static func title(hexagon: int, level: int, wall: int, shelf: int, book: int) -> String:
-	return _spell(_indices("dos|%d|%d|%d|%d|%d" % [hexagon, level, wall, shelf, book]))
-
-
-## Même titre, depuis une adresse au format de BookText.address() (hexagone et niveau en
-## décimal, de toute longueur) ; la page est ignorée.
-static func title_at(target: Dictionary) -> String:
-	return _spell(_indices("dos|%s|%s|%d|%d|%d" % [
-		str(target.hexagon), str(target.level), target.wall, target.shelf, target.book]))
+## Le titre du livre (mur, étagère, livre) de la galerie de clé `gallery_key`
+## (BookText.gallery_key) : 6 à 16 symboles, ni espace en tête ni en queue.
+static func title(gallery_key: String, wall: int, shelf: int, book: int) -> String:
+	return _spell(_indices("dos|%s|%d|%d|%d" % [gallery_key, wall, shelf, book]))
 
 
 ## Les rangs dans ALPHABET des symboles du titre, tirés des octets du condensat SHA-256 de la
@@ -203,6 +199,17 @@ static func decode_image_flag(bytes: PackedByteArray, book := 0) -> bool:
 	return (_words(bytes, book)[0] >> IMAGE_BIT) & 1 == 1
 
 
+## Pose les drapeaux « livre d'images » (`image_books`, 640 valeurs dans l'ordre de la texture)
+## sur un tampon de galerie déjà rempli de ses titres : le titre reste, seul le bit 20 change.
+static func set_image_flags(bytes: PackedByteArray, image_books: Array) -> void:
+	for i in mini(image_books.size(), bytes.size() / BYTES_PER_BOOK):
+		var at := i * BYTES_PER_BOOK + 2   # octet 2 du mot 0 : bits 16 à 23
+		if bool(image_books[i]):
+			bytes[at] |= 1 << (IMAGE_BIT - 16)
+		else:
+			bytes[at] &= ~(1 << (IMAGE_BIT - 16))
+
+
 static func _words(bytes: PackedByteArray, book: int) -> PackedInt32Array:
 	var words := PackedInt32Array([0, 0, 0, 0])
 	var at := book * BYTES_PER_BOOK
@@ -216,12 +223,12 @@ static func _words(bytes: PackedByteArray, book: int) -> PackedInt32Array:
 ## Les octets de la texture des titres d'une galerie (TEXTURE_WIDTH × TEXTURE_HEIGHT texels
 ## RGBA8), livre de rang (mur·5 + étagère)·32 + livre à l'octet 12 × rang, comme
 ## BookText.gallery_image_books ; `image_books` (même ordre, facultatif) donne le drapeau.
-## Hexagone et niveau : entiers, ou décimaux en chaîne (même titre que title_at).
+## La galerie se désigne par sa clé (BookText.gallery_key), comme dans title.
 ## Sans état partagé : se calcule aussi bien sur un fil de WorkerThreadPool.
-static func gallery_title_bytes(hexagon: Variant, level: Variant, image_books: Array = []) -> PackedByteArray:
+static func gallery_title_bytes(gallery_key: String, image_books: Array = []) -> PackedByteArray:
 	var bytes := PackedByteArray()
 	bytes.resize(WALLS * SHELVES * BOOKS * BYTES_PER_BOOK)
-	var prefix := "dos|%s|%s|" % [str(hexagon), str(level)]
+	var prefix := "dos|%s|" % gallery_key
 	var i := 0
 	for wall in WALLS:
 		for shelf in SHELVES:

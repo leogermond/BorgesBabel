@@ -66,6 +66,17 @@ const KEY_CACHE := 64
 const B25_POW12 := 59604644775390625
 const B25_POW11 := 2384185791015625
 const LOG10_25 := 1.3979400086720377
+## log₁₀ 25 = LOG10_25_HI + LOG10_25_LO, la part haute sur 31 bits (1501026655 / 2^30).
+const LOG10_25_HI := 1.3979400089010596
+const LOG10_25_LO := -2.2902201796043677e-10
+## Voisinage d'une puissance de dix (sur la partie fractionnaire de log₁₀) où le nombre de chiffres
+## décimaux se tranche exactement, et taille au plus (chiffres base 25) de ce calcul exact.
+const POW10_MARGIN := 1.0e-9
+const EXACT_DIGITS_LIMIT := 20000
+## Empreintes des coordonnées (b25_print) : restes modulo 25^8 − 1 et 25^8 + 1.
+const PRINT_M1 := 152587890624
+const PRINT_M2 := 152587890626
+const PRINT_CACHE := 8
 
 ## Délai de relance au plus après des lancements trop lents (voir _start).
 const START_RETRY_MAX_MS := 60000
@@ -117,6 +128,7 @@ static var _b25_regex: RegEx
 static var _b25_regex_any_case: RegEx
 static var _b25_canonical: RegEx
 static var _int_limit := ""              # 2^62 en base 25 : au-delà, plus d'arithmétique int
+static var _print_cache: Dictionary = {} # coordonnée → empreinte (b25_print), les dernières
 
 
 # --- Adresses -------------------------------------------------------------------------------
@@ -333,8 +345,10 @@ static func b25_add_small(text: String, delta: int) -> String:
 ## La différence a − b, résumée : {sign, exact: bool, value: int (valeur exacte quand exact),
 ## digits: chiffres décimaux de |a − b|, log10: log₁₀ |a − b| (0 pour 0)}. Exacte quand
 ## |a − b| < 25^12 ; sinon ordre de grandeur d'après les 12 chiffres base 25 de tête de la
-## différence (erreur relative < 10^−15). Coût : quelques copies et comparaisons natives ; une
-## boucle GDScript ne parcourt les chiffres qu'au-delà du premier chiffre qui diffère.
+## différence (erreur relative < 10^−15), et nombre de chiffres décimaux exact (voir
+## _digits_of_estimate : au ras d'une puissance de dix, comparaison exacte). Coût : quelques copies
+## et comparaisons natives ; une boucle GDScript ne parcourt les chiffres qu'au-delà du premier
+## chiffre qui diffère.
 static func b25_difference(a: String, b: String) -> Dictionary:
 	var short_a := a.length() - (1 if a.begins_with("-") else 0) <= 13
 	var short_b := b.length() - (1 if b.begins_with("-") else 0) <= 13
@@ -350,7 +364,8 @@ static func b25_difference(a: String, b: String) -> Dictionary:
 		# Signes opposés (zéro compté positif) : |a − b| = |a| + |b|, d'après les chiffres de tête alignés.
 		var width := maxi(la, lb)
 		var top := _top_window(a, oa, la, width) + _top_window(b, ob, lb, width)
-		return _approx_difference(-1 if na else 1, log(float(top)) / log(10.0) + (width - 12) * LOG10_25)
+		return _approx_difference(-1 if na else 1, top, width - 12, func() -> String:
+			return _add_magnitudes(a.substr(oa), b.substr(ob)) if width <= EXACT_DIGITS_LIMIT else "")
 	# Même signe : |a − b| = ||a| − |b||, du signe de la comparaison (inversé pour deux négatifs).
 	var order := _cmp_magnitude(a, oa, b, ob)
 	if order == 0:
@@ -370,17 +385,189 @@ static func b25_difference(a: String, b: String) -> Dictionary:
 			i += _borrow_run(x, y, i, length)   # « 1 000… − 0 ooo… » : la valeur reste 1
 	if i >= length:
 		return _exact_difference(value * sign)
-	return _approx_difference(sign, log(float(value)) / log(10.0) + (length - i) * LOG10_25)
+	return _approx_difference(sign, value, length - i, func() -> String:
+		return _sub_magnitudes(x.substr(p), y.substr(p)) if length - p <= EXACT_DIGITS_LIMIT else "")
 
 
-## Nombre de chiffres décimaux de |coordonnée| (1 pour zéro) : exact pour une petite valeur,
-## d'après le logarithme des chiffres de tête au-delà.
+## Empreinte d'une coordonnée canonique : ses restes modulo PRINT_M1 = 25^8 − 1 et PRINT_M2 =
+## 25^8 + 1 (ensemble, le reste modulo (25^16 − 1)/2 ≈ 7·10^21). Deux coordonnées ont la même
+## empreinte seulement si elles diffèrent d'un multiple de ce nombre. C'est une fonction de la
+## valeur seule : l'empreinte de c ± k est celle de c, plus ou moins k (print_add, sans relire la
+## coordonnée), si bien que le jeu la suit pas à pas et qu'elle vaut, à l'arrivée, celle de la
+## chaîne relue en entier — quel que soit le chemin. Coût pour une grande coordonnée : les
+## chiffres lus 8 par 8 dans des entiers de 64 bits (to_int64_array), ~20 ms à 656 000 chiffres ;
+## les dernières empreintes calculées restent en mémoire (PRINT_CACHE).
+static func b25_print(text: String) -> PackedInt64Array:
+	if b25_fits_int(text):
+		var v := b25_to_int(text)
+		return PackedInt64Array([posmod(v, PRINT_M1), posmod(v, PRINT_M2)])
+	if _print_cache.has(text):
+		return _print_cache[text]
+	var negative := text.begins_with("-")
+	var bytes := text.to_ascii_buffer()
+	var start := 1 if negative else 0
+	var head := (bytes.size() - start) % 8
+	var first := 0   # les chiffres de tête qui ne remplissent pas un mot de 8
+	for i in range(start, start + head):
+		var c := bytes[i]
+		first = first * 25 + (c - 48 if c <= 57 else c - 87)
+	var words := bytes.slice(start + head).to_int64_array()
+	# Mot k (octet 0 = chiffre de poids fort, petit-boutiste) ; son rang compté depuis le poids
+	# faible est count − 1 − k : 25^8 ≡ 1 (mod M1) et ≡ −1 (mod M2).
+	var count := words.size()
+	var even := 0   # mots de rang pair
+	var odd := 0
+	var k := 0
+	for word in words:
+		# Chiffres d'un octet : '0'-'9' → 0-9, 'a'-'o' (bit 6) → 10-24 ; puis assemblage par paires.
+		var v: int = (word & 0x0F0F0F0F0F0F0F0F) + 9 * ((word >> 6) & 0x0101010101010101)
+		v = (v & 0x00FF00FF00FF00FF) * 25 + ((v >> 8) & 0x00FF00FF00FF00FF)
+		v = (v & 0x0000FFFF0000FFFF) * 625 + ((v >> 16) & 0x0000FFFF0000FFFF)
+		v = (v & 0xFFFFFFFF) * 390625 + (v >> 32)
+		if (count - 1 - k) & 1 == 0:
+			even += v
+		else:
+			odd += v
+		k += 1
+	if count & 1 == 0:   # rang de la tête : count
+		even += first
+	else:
+		odd += first
+	var r1 := posmod(even + odd, PRINT_M1)
+	var r2 := posmod(even - odd, PRINT_M2)
+	var result := PackedInt64Array([posmod(-r1, PRINT_M1), posmod(-r2, PRINT_M2)]) if negative \
+		else PackedInt64Array([r1, r2])
+	if _print_cache.size() >= PRINT_CACHE:
+		_print_cache.erase(_print_cache.keys()[0])
+	_print_cache[text] = result
+	return result
+
+
+## L'empreinte de c + delta, d'après celle de c (voir b25_print).
+static func print_add(print: PackedInt64Array, delta: int) -> PackedInt64Array:
+	return PackedInt64Array([posmod(print[0] + delta, PRINT_M1), posmod(print[1] + delta, PRINT_M2)])
+
+
+## Clé d'une galerie, d'après les empreintes de son hexagone et de son niveau : elle ne dépend que
+## des vraies coordonnées. Les titres des dos (BookSpine) et la graine des livres (Gallery) en
+## sont tirés.
+static func gallery_key_of(hexagon_print: PackedInt64Array, level_print: PackedInt64Array) -> String:
+	return "%x.%x.%x.%x" % [hexagon_print[0], hexagon_print[1], level_print[0], level_print[1]]
+
+
+## Clé de la galerie (hexagone, niveau) : int ou chaînes base 25 de toute taille.
+static func gallery_key(hexagon: Variant, level: Variant) -> String:
+	return gallery_key_of(b25_print(b25(hexagon)), b25_print(b25(level)))
+
+
+## Nombre de chiffres décimaux de |coordonnée| (1 pour zéro) : calcul en int pour une petite
+## valeur ; au-delà, d'après le logarithme des chiffres de tête, et au ras d'une puissance de dix
+## par comparaison exacte (_digits_of_estimate).
 static func b25_decimal_digits(text: String) -> int:
 	if b25_fits_int(text):
 		return str(absi(b25_to_int(text))).length()
 	var start := 1 if text.begins_with("-") else 0
 	var length := text.length() - start
-	return int(floor(log(float(_top_window(text, start, length, length))) / log(10.0) + (length - 12) * LOG10_25)) + 1
+	var top := _top_window(text, start, length, length)
+	return _digits_of_estimate(top, length - 12, func() -> String:
+		return text.substr(start) if length <= EXACT_DIGITS_LIMIT else "")
+
+
+## Le nombre de chiffres décimaux d'un nombre X ≈ top·25^m (top : ses chiffres base 25 de tête, au
+## moins 25^11 ; X à moins de 2·25^−11 près en relatif). log₁₀ X se calcule en deux parts (entière,
+## et fraction précise à ~10^−14 : m·log₁₀ 25 avec log₁₀ 25 coupé en une part haute de 31 bits,
+## exacte en produit, et une part basse). Hors du voisinage d'une puissance de dix, le compte en
+## découle ; dans ce voisinage (POW10_MARGIN), il se tranche exactement : `exact` rend les chiffres
+## base 25 de X (ou "" quand X a plus de EXACT_DIGITS_LIMIT chiffres : le compte reste celui du
+## logarithme, juste sauf à moins de 10^−9 près en relatif d'une puissance de dix).
+static func _digits_of_estimate(top: int, m: int, exact: Callable) -> int:
+	var parts := _log10_parts(top, m)
+	var whole: int = parts[0]
+	var frac: float = parts[1]
+	if frac > POW10_MARGIN and frac < 1.0 - POW10_MARGIN:
+		return whole + 1
+	var power := whole if frac <= 0.5 else whole + 1   # la puissance de dix la plus proche
+	var x: String = exact.call()
+	if x.is_empty():
+		return whole + 1
+	return power + 1 if _at_least_pow10(x.lstrip("0"), power) else power
+
+
+## [partie entière, partie fractionnaire] de log₁₀(top·25^m), top > 0.
+static func _log10_parts(top: int, m: int) -> Array:
+	var high := m * LOG10_25_HI            # exact : m < 2^21, LOG10_25_HI sur 31 bits
+	var whole := floori(high)
+	var frac := (high - whole) + m * LOG10_25_LO + log(float(top)) / log(10.0)
+	var carry := floori(frac)
+	return [whole + carry, frac - carry]
+
+
+## Vrai quand le nombre de chiffres base 25 `x` (sans zéro de tête) vaut au moins 10^k, k ≥ 0.
+## 10^k = c·2^k·25^q, q = ⌊k/2⌋, c = 5 si k est impair, 1 sinon : x ≥ 10^k si et seulement si
+## ses chiffres au-dessus des q derniers (⌊x / 25^q⌋) font au moins c·2^k.
+static func _at_least_pow10(x: String, k: int) -> bool:
+	@warning_ignore("integer_division")
+	var q := k / 2
+	if x.length() <= q:
+		return false
+	var high := x.left(x.length() - q)
+	var bound := _pow2_b25(k, 5 if k % 2 == 1 else 1)
+	if high.length() != bound.length():
+		return high.length() > bound.length()
+	return high >= bound   # même longueur : l'ordre des codes ASCII est celui des chiffres
+
+
+## c·2^k en base 25 (chaîne canonique), par tranches de 25^5 multipliées par 2^30 à la fois.
+static func _pow2_b25(k: int, c: int) -> String:
+	const LIMB := 9765625   # 25^5
+	var limbs := PackedInt64Array([c])
+	var left := k
+	while left > 0:
+		var shift := mini(left, 30)
+		left -= shift
+		var carry := 0
+		for i in limbs.size():
+			var v := (limbs[i] << shift) + carry
+			limbs[i] = v % LIMB
+			@warning_ignore("integer_division")
+			carry = v / LIMB
+		while carry > 0:
+			limbs.append(carry % LIMB)
+			@warning_ignore("integer_division")
+			carry = carry / LIMB
+	var text := b25_from_int(limbs[limbs.size() - 1])
+	for i in range(limbs.size() - 2, -1, -1):
+		text += b25_from_int(limbs[i]).lpad(5, "0")
+	return text
+
+
+## |x| + |y| (chiffres base 25 sans signe), en chiffres base 25.
+static func _add_magnitudes(x: String, y: String) -> String:
+	var length := maxi(x.length(), y.length())
+	var a := x.lpad(length, "0")
+	var b := y.lpad(length, "0")
+	var out := PackedByteArray()
+	out.resize(length + 1)
+	var carry := 0
+	for i in range(length - 1, -1, -1):
+		var d := _digit(a, i) + _digit(b, i) + carry
+		carry = 1 if d >= 25 else 0
+		out[i + 1] = B25_DIGITS.unicode_at(d - 25 * carry)
+	out[0] = B25_DIGITS.unicode_at(carry)
+	return out.get_string_from_ascii().lstrip("0")
+
+
+## x − y pour x > y (chiffres base 25 sans signe, même longueur), en chiffres base 25.
+static func _sub_magnitudes(x: String, y: String) -> String:
+	var length := x.length()
+	var out := PackedByteArray()
+	out.resize(length)
+	var borrow := 0
+	for i in range(length - 1, -1, -1):
+		var d := _digit(x, i) - _digit(y, i) - borrow
+		borrow = 1 if d < 0 else 0
+		out[i] = B25_DIGITS.unicode_at(d + 25 * borrow)
+	return out.get_string_from_ascii().lstrip("0")
 
 
 ## Le résumé d'une différence connue en int : exacte sous 25^12, en ordre de grandeur au-delà
@@ -393,8 +580,12 @@ static func _exact_difference(value: int) -> Dictionary:
 	return {"sign": signi(value), "exact": true, "value": value, "digits": digits, "log10": log10}
 
 
-static func _approx_difference(sign: int, log10: float) -> Dictionary:
-	return {"sign": sign, "exact": false, "value": 0, "digits": int(floor(log10)) + 1, "log10": log10}
+## Le résumé d'une grande différence X ≈ top·25^m (voir _digits_of_estimate ; `exact` rend les
+## chiffres base 25 de X, ou "" s'ils sont trop nombreux).
+static func _approx_difference(sign: int, top: int, m: int, exact: Callable) -> Dictionary:
+	var parts := _log10_parts(top, m)
+	return {"sign": sign, "exact": false, "value": 0, "digits": _digits_of_estimate(top, m, exact),
+		"log10": parts[0] + parts[1]}
 
 
 ## Valeur du chiffre i de la chaîne.
@@ -541,21 +732,18 @@ static func gallery_image_books(hexagon: Variant, level: Variant) -> Array:
 	return response.get("is_image", [])
 
 
-## Le titre inscrit sur le dos du livre : quelques lettres tirées d'un condensat SHA-256 de son adresse.
+## Le titre inscrit sur le dos du livre, tel qu'il s'affiche : quelques lettres tirées d'un
+## condensat SHA-256 de son adresse (BookSpine.title, clé de galerie gallery_key). Hexagone et
+## niveau : int ou chaînes base 25 de toute taille.
 static func title(hexagon: Variant, level: Variant, wall: int, shelf: int, book: int) -> String:
-	if hexagon is int and level is int:
-		return BookSpineScript.display_title(BookSpineScript.title(hexagon, level, wall, shelf, book))
-	return title_at(address(hexagon, level, wall, shelf, book))
+	return BookSpineScript.display_title(BookSpineScript.title(gallery_key(hexagon, level), wall, shelf, book))
 
 
-## Le titre d'un livre désigné par son adresse. Coordonnées qui tiennent dans un int : la clé
-## décimale de BookSpine.title (celle des dos des galeries) ; au-delà, BookSpine.title_at sur
-## les chaînes base 25.
+## Le titre d'un livre désigné par son adresse (la page est ignorée) : celui de son dos dans la
+## galerie, quelle que soit la taille des coordonnées.
 static func title_at(target: Dictionary) -> String:
 	var a := book_of(target)
-	if b25_fits_int(a.hexagon) and b25_fits_int(a.level):
-		return BookSpineScript.display_title(BookSpineScript.title(b25_to_int(a.hexagon), b25_to_int(a.level), a.wall, a.shelf, a.book))
-	return BookSpineScript.display_title(BookSpineScript.title_at(a))
+	return BookSpineScript.display_title(BookSpineScript.title(gallery_key(a.hexagon, a.level), a.wall, a.shelf, a.book))
 
 
 static func _page_of(target: Dictionary, page: int) -> int:

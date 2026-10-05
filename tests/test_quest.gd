@@ -28,14 +28,20 @@ def digits10(x):
         p *= 10
         k += 1
     return k
+M1, M2 = 25 ** 8 - 1, 25 ** 8 + 1
 out = []
 for a, b, k in json.load(open(sys.argv[1], encoding='utf-8')):
-    x, y = babel.b25_to_int(a), babel.b25_to_int(b)
+    y = babel.b25_to_int(b)
+    if isinstance(a, dict):   # a = b ± (10^p + delta) : différence au ras d'une puissance de dix
+        x = y + a['sign'] * (10 ** a['pow10'] + a['delta'])
+    else:
+        x = babel.b25_to_int(a)
     d = x - y
     exact = abs(d) < 25 ** 12
-    out.append({'add': babel.int_to_b25(x + k), 'sign_diff': (d > 0) - (d < 0), 'exact': exact,
-                'value': str(d) if exact else '', 'digits_diff': digits10(d), 'cmp': (x > y) - (x < y),
-                'sign': (x > 0) - (x < 0), 'digits': digits10(x)})
+    out.append({'a': babel.int_to_b25(x) if isinstance(a, dict) else a, 'add': babel.int_to_b25(x + k), 'sign_diff': (d > 0) - (d < 0),
+                'exact': exact, 'value': str(d) if exact else '', 'digits_diff': digits10(d),
+                'cmp': (x > y) - (x < y), 'sign': (x > 0) - (x < 0), 'digits': digits10(x),
+                'print': [x % M1, x % M2], 'print_add': [(x + k) % M1, (x + k) % M2]})
 print(json.dumps(out))
 """
 const ENTRY_KEYS := ["id", "title", "author", "year", "language", "context", "group", "licence", "protected", "address", "page_count", "pages", "notice_book", "notice_hash"]
@@ -97,6 +103,12 @@ func _test_arithmetic() -> void:
 	for _i in 8:
 		cases.append([("-" if rng.randi() % 2 else "") + _b25_digits(rng, rng.randi_range(1, 2300)),
 			("-" if rng.randi() % 2 else "") + _b25_digits(rng, rng.randi_range(1, 2300)), rng.randi_range(-30, 30)])
+	# Au ras d'une puissance de dix, de 10^12 à 10^20000 : a − b = ±(10^p + δ), δ ∈ {−1, 0, 1}, b de
+	# toute taille (le nombre de chiffres de a − b, et de a quand b = 0, se tranche exactement).
+	for p: int in [12, 17, 18, 25, 100, 999, 4000, 12345, 20000]:
+		for delta: int in [-1, 0, 1]:
+			var base: String = ["0", _b25_digits(rng, 30), "-" + _b25_digits(rng, 5000), _b25_digits(rng, 20000)][(p + delta + 1) % 4]
+			cases.append([{"pow10": p, "delta": delta, "sign": 1 if (p + delta) % 3 else -1}, base, 1])
 	var file := FileAccess.open(ARITH_CASES_PATH, FileAccess.WRITE)
 	file.store_string(JSON.stringify(cases))
 	file.close()
@@ -115,11 +127,12 @@ func _test_arithmetic() -> void:
 		return
 	var mismatches := 0
 	var worst_usec := 0
+	var print_mismatches := 0
 	for i in cases.size():
-		var a: String = cases[i][0]
+		var want: Dictionary = expected[i]
+		var a: String = want.a
 		var b: String = cases[i][1]
 		var k: int = cases[i][2]
-		var want: Dictionary = expected[i]
 		var t := Time.get_ticks_usec()
 		var d := BookTextScript.b25_difference(a, b)
 		worst_usec = maxi(worst_usec, Time.get_ticks_usec() - t)
@@ -128,8 +141,21 @@ func _test_arithmetic() -> void:
 				or d.digits != int(want.digits_diff) or BookTextScript.b25_compare(a, b) != int(want.cmp) \
 				or BookTextScript.b25_sign(a) != int(want.sign) or BookTextScript.b25_decimal_digits(a) != int(want.digits):
 			mismatches += 1
-			print("    écart sur le cas %d (%d et %d chiffres) : %s / %s" % [i, a.length(), b.length(), d, {"sign": want.sign_diff, "exact": want.exact, "digits": want.digits_diff}])
-	_check(mismatches == 0, "±k, différence (signe, valeur exacte ou chiffres décimaux), comparaison, signe, chiffres : identiques à Python sur %d cas de 1 à 656 000 chiffres" % cases.size())
+			print("    écart sur le cas %d (%d et %d chiffres) : %s / %s ; chiffres de a : %d / %d" % [i, a.length(), b.length(), d,
+				{"sign": want.sign_diff, "exact": want.exact, "digits": want.digits_diff}, BookTextScript.b25_decimal_digits(a), int(want.digits)])
+		var print_a := BookTextScript.b25_print(a)
+		var want_print := PackedInt64Array(want.print)
+		var want_add := PackedInt64Array(want.print_add)
+		if print_a != want_print or BookTextScript.print_add(print_a, k) != want_add \
+				or BookTextScript.b25_print(BookTextScript.b25_add_small(a, k)) != want_add:
+			print_mismatches += 1
+			print("    empreinte : écart sur le cas %d (%d chiffres) : %s, attendu %s" % [i, a.length(), print_a, want_print])
+	_check(mismatches == 0, "±k, différence (signe, valeur exacte ou chiffres décimaux), comparaison, signe, chiffres : identiques à Python sur %d cas de 1 à 656 000 chiffres, dont 27 au ras de 10^12 … 10^20000" % cases.size())
+	_check(print_mismatches == 0, "empreintes (restes modulo 25^8 ∓ 1) : identiques à Python, et print_add(empreinte, k) = empreinte de la coordonnée ± k, relue (%d cas)" % cases.size())
+	var t_print := Time.get_ticks_usec()
+	BookTextScript._print_cache.clear()
+	BookTextScript.b25_print(huge)
+	print("    empreinte d'une coordonnée de 656 000 chiffres : %.1f ms" % ((Time.get_ticks_usec() - t_print) / 1000.0))
 	print("    différence résumée la plus lente : %.1f ms" % (worst_usec / 1000.0))
 
 

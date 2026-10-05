@@ -8,6 +8,15 @@ const BookTextScript := preload("res://scripts/book_text.gd")
 const QuestScript := preload("res://scripts/quest.gd")
 const BookSpineScript := preload("res://scripts/book_spine.gd")
 const AmbientSpeakerScript := preload("res://scripts/ambient_speaker.gd")
+const HudScript := preload("res://scripts/hud.gd")
+const MainScript := preload("res://scripts/main.gd")
+const CarnetScript := preload("res://scripts/carnet.gd")
+## Dossier des fichiers du joueur pendant le test (jamais ceux du jeu) ; et celui de la sortie.
+const USER_TEST_DIR := "user://essai_test_world"
+const USER_EXIT_DIR := "user://essai_test_world_sortie"
+## Une aide de commande à l'écran nommerait une touche ou un geste.
+const HINT_WORDS: Array[String] = ["Échap", "Esc", "Tab", "Suppr", "touche", "clic", "souris", "tourner la page",
+	"refermer", "← →", "ZQSD", "WASD", "E :", "²", "carnet", "aleph", "zahir", "tlon", "sator", "golem"]
 ## Budget d'un pas (vestibule ou niveau), celui de test_depth : moins d'une demi-image à 60 i/s.
 const SHIFT_BUDGET_USEC := 8000
 # 17 galeries sur 3 niveaux le long du vestibule, 6 niveaux du puits en galeries entières,
@@ -19,9 +28,14 @@ var _failures := 0
 
 
 func _initialize() -> void:
+	QuestScript.user_dir = USER_TEST_DIR
+	_clear_dir(USER_TEST_DIR)
+	_clear_dir(USER_EXIT_DIR)
 	var main: Node3D = load("res://main.tscn").instantiate()
 	root.add_child(main)
 	await _steps(30)
+	_check(main.hud.quest != null and main.hud.quest.entry_id == QuestScript.FIRST_QUEST,
+		"premier lancement (dossier du joueur vide) : la quête en cours est « %s »" % (main.hud.quest.title if main.hud.quest != null else "aucune"))
 
 	var player: CharacterBody3D = main.player
 	var start: int = main.origin_hexagon
@@ -91,6 +105,12 @@ func _initialize() -> void:
 
 	await _test_far_walk(main, player)
 	await _test_same_gallery(main)
+	await _test_focus_and_hints(main)
+	await _test_invocations(main)
+	await _test_missing_books(main)
+	main = await _test_restart(main)
+	await _test_exit_errors()
+	_clear_dir(USER_TEST_DIR)
 
 	_check(await AmbientSpeakerScript.silence_all(self), "sortie : les haut-parleurs se taisent, le serveur audio rend leurs lectures")
 	print("test_world : %s" % ("OK" if _failures == 0 else "%d échec(s)" % _failures))
@@ -173,10 +193,11 @@ func _test_same_gallery(main: Node3D) -> void:
 	for route: Array in routes:
 		var label: String = route[0]
 		var moves: Vector2i = route[3]
-		main.player.position = Vector3(0.0, 0.05, 3.2)   # au milieu de la galerie : aucun pas pendant l'attente
+		main.player.position = Vector3(0.0, 0.05, 3.2)   # au milieu de la galerie : aucun pas pendant les mesures
 		main.player.velocity = Vector3.ZERO
 		main.place_origin(route[1], route[2])
-		await _steps(5)   # comme après un saut en jeu : quelques images avant le premier pas
+		# Le pire cas : le premier pas juste après le saut, sans attendre une image (la retenue préparée
+		# sur un fil peut n'être pas finie, les titres de toutes les galeries attendent leur calcul).
 		var worst := 0
 		for _i in absi(moves.x):
 			var t := Time.get_ticks_usec()
@@ -186,7 +207,8 @@ func _test_same_gallery(main: Node3D) -> void:
 			var t := Time.get_ticks_usec()
 			main._shift_level(signi(moves.y))
 			worst = maxi(worst, Time.get_ticks_usec() - t)
-		_check(worst <= SHIFT_BUDGET_USEC, "%s : chaque pas en moins de %.0f ms (pire : %.2f ms)" % [label, SHIFT_BUDGET_USEC / 1000.0, worst / 1000.0])
+		print("  %s : pire pas juste après le saut %.2f ms" % [label, worst / 1000.0])
+		_check(worst <= SHIFT_BUDGET_USEC, "%s : chaque pas en moins de %.0f ms, le premier juste après le saut (pire : %.2f ms)" % [label, SHIFT_BUDGET_USEC / 1000.0, worst / 1000.0])
 		var walked := _looks(main)
 		var h := BookTextScript.b25_add_small(route[1], moves.x)
 		var l := BookTextScript.b25_add_small(route[2], moves.y)
@@ -269,6 +291,286 @@ func _measure_steps(main: Node3D, player: CharacterBody3D) -> Dictionary:
 	@warning_ignore("integer_division")
 	worst.median = times[times.size() / 2]
 	return worst
+
+
+## Retour du focus (FOCUS_IN) : la souris n'est pas recapturée sous le panneau de quête ni sous le
+## carnet ; aucune aide de commande dans les textes du Hud et du lecteur.
+func _test_focus_and_hints(main: Node3D) -> void:
+	var hud: Hud = main.hud
+	main._capture_mouse()   # le bibliothécaire marche, souris capturée
+	_check(main._mouse_captured and main.mouse_mode_requested == Input.MOUSE_MODE_CAPTURED, "contrôle : souris capturée en marchant")
+	_key(HudScript.QUEST_KEY, true)
+	_check(hud.is_panel_open(), "le panneau de quête s'ouvre")
+	main.mouse_mode_requested = -1
+	main.notification(NOTIFICATION_APPLICATION_FOCUS_IN)
+	_check(main.mouse_mode_requested == -1, "retour du focus, panneau ouvert : la souris n'est pas recapturée")
+	var texts := _all_texts(hud) + _all_texts(main.reader, main.reader._text)
+	_key(KEY_ESCAPE, true)
+	_key(CarnetScript.CARNET_KEY, true)
+	_check(hud.carnet.is_open(), "le carnet s'ouvre")
+	main.notification(NOTIFICATION_APPLICATION_FOCUS_IN)
+	_check(main.mouse_mode_requested == -1, "retour du focus, carnet ouvert : la souris n'est pas recapturée")
+	_key(KEY_ESCAPE, true)
+	main.notification(NOTIFICATION_APPLICATION_FOCUS_IN)
+	_check(main.mouse_mode_requested == Input.MOUSE_MODE_CAPTURED, "contrôle : retour du focus sans fenêtre, la souris est recapturée")
+	main.place_origin(0, 0)
+	main._open_address({"hexagon": "0", "level": "0", "wall": 1, "shelf": 2, "book": 3})
+	texts += _all_texts(hud) + _all_texts(main.reader, main.reader._text)
+	main._close_book()
+	var hints := texts.filter(func(t: String) -> bool:
+		return HINT_WORDS.any(func(word: String) -> bool: return t.contains(word)))
+	_check(hints.is_empty() and texts.size() > 20, "aucune aide de commande ni invocation nommée dans le Hud et le lecteur (%d textes, panneau et livre ouverts ; lu : %s)" % [texts.size(), hints])
+
+
+## Les invocations, tapées dans le carnet du vrai monde (push_input) : « aleph » et « zahir » vers la
+## galerie de la quête, « tlon » (un livre emporté au plus), la touche du carnet deux fois pour le
+## relire, « sator » face au carré, « golem » effacé tant que sa destination est vide.
+func _test_invocations(main: Node3D) -> void:
+	var hud: Hud = main.hud
+	var player: CharacterBody3D = main.player
+	var quest: QuestScript = hud.quest
+	main.place_origin(12, -5)
+	player.position = Vector3(1.0, 0.05, 2.0)
+	player.rotation.y = 0.7
+	player.camera.rotation.x = -0.3
+	await _steps(3)
+	var level: String = main.origin_level_b25
+	var place := player.position
+	_key(CarnetScript.CARNET_KEY, true)
+	_type("aleph ")
+	_check(main.traveling() and not hud.carnet.is_open(), "« aleph␠ » : le carnet se ferme, le fondu commence")
+	await main.travel_finished
+	var aleph_ms: float = main.last_travel_usec / 1000.0
+	_check(main.origin_hexagon_b25 == quest.book.hexagon and main.origin_level_b25 == level,
+		"« aleph » : l'hexagone du livre de la quête (%d chiffres base 25), le niveau gardé" % quest.book.hexagon.length())
+	_check(is_equal_approx(player.rotation.y, 0.7) and is_equal_approx(player.camera.rotation.x, -0.3) and player.position.distance_to(place) < 0.1 and not player.frozen,
+		"« aleph » : le bibliothécaire garde sa place, son orientation, et repart")
+	_check(hud.guidance().hall == 0 and hud.guidance().vert != 0, "« aleph » : le guidage dit « couloir : ici »")
+	_key(CarnetScript.CARNET_KEY, true)
+	_type("zahir ")
+	await main.travel_finished
+	var zahir_ms: float = main.last_travel_usec / 1000.0
+	_check(main.origin_hexagon_b25 == quest.book.hexagon and main.origin_level_b25 == quest.book.level and is_equal_approx(player.rotation.y, 0.7),
+		"« zahir » : le niveau du livre de la quête, l'hexagone et l'orientation gardés")
+	_check(hud.guidance().here, "« zahir » : la galerie de la quête est atteinte")
+
+	# « tlon » sans livre ouvert : effacé.
+	_key(CarnetScript.CARNET_KEY, true)
+	_type("tlon ")
+	_check(hud.carnet.is_open() and main.carried_book.is_empty() and not main.traveling(), "« tlon␠ » sans livre ouvert : effacé, rien n'est emporté")
+	_key(KEY_ESCAPE, true)
+
+	# Un livre visé, ouvert par E, emporté par « tlon ».
+	player.rotation = Vector3(0.0, PI / 3.0 + PI, 0.0)
+	player.camera.rotation.x = -0.2
+	player.position = Basis(Vector3.UP, PI / 3.0) * Vector3(0.0, 0.0, 3.4)
+	await _steps(3)
+	var aimed: Dictionary = main._target_book
+	var gallery: Gallery = main._galleries[Vector2i.ZERO]
+	_key(KEY_E, true, "e")
+	_key(KEY_E, false, "e")
+	_check(not aimed.is_empty() and main.reader.visible and main.reader.book == aimed, "E ouvre le livre visé")
+	_key(CarnetScript.CARNET_KEY, true)
+	_type("tlon ")
+	var first_index := _index(aimed)
+	_check(main.carried_book == aimed and main.reader.visible, "« tlon␠ », carnet ouvert sur le lecteur : le livre lu est emporté")
+	_check(QuestScript.load_carried(main.carried_path) == aimed, "le livre emporté est enregistré (%s)" % main.carried_path.get_file())
+	_check(gallery.missing_books() == PackedInt32Array([first_index]) and _missing_flags(gallery) == [first_index],
+		"un vide sur l'étagère : le livre emporté est marqué absent dans la texture de sa galerie (rang %d)" % first_index)
+	_check(_locate(gallery, aimed).is_empty() and not _locate(gallery, aimed.merged({"book": (aimed.book + 1) % 32}, true)).is_empty(),
+		"le vide ne se vise pas ; son voisin, si")
+	_key(KEY_ESCAPE, true)
+	await _steps(2)
+	_check(not main.reader.visible and main._target_book.is_empty(), "le livre refermé, le rayon ne trouve rien à sa place")
+
+	# Un second livre emporté : le premier retourne à sa place.
+	var second: Dictionary = aimed.merged({"book": (aimed.book + 1) % 32}, true)
+	main._open_address(second)
+	_key(CarnetScript.CARNET_KEY, true)
+	_type("tlon ")
+	_check(main.carried_book == second and gallery.missing_books() == PackedInt32Array([_index(second)]) and _missing_flags(gallery) == [_index(second)]
+			and not _locate(gallery, aimed).is_empty(),
+		"un second livre emporté : le premier retourne à sa place (un seul vide, celui du second)")
+	_key(KEY_ESCAPE, true)
+
+	# La touche du carnet, deux fois : le livre emporté s'ouvre.
+	_key(CarnetScript.CARNET_KEY, true)
+	_check(hud.carnet.is_open() and not main.reader.visible, "la touche du carnet ouvre le carnet")
+	_key(CarnetScript.CARNET_KEY, true)
+	_check(not hud.carnet.is_open() and main.reader.visible and main.reader.book == second and player.frozen,
+		"la même touche, carnet ouvert : le livre emporté s'ouvre dans le lecteur")
+	# Relu, « tlon » le rend à sa place (RETURN_CARRIED_ON_TLON).
+	_key(CarnetScript.CARNET_KEY, true)
+	_type("tlon ")
+	if MainScript.RETURN_CARRIED_ON_TLON:
+		_check(main.carried_book.is_empty() and gallery.missing_books().is_empty() and _missing_flags(gallery).is_empty()
+				and QuestScript.load_carried(main.carried_path).is_empty(),
+			"« tlon␠ » sur le livre emporté relu : il retourne à sa place, le vide se comble")
+	_key(KEY_ESCAPE, true)
+	_key(CarnetScript.CARNET_KEY, true)
+	_key(CarnetScript.CARNET_KEY, true)
+	_check(not main.reader.visible and not hud.carnet.is_open(), "sans livre emporté, la touche du carnet deux fois n'ouvre rien")
+	main._open_address(second)
+	_key(CarnetScript.CARNET_KEY, true)
+	_type("tlon ")
+	_key(KEY_ESCAPE, true)
+	_check(main.carried_book == second, "le second livre de nouveau emporté (pour la relance)")
+
+	# « golem » : sa destination est vide, le mot s'efface.
+	_key(CarnetScript.CARNET_KEY, true)
+	_type("golem ")
+	_check(hud.carnet.is_open() and hud.carnet.word.is_empty() and not main.traveling(), "« golem␠ » : destination vide, effacé comme un autre mot")
+	_key(KEY_ESCAPE, true)
+
+	# « sator » : la galerie du carré, face à son mur, le livre ouvert à sa page.
+	var sator := QuestScript.destination("sator")
+	_key(CarnetScript.CARNET_KEY, true)
+	_type("sator ")
+	await main.travel_finished
+	var sator_ms: float = main.last_travel_usec / 1000.0
+	await _steps(2)
+	var dest: Dictionary = sator.address
+	var book := BookTextScript.book_of(dest)
+	_check(main.origin_hexagon_b25 == dest.hexagon and main.origin_level_b25 == dest.level, "« sator » : la galerie du livre du carré (hexagone et niveau)")
+	var target: Dictionary = player.target
+	_check(not target.is_empty() and target.wall == dest.wall and target.shelf == dest.shelf and target.book == dest.book,
+		"« sator » : le bibliothécaire fait face au mur, le regard sur le livre (%s)" % [_brief(target)])
+	_check(main.reader.visible and main.reader.book == book and main.reader.page == int(dest.page)
+			and main.reader._text.text.replace("\n", "").sha256_text() == sator.sha256,
+		"« sator » : le lecteur montre la page du carré (condensat du catalogue)")
+	main._close_book()
+	print("  invocations à ~917 000 chiffres (fil principal, au noir) : aleph %.1f ms, zahir %.1f ms, sator %.1f ms (livre ouvert compris)" % [aleph_ms, zahir_ms, sator_ms])
+	_check(aleph_ms < 1000.0 and zahir_ms < 1000.0 and sator_ms < 2000.0, "coût d'une invocation mesuré, caché par le fondu")
+
+
+## Les livres volés du catalogue : un vide sur leur étagère (texture des galeries LIT et FULL,
+## façades peintes au loin), rien à viser.
+func _test_missing_books(main: Node3D) -> void:
+	var stolen: Dictionary = QuestScript.stolen_books()[0]
+	main.place_origin(stolen.hexagon, stolen.level)
+	var gallery: Gallery = main._galleries[Vector2i.ZERO]
+	var index := _index(stolen)
+	_check(gallery.missing_books() == PackedInt32Array([index]) and _missing_flags(gallery) == [index],
+		"livre volé du catalogue : marqué absent dans la texture de sa galerie, et lui seul")
+	_check(_locate(gallery, stolen).is_empty(), "livre volé du catalogue : rien à viser à sa place")
+	gallery.load_titles_now()
+	_check(gallery.titles_ready() and _missing_flags(gallery) == [index], "titres arrivés : le livre volé reste absent")
+	var neighbour: Gallery = main._galleries[Vector2i(1, 0)]
+	_check(neighbour.missing_books().is_empty() and _missing_flags(neighbour).is_empty(), "la galerie voisine n'a pas de vide")
+	main.place_origin(BookTextScript.b25_add_small(stolen.hexagon, -6), stolen.level)
+	var far: Gallery = main._galleries[Vector2i(6, 0)]
+	var faces: ShaderMaterial = far.get_node("Faces").material_override
+	_check(far.detail == GalleryScript.Detail.DISTANT and faces.get_shader_parameter("missing") == Vector4i(index, -1, -1, -1),
+		"au loin (galerie peinte) : le livre volé manque aussi à la façade")
+	var other: ShaderMaterial = main._galleries[Vector2i(5, 0)].get_node("Faces").material_override
+	_check(other.get_shader_parameter("missing") == Vector4i(-1, -1, -1, -1), "une autre façade peinte n'a pas de vide")
+	main.place_origin(0, 0)
+
+
+## Relance du jeu sur les mêmes fichiers : le livre emporté et son vide, la quête en cours ; puis
+## la quête effacée (Suppr) le reste à la relance suivante, et « aleph » s'efface sans quête.
+func _test_restart(main: Node3D) -> Node3D:
+	var carried: Dictionary = main.carried_book
+	main.queue_free()
+	await process_frame
+	main = load("res://main.tscn").instantiate()
+	root.add_child(main)
+	await _steps(5)
+	_check(main.carried_book == carried and main.hud.quest != null and main.hud.quest.entry_id == QuestScript.FIRST_QUEST,
+		"relance : le livre emporté et la quête en cours sont gardés")
+	main.place_origin(carried.hexagon, carried.level)
+	var gallery: Gallery = main._galleries[Vector2i.ZERO]
+	_check(gallery.missing_books() == PackedInt32Array([_index(carried)]) and _locate(gallery, carried).is_empty(),
+		"relance : le vide du livre emporté est toujours sur son étagère")
+	_key(HudScript.CLEAR_KEY, true)
+	_check(main.hud.quest == null, "Suppr efface la quête")
+	_key(CarnetScript.CARNET_KEY, true)
+	_type("aleph ")
+	_check(main.hud.carnet.is_open() and not main.traveling(), "sans quête, « aleph␠ » s'efface")
+	_key(KEY_ESCAPE, true)
+	main.queue_free()
+	await process_frame
+	main = load("res://main.tscn").instantiate()
+	root.add_child(main)
+	await _steps(5)
+	_check(main.hud.quest == null and not main.hud._widget.visible, "relance : la quête effacée le reste")
+	return main
+
+
+## Une sortie normale du jeu (fenêtre fermée) après le lancement des services : aucune ligne
+## « ERROR » dans le journal (processus déjà arrêtés interrogés, lectures audio, ressources).
+func _test_exit_errors() -> void:
+	var output := []
+	var started := Time.get_ticks_msec()
+	var code := OS.execute(OS.get_executable_path(), ["--headless", "--path", ProjectSettings.globalize_path("res://"),
+		"-s", "res://tests/exit_scene.gd", "--", QuestScript.USER_DIR_ARG + USER_EXIT_DIR], output, true)
+	var lines := Array("".join(output).split("\n"))
+	var errors := lines.filter(func(line: String) -> bool: return line.contains("ERROR"))
+	for line: String in errors:
+		print("    " + line)
+	_check(code == 0 and errors.is_empty() and lines.any(func(line: String) -> bool: return line.contains("sortie : services lancés")),
+		"sortie normale du jeu (%.1f s) : code %d, %d ligne(s) ERROR" % [(Time.get_ticks_msec() - started) / 1000.0, code, errors.size()])
+	_clear_dir(USER_EXIT_DIR)
+
+
+## Les rangs des livres marqués absents dans la texture des livres de la galerie.
+static func _missing_flags(gallery: Gallery) -> Array:
+	var texture := gallery.titles_texture()
+	var bytes := texture.get_image().get_data() if texture != null else PackedByteArray()
+	var flagged := []
+	for i in 640:
+		if BookSpineScript.decode_missing_flag(bytes, i):
+			flagged.append(i)
+	return flagged
+
+
+## Le livre trouvé par la galerie au point de la façade devant `book` (sa place), ou {}.
+static func _locate(gallery: Gallery, book: Dictionary) -> Dictionary:
+	var bookcase: StaticBody3D = gallery.get_node("Bookcase%d" % book.wall)
+	var local := bookcase.basis.inverse() * gallery.book_transform(book.wall, book.shelf, book.book).origin
+	local.z = GalleryScript.APOTHEM - GalleryScript.CASE_DEPTH
+	return gallery.locate_book(bookcase, bookcase.global_transform * local)
+
+
+static func _index(book: Dictionary) -> int:
+	return (int(book.wall) * GalleryScript.SHELVES + int(book.shelf)) * GalleryScript.BOOKS_PER_SHELF + int(book.book)
+
+
+## Tous les textes (étiquettes, boutons) d'un sous-arbre, visibles ou non, sauf `skip` (le texte
+## d'une page).
+static func _all_texts(node: Node, skip: Node = null) -> Array:
+	var texts := []
+	for child in node.find_children("*", "", true, false):
+		if (child is Label or child is Button) and child != skip:
+			texts.append(child.text)
+	return texts
+
+
+## Une touche par la fenêtre (push_input : _input, interface, _unhandled_input).
+func _key(code: int, pressed: bool, unicode := "") -> void:
+	var event := InputEventKey.new()
+	event.physical_keycode = code as Key
+	event.keycode = code as Key
+	event.unicode = unicode.unicode_at(0) if not unicode.is_empty() else 0
+	event.pressed = pressed
+	root.push_input(event)
+
+
+## Tape un texte, touche après touche (lettres et espace).
+func _type(text: String) -> void:
+	for c in text:
+		var code := KEY_SPACE if c == " " else (c.to_upper().unicode_at(0) as Key)
+		_key(code, true, c)
+		_key(code, false, c)
+
+
+static func _clear_dir(path: String) -> void:
+	var dir := ProjectSettings.globalize_path(path)
+	if not DirAccess.dir_exists_absolute(dir):
+		return
+	for file in DirAccess.get_files_at(dir):
+		DirAccess.remove_absolute(dir.path_join(file))
+	DirAccess.remove_absolute(dir)
 
 
 func _steps(count: int) -> void:

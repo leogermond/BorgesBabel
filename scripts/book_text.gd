@@ -603,13 +603,21 @@ static func print_context(text: String, print: PackedInt64Array) -> Dictionary:
 
 
 ## Le contexte de la coordonnée + delta (`text`, déjà calculée), d'après celui de la coordonnée :
-## sans débordement de t₀, les tranches au-dessus ne changent pas (aucune relecture) ; sinon, ou
-## pour une petite coordonnée, print_context.
+## sans débordement de t₀, les tranches au-dessus ne changent pas (aucune relecture). Une retenue
+## (ou un emprunt) qui traverse r ≥ 1 tranches de « o » (ou de « 0 ») les change en autant de
+## tranches de « 0 » (ou de « o ») et touche la suivante sans la vider ni la remplir : les suites
+## s'en déduisent (run_0 = r, run_o = 0, ou l'inverse), sans relire la longue suite (une copie
+## de la coordonnée en moins, ~1,8 ms à 656 000 chiffres). Sinon, ou pour une petite coordonnée,
+## print_context (ses suites sont alors courtes, sauf cas d'une chance sur 25^8).
 static func print_context_step(context: Dictionary, delta: int, text: String) -> Dictionary:
 	var print := print_at(context, delta)
 	if context.has("value") or b25_fits_int(text):
 		return print_context(text, print)
 	var t: int = int(context.tail) + delta * int(context.sign)
+	if t >= PRINT_CHUNK and int(context.run_o) >= 1:
+		return {"sign": print[0], "h": [print[1], print[2]], "tail": t - PRINT_CHUNK, "run_o": 0, "run_0": context.run_o}
+	if t < 0 and int(context.run_0) >= 1:
+		return {"sign": print[0], "h": [print[1], print[2]], "tail": t + PRINT_CHUNK, "run_o": context.run_0, "run_0": 0}
 	if t < 0 or t >= PRINT_CHUNK:
 		return print_context(text, print)
 	return {"sign": print[0], "h": [print[1], print[2]], "tail": t, "run_o": context.run_o, "run_0": context.run_0}

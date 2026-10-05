@@ -156,6 +156,15 @@ static func load_stream() -> AudioStream:
 	return _stream
 
 
+## Oublie le flux partagé et l'état commun (à la fermeture du jeu, par l'autoload BabelService) :
+## le flux, retenu par une variable statique, serait sinon encore en vie à la sortie du moteur.
+static func release_shared() -> void:
+	_stream = null
+	_stream_loaded = false
+	_reference = null
+	_speakers.clear()
+
+
 static func stream_path() -> String:
 	return CUSTOM_PATH if _open_exists(CUSTOM_PATH) else DEFAULT_PATH
 
@@ -234,6 +243,7 @@ func _exit_tree() -> void:
 	_speakers.erase(self)
 	if _reference == self:
 		_reference = null
+	stop()   # hors de l'arbre, il se tait : le serveur audio rend sa lecture (rien ne reste à la sortie)
 
 
 func _notification(what: int) -> void:

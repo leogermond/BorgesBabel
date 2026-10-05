@@ -63,6 +63,12 @@ var origin_level: int
 ## relisant la coordonnée entière : même galerie, même aspect, quel que soit le chemin.
 var origin_hexagon_print := PackedInt64Array([0, 0])
 var origin_level_print := PackedInt64Array([0, 0])
+## Pas préparés d'avance, par axe (« hexagon », « level ») : pas (±1) → coordonnée voisine prête
+## (String), ou calcul en cours sur un fil du moteur ({task, result}). Le pas en arrière est la
+## coordonnée d'où l'on vient ; le pas en avant ne se prépare que lorsqu'une retenue doit traverser
+## une longue suite de chiffres (BookText.long_carry) : le pas lui-même ne copie alors rien.
+var _prepared := {"hexagon": {}, "level": {}}
+var _orphans: Array[int] = []        # calculs préparés devenus inutiles, à relever
 
 var player: PlayerScript
 var hud: HudScript
@@ -124,11 +130,20 @@ func _ready() -> void:
 
 func _exit_tree() -> void:
 	GalleryScript.release_pool()
+	for axis: String in _prepared:
+		_drop_prepared(axis)
+	for task in _orphans:
+		WorkerThreadPool.wait_for_task_completion(task)
+	_orphans.clear()
 
 
 func _process(_delta: float) -> void:
 	_update_lamps()
 	GalleryScript.pump_titles()
+	for i in range(_orphans.size() - 1, -1, -1):
+		if WorkerThreadPool.is_task_completed(_orphans[i]):
+			WorkerThreadPool.wait_for_task_completion(_orphans[i])
+			_orphans.remove_at(i)
 
 
 func _physics_process(_delta: float) -> void:
@@ -235,6 +250,10 @@ func place_origin(hexagon: Variant, level: Variant) -> bool:
 	origin_level = _local_coordinate(l)
 	origin_hexagon_print = BookTextScript.b25_print(h)
 	origin_level_print = BookTextScript.b25_print(l)
+	for axis: String in _prepared:
+		_drop_prepared(axis)
+		for step: int in [1, -1]:
+			_prepare(axis, h if axis == "hexagon" else l, step)
 	_update_galleries(Vector2i.ZERO, true)
 	if hud != null:
 		hud.set_address(origin_hexagon_b25, origin_level_b25)
@@ -254,7 +273,7 @@ static func _local_coordinate(coordinate: String) -> int:
 ## Fait de la galerie voisine (+1 ou −1 le long du vestibule) la nouvelle origine.
 func _shift(step: int) -> void:
 	origin_hexagon += step
-	origin_hexagon_b25 = BookTextScript.b25_add_small(origin_hexagon_b25, step)
+	origin_hexagon_b25 = _stepped("hexagon", origin_hexagon_b25, step)
 	origin_hexagon_print = BookTextScript.print_add(origin_hexagon_print, step)
 	player.position.z -= step * GalleryScript.PITCH
 	_update_galleries(Vector2i(step, 0))
@@ -264,11 +283,47 @@ func _shift(step: int) -> void:
 ## Fait du niveau voisin (+1 au-dessus, −1 au-dessous) la nouvelle origine.
 func _shift_level(step: int) -> void:
 	origin_level += step
-	origin_level_b25 = BookTextScript.b25_add_small(origin_level_b25, step)
+	origin_level_b25 = _stepped("level", origin_level_b25, step)
 	origin_level_print = BookTextScript.print_add(origin_level_print, step)
 	player.position.y -= step * GalleryScript.LEVEL_PITCH
 	_update_galleries(Vector2i(0, step))
 	hud.set_address(origin_hexagon_b25, origin_level_b25, Vector2i(0, step))
+
+
+## La coordonnée `current` (de l'axe `axis`) ± 1 : préparée d'avance si elle l'est, sinon
+## calculée (BookText.b25_add_small) ; puis le pas suivant se prépare (voir _prepared).
+func _stepped(axis: String, current: String, step: int) -> String:
+	var ready: Variant = _prepared[axis].get(step)
+	var next: String
+	if ready is String:
+		next = ready
+	elif ready is Dictionary:
+		WorkerThreadPool.wait_for_task_completion(ready.task)   # d'ordinaire déjà fini
+		next = ready.holder.result
+		_prepared[axis].erase(step)
+	else:
+		next = BookTextScript.b25_add_small(current, step)
+	_drop_prepared(axis)
+	_prepared[axis][-step] = current
+	_prepare(axis, next, step)
+	return next
+
+
+## Lance sur un fil du moteur le calcul de `coordinate` + step quand il demande une longue retenue.
+func _prepare(axis: String, coordinate: String, step: int) -> void:
+	if not BookTextScript.long_carry(coordinate, step):
+		return
+	var holder := {"result": ""}
+	var task := WorkerThreadPool.add_task(func() -> void:
+		holder.result = BookTextScript.b25_add_small(coordinate, step), false, "pas préparé")
+	_prepared[axis][step] = {"task": task, "holder": holder}
+
+
+func _drop_prepared(axis: String) -> void:
+	for ready: Variant in _prepared[axis].values():
+		if ready is Dictionary:
+			_orphans.append(ready.task)
+	_prepared[axis] = {}
 
 
 ## Degré de détail de la galerie décalée de (dz, dy) par rapport à l'origine, ou −1

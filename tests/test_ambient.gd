@@ -72,7 +72,7 @@ func _initialize() -> void:
 	_check(AudioServer.bus_count == count_before or AudioServer.bus_count == count_before + 1, "le bus n'est créé qu'une fois")
 	_check(AudioServer.get_bus_send(index) == &"Master", "le bus part vers Master")
 	var buses_now := AudioServer.bus_count
-	Speaker.create()
+	Speaker.create().free()
 	_check(AudioServer.bus_count == buses_now, "create() ne multiplie pas les bus")
 
 	# --- horloge commune et synchronisation

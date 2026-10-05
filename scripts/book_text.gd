@@ -77,6 +77,8 @@ const EXACT_DIGITS_LIMIT := 20000
 const PRINT_M1 := 152587890624
 const PRINT_M2 := 152587890626
 const PRINT_CACHE := 8
+## Retenue « longue » (long_carry) : au-delà, main.gd prépare le pas d'avance, sur un fil.
+const LONG_CARRY := 1024
 ## Résumés d'écran (coordinate_summary) : calcul local exact jusqu'à 30 chiffres base 25 (moins
 ## de 10^42), pas à pas en int jusqu'à 2^62, 18 derniers chiffres suivis au-delà.
 const SMALL_SUMMARY_DIGITS := 30
@@ -391,6 +393,8 @@ static func b25_add_small(text: String, delta: int) -> String:
 		var result := text
 		result[length - 1] = B25_DIGITS[last]
 		return result
+	if absi(step) == 1:
+		return _carry_one(text, start, step)
 	var width := 12
 	var tail := 0
 	for i in range(length - width, length):
@@ -406,6 +410,47 @@ static func b25_add_small(text: String, delta: int) -> String:
 	var tail_text := b25_from_int(tail).lpad(width, "0")
 	var magnitude := (head + tail_text).lstrip("0")
 	return ("-" if negative else "") + magnitude
+
+
+## Vrai quand coordonnée + step (step = ±1) fait traverser à la retenue au moins LONG_CARRY
+## chiffres (une suite de « o », ou de « 0 », en queue de la valeur absolue) : le calcul copie alors
+## la coordonnée entière, de quoi le préparer d'avance (main.gd). Coût : LONG_CARRY lectures au plus.
+static func long_carry(text: String, step: int) -> bool:
+	if b25_fits_int(text):
+		return false
+	var start := 1 if text.begins_with("-") else 0
+	var magnitude_step := -step if start == 1 else step
+	var run := 111 if magnitude_step > 0 else 48
+	var length := text.length()
+	if length - start <= LONG_CARRY:
+		return false
+	for k in LONG_CARRY:
+		if text.unicode_at(length - 1 - k) != run:
+			return false
+	return true
+
+
+## ±1 sur la valeur absolue avec retenue (pas d'un vestibule) : la suite de « o » (ou de « 0 ») de
+## queue devient « 0 » (ou « o »), le chiffre qui la précède gagne (ou perd) 1. Deux copies au plus
+## de la chaîne, même quand la retenue la traverse entière (« 1ooo…o » + 1) : la longueur de la
+## suite se compte par la fonction native rstrip au-delà de 64 chiffres.
+static func _carry_one(text: String, start: int, step: int) -> String:
+	var length := text.length()
+	var run := 111 if step > 0 else 48   # « o » ou « 0 »
+	var k := 0
+	while k < 64 and length - 1 - k >= start and text.unicode_at(length - 1 - k) == run:
+		k += 1
+	var p := length - 1 - k   # chiffre qui reçoit la retenue
+	if k == 64:
+		p = text.rstrip(char(run)).length() - 1
+		k = length - 1 - p
+	var fill := "0" if step > 0 else "o"
+	if p < start:   # que des « o » : 1 suivi de zéros
+		return text.left(start) + ("1" + fill.repeat(k))
+	var digit := _digit(text, p) + step
+	if digit == 0 and p == start:   # le chiffre de tête disparaît (1000… − 1)
+		return text.left(start) + fill.repeat(k)
+	return text.left(p) + (B25_DIGITS[digit] + fill.repeat(k))
 
 
 ## La différence a − b, résumée : {sign, exact: bool, value: int (valeur exacte quand exact),

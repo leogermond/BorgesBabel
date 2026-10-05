@@ -314,6 +314,21 @@ func _check_gallery_bytes() -> void:
 	_check(BookSpineScript.decode_image_flag(flagged, 50) and not BookSpineScript.decode_image_flag(flagged, 49)
 			and BookSpineScript.decode_title(flagged, 50) == BookSpineScript.decode_title(bytes, 50),
 		"drapeau d'image transmis au bon livre, titre intact")
+	# Livres absents (volés) : bit 21 du premier mot, posé sans toucher au titre ni au drapeau d'image ;
+	# les drapeaux d'image reposés ensuite ne l'effacent pas.
+	var missing := flagged.duplicate()
+	BookSpineScript.set_missing_flags(missing, PackedInt32Array([50, 639]))
+	var marked := []
+	var intact := 0
+	for i in 640:
+		if BookSpineScript.decode_missing_flag(missing, i):
+			marked.append(i)
+		if BookSpineScript.decode_title(missing, i) == BookSpineScript.decode_title(flagged, i) \
+				and BookSpineScript.decode_image_flag(missing, i) == BookSpineScript.decode_image_flag(flagged, i):
+			intact += 1
+	BookSpineScript.set_image_flags(missing, flags)
+	_check(marked == [50, 639] and intact == 640 and BookSpineScript.decode_missing_flag(missing, 50) and BookSpineScript.decode_missing_flag(missing, 639),
+		"livres absents marqués au bit 21 (%s), titres et drapeaux d'image intacts" % [marked])
 	# Même calcul sur un fil du moteur (comme Gallery.pump_titles).
 	var out := {}
 	var task := WorkerThreadPool.add_task(func() -> void: out["bytes"] = BookSpineScript.gallery_title_bytes(_key(INT_MAX, -3)))

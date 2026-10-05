@@ -4,10 +4,12 @@ extends CanvasLayer
 ##
 ## Seuls les 25 symboles s'écrivent ; le reste se normalise comme la recherche (minuscules,
 ## accents ôtés, œ → oe, æ → ae, ß → ss, k et q → c, w → v, y → i) ou s'ignore. Espace ou
-## Entrée referme le mot : s'il est une des INVOCATIONS, le carnet émet invocation(axe) et se
-## ferme ; sinon le mot s'efface en fondu et le carnet reste ouvert. Le monde applique
-## l'invocation à la dernière page lue. Le Hud ouvre et ferme le carnet (CARNET_KEY) et lui
-## passe toutes les touches tant qu'il est ouvert.
+## Entrée referme le mot : s'il est une des INVOCATIONS et qu'elle vaut ici (can_invoke, que le
+## Hud fournit : une quête pour « aleph » et « zahir », un livre ouvert pour « tlon », une
+## destination connue pour « sator » et « golem »), le carnet émet invocation(axe) et se ferme ;
+## sinon le mot s'efface en fondu et le carnet reste ouvert, comme tout autre mot. Rien à l'écran
+## ne nomme les invocations. Le Hud ouvre et ferme le carnet (CARNET_KEY) et lui passe toutes les
+## touches tant qu'il est ouvert ; le monde applique l'invocation (main.gd).
 
 const BookSpineScript := preload("res://scripts/book_spine.gd")
 
@@ -16,7 +18,9 @@ signal toggled(open: bool)
 
 ## Touche physique sous Échap : « ² » en AZERTY, « ` » en QWERTY.
 const CARNET_KEY := KEY_QUOTELEFT
-const INVOCATIONS := {"aleph": "couloir", "zahir": "puits", "tlon": "galerie"}
+## Mot → invocation : « couloir » (vers l'hexagone de la quête), « puits » (vers son niveau),
+## « vol » (le livre ouvert, emporté), « sator » et « golem » (vers le livre de ces destinations).
+const INVOCATIONS := {"aleph": "couloir", "zahir": "puits", "tlon": "vol", "sator": "sator", "golem": "golem"}
 const ALPHABET := "abcdefghijlmnoprstuvxz ,."
 const FONT_PATH := "res://fonts/Lora-VariableFont_wght.ttf"
 const PAPER := Color(0.93, 0.89, 0.79)
@@ -37,6 +41,8 @@ const LIGATURES := {"œ": "oe", "æ": "ae", "ß": "ss", "k": "c", "q": "c", "w":
 
 ## Le mot en cours, normalisé.
 var word := ""
+## can_invoke(axe) -> bool : vrai quand l'invocation vaut ici ; sans lui, toutes valent.
+var can_invoke := Callable()
 
 var _word_label: Label
 var _fading: Label
@@ -162,7 +168,7 @@ func handle_key(key: InputEventKey) -> bool:
 ## Referme le mot : l'invocation s'il en est une, sinon le mot s'efface.
 func submit() -> void:
 	var axis: String = INVOCATIONS.get(word, "")
-	if not axis.is_empty():
+	if not axis.is_empty() and (not can_invoke.is_valid() or can_invoke.call(axis)):
 		close()
 		invocation.emit(axis)
 		return

@@ -5,7 +5,12 @@ extends CanvasLayer
 ## propose les épingles, l'ouverture d'un fichier et la saisie d'un texte.
 ##
 ## Le carnet (Carnet, touche cachée Carnet.CARNET_KEY) est un enfant du Hud : le Hud lui passe
-## toutes les touches tant qu'il est ouvert et relaie son signal invocation(axe).
+## toutes les touches tant qu'il est ouvert, lui dit quelles invocations valent (can_invoke) et
+## relaie son signal invocation(axe) ; la même touche, carnet ouvert, demande le livre emporté
+## (carried_book_requested). Aucune touche ni invocation n'est nommée à l'écran.
+##
+## La quête en cours se garde d'une session à l'autre (Quest.save_active, active_path), son
+## effacement aussi ; au premier lancement (rien d'enregistré), c'est l'entrée Quest.FIRST_QUEST.
 
 const BookTextScript := preload("res://scripts/book_text.gd")
 const GalleryScript := preload("res://scripts/gallery.gd")
@@ -15,8 +20,11 @@ const CarnetScript := preload("res://scripts/carnet.gd")
 
 ## La quête a changé (null quand elle s'efface).
 signal quest_changed(quest: QuestScript)
-## Invocation écrite dans le carnet : axe « couloir », « puits » ou « galerie ».
+## Invocation écrite dans le carnet (Carnet.INVOCATIONS) : « couloir », « puits », « vol »,
+## « sator » ou « golem ».
 signal invocation(axis: String)
+## La touche du carnet, carnet ouvert : le carnet se ferme, le monde ouvre le livre emporté s'il y en a un.
+signal carried_book_requested
 ## Le panneau de quête s'ouvre (vrai) ou se ferme (faux).
 signal quest_panel_toggled(open: bool)
 
@@ -37,7 +45,8 @@ var catalogue: Array = []
 var pins: Array = []
 ## Chemins lus au premier _ready ; les tests les détournent avant d'ajouter le Hud à l'arbre.
 var catalogue_path := QuestScript.CATALOGUE_PATH
-var pins_path := QuestScript.PINS_PATH
+var pins_path := QuestScript.user_path(QuestScript.PINS_FILE)
+var active_path := QuestScript.user_path(QuestScript.ACTIVE_FILE)
 ## Message d'erreur de la dernière recherche (vide quand tout va bien).
 var last_error := ""
 ## Le registre des livres manquants est déplié dans le panneau.
@@ -69,12 +78,18 @@ var _guide: Dictionary = {}
 var _mouse_before := Input.MOUSE_MODE_VISIBLE
 ## Dernier mode de souris demandé par le panneau (le mode effectif reste VISIBLE sans fenêtre).
 var mouse_mode_requested := -1
-var _player_was_frozen := false
 
 
 func _ready() -> void:
 	catalogue = QuestScript.load_catalogue(catalogue_path)
 	pins = QuestScript.load_pins(catalogue, pins_path)
+	var stored := QuestScript.load_active(catalogue, active_path)
+	if stored.stored:
+		quest = stored.quest
+	else:   # premier lancement : la quête d'office, enregistrée
+		var first := QuestScript.catalogue_entry(catalogue, QuestScript.FIRST_QUEST)
+		quest = QuestScript.from_entry(first) if not first.is_empty() else null
+		_save_active()
 
 	var root := Control.new()
 	root.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -104,8 +119,9 @@ func _ready() -> void:
 	_build_widget(root)
 	_build_panel()
 	carnet = CarnetScript.new()
+	carnet.can_invoke = can_invoke
 	carnet.invocation.connect(invocation.emit)
-	carnet.toggled.connect(_hold_player)
+	carnet.toggled.connect(_hold_player.bind("carnet"))
 	add_child(carnet)
 	_refresh_widget()
 
@@ -221,6 +237,7 @@ func set_target(target: Dictionary) -> void:
 func start_quest(new_quest: QuestScript) -> void:
 	quest = new_quest
 	last_error = ""
+	_save_active()
 	_refresh_widget()
 	quest_changed.emit(quest)
 	if is_panel_open():
@@ -231,6 +248,7 @@ func clear_quest() -> void:
 	if quest == null:
 		return
 	quest = null
+	_save_active()
 	_refresh_widget()
 	quest_changed.emit(null)
 	if is_panel_open():
@@ -241,10 +259,35 @@ func set_quest_page(index: int) -> void:
 	if quest == null:
 		return
 	quest.set_page(index)
+	_save_active()
 	_refresh_widget()
 	quest_changed.emit(quest)
 	if is_panel_open():
 		_rebuild_panel()
+
+
+func _save_active() -> void:
+	if not QuestScript.save_active(quest, active_path):
+		push_warning("quête en cours non enregistrée : %s" % active_path)
+
+
+## Vrai quand l'invocation `axis` (Carnet.INVOCATIONS) vaut ici : « couloir » et « puits » avec
+## une quête, « vol » un livre ouvert (le lecteur, ou le carnet ouvert par-dessus), « sator » et
+## « golem » quand le catalogue connaît leur destination. Sinon le mot s'efface, comme tout autre.
+func can_invoke(axis: String) -> bool:
+	match axis:
+		"couloir", "puits":
+			return quest != null
+		"vol":
+			return _reader_open()
+		"sator", "golem":
+			return not QuestScript.destination(axis, catalogue_path).is_empty()
+	return false
+
+
+## Vrai tant qu'une fenêtre du Hud (panneau de quête, carnet, choix de fichier) tient la souris.
+func overlay_open() -> bool:
+	return is_panel_open() or (carnet != null and carnet.is_open()) or (_file_dialog != null and _file_dialog.visible)
 
 
 ## Le guidage de la quête depuis la galerie courante ({} sans quête).
@@ -343,6 +386,10 @@ func handle_key(event: InputEvent) -> bool:
 		return false
 	var key := event as InputEventKey
 	if carnet.is_open():
+		if key.pressed and not key.echo and key.physical_keycode == CarnetScript.CARNET_KEY:
+			carnet.close()
+			carried_book_requested.emit()
+			return true
 		return carnet.handle_key(key)
 	if _file_dialog != null and _file_dialog.visible:
 		return false
@@ -372,16 +419,12 @@ func handle_key(event: InputEvent) -> bool:
 	return false
 
 
-## Le bibliothécaire reste immobile tant que le panneau ou le carnet est ouvert.
-func _hold_player(hold: bool) -> void:
+## Le bibliothécaire reste immobile tant que le panneau ou le carnet est ouvert (raison
+## `reason` de Player.hold, levée à la fermeture quel que soit l'état des autres).
+func _hold_player(hold: bool, reason := "panneau") -> void:
 	var player := _player()
-	if player == null:
-		return
-	if hold:
-		_player_was_frozen = player.frozen
-		player.frozen = true
-	else:
-		player.frozen = _player_was_frozen
+	if player != null:
+		player.hold(reason, hold)
 
 
 func _typing() -> bool:
@@ -491,8 +534,15 @@ static func direction(guide: Dictionary, target: Dictionary, camera: Camera3D) -
 		toward = Vector3(book.x - from.x, 0.0, book.z - from.z)
 	if camera == null:
 		return {"mode": mode, "heading": 0.0, "glyph": "+Z" if toward.z > 0.0 else "−Z"}
-	var forward := -camera.global_basis.z
-	var right := camera.global_basis.x
+	# Le cap se lit dans le plan horizontal : le regard (−Z de la caméra) couché au sol, quelle que
+	# soit l'inclinaison de la tête ; à la verticale, le haut de l'image donne le cap.
+	var look := -camera.global_basis.z
+	var forward := Vector3(look.x, 0.0, look.z)
+	if forward.length_squared() < 1e-8:
+		var up := camera.global_basis.y * (1.0 if look.y < 0.0 else -1.0)
+		forward = Vector3(up.x, 0.0, up.z)
+	forward = forward.normalized()
+	var right := forward.cross(Vector3.UP)
 	var heading := atan2(toward.x * right.x + toward.z * right.z, toward.x * forward.x + toward.z * forward.z)
 	return {"mode": mode, "heading": heading, "glyph": ARROWS[posmod(int(roundf(heading / (PI / 4.0))), 8)]}
 

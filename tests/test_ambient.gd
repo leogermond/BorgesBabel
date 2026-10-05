@@ -5,6 +5,7 @@ extends SceneTree
 ## python3 tools/make_ambiance.py --check
 ## godot --headless --path . -s tests/test_ambient.gd
 
+const QuestScript := preload("res://scripts/quest.gd")
 const Speaker := preload("res://scripts/ambient_speaker.gd")
 const MAX_BYTES := 10 * 1024 * 1024
 
@@ -13,6 +14,8 @@ var _world_done := false
 
 
 func _initialize() -> void:
+	QuestScript.user_dir = "user://essai_test_ambient"   # jamais les fichiers du joueur
+	_clear_user_dir()
 	# --- le fichier et le flux
 	var path := "res://audio/ambiance.ogg"
 	_check(FileAccess.file_exists(path), "audio/ambiance.ogg est livré avec le jeu")
@@ -136,6 +139,7 @@ func _initialize() -> void:
 	speaker.free()
 	_check(await Speaker.silence_all(self), "sortie : les haut-parleurs se taisent, le serveur audio rend leurs lectures")
 	print("test_ambient : %s" % ("OK" if _failures == 0 else "%d échec(s)" % _failures))
+	_clear_user_dir()
 	quit(1 if _failures else 0)
 
 
@@ -297,3 +301,13 @@ func _check(condition: bool, label: String) -> void:
 	print(("  ok    " if condition else "  ÉCHEC ") + label)
 	if not condition:
 		_failures += 1
+
+
+## Retire le dossier des fichiers du joueur du test (quête en cours écrite au premier lancement).
+static func _clear_user_dir() -> void:
+	var dir := ProjectSettings.globalize_path(QuestScript.user_dir)
+	if not QuestScript.user_dir.begins_with("user://essai") or not DirAccess.dir_exists_absolute(dir):
+		return
+	for file in DirAccess.get_files_at(dir):
+		DirAccess.remove_absolute(dir.path_join(file))
+	DirAccess.remove_absolute(dir)

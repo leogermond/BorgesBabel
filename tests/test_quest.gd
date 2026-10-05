@@ -9,6 +9,8 @@ const CarnetScript := preload("res://scripts/carnet.gd")
 const BookTextScript := preload("res://scripts/book_text.gd")
 const AmbientSpeakerScript := preload("res://scripts/ambient_speaker.gd")
 const PINS_TEST_PATH := "user://test_quete_epinglees.json"
+## Dossier des fichiers du joueur pendant le test (quête en cours, livre emporté) : jamais ceux du jeu.
+const USER_TEST_DIR := "user://essai_test_quest"
 const ARITH_CASES_PATH := "user://test_quete_arith.json"
 const ARITH_SCRIPT_PATH := "user://test_quete_arith.py"
 ## Contre-épreuve de l'arithmétique base 25 de BookText par les entiers de Python (conversions
@@ -68,6 +70,8 @@ var _jumps: Array = []
 
 
 func _initialize() -> void:
+	QuestScript.user_dir = USER_TEST_DIR
+	_clear_user_dir()
 	_test_arithmetic()
 	_test_guidance()
 	_test_catalogue()
@@ -78,6 +82,7 @@ func _initialize() -> void:
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(PINS_TEST_PATH))
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(ARITH_CASES_PATH))
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(ARITH_SCRIPT_PATH))
+	_clear_user_dir()
 	_check(await AmbientSpeakerScript.silence_all(self), "sortie : les haut-parleurs se taisent, le serveur audio rend leurs lectures")
 	print("test_quest : %s" % ("OK" if _failures == 0 else "%d échec(s)" % _failures))
 	BookTextScript.shutdown()
@@ -207,6 +212,21 @@ func _test_print_collisions(rng: RandomNumberGenerator, huge: String) -> void:
 			if BookTextScript.print_at(context, delta) != BookTextScript.b25_print(target):
 				wrong += 1
 	_check(wrong == 0, "empreinte suivie de −9 à +9 à travers retenues et emprunts = empreinte relue (%d coordonnées, écarts : %d)" % [starts.size(), wrong])
+	# Le contexte suivi pas à pas (print_context_step : suites déduites d'une retenue ou d'un emprunt
+	# sans relecture) égale le contexte de la coordonnée relue, à chaque pas, dans les deux sens.
+	var walks := starts + ["1" + "0".repeat(39) + "1", "o".repeat(32), "1" + "0".repeat(32), "-" + "o".repeat(24) + "n",
+		"ab" + "o".repeat(14), "ab" + "0".repeat(14) + "1", "-1" + "o".repeat(30), "-1" + "0".repeat(31)]
+	var drift := 0
+	for start: String in walks:
+		for step: int in [1, -1]:
+			var current := start
+			var context := BookTextScript.print_context(start, BookTextScript.b25_print(start))
+			for _i in 3:
+				current = BookTextScript.b25_add_small(current, step)
+				context = BookTextScript.print_context_step(context, step, current)
+				if context != BookTextScript.print_context(current, BookTextScript.b25_print(current)):
+					drift += 1
+	_check(drift == 0, "contexte d'empreinte suivi pas à pas à travers retenues et emprunts = contexte relu (%d départs, écarts : %d)" % [walks.size(), drift])
 
 
 ## Somme de deux nombres base 25 positifs (chiffres), pour les tests.
@@ -446,6 +466,20 @@ func _test_hud() -> void:
 	await process_frame
 	hud.invocation.connect(func(axis: String) -> void: _jumps.append(axis))
 
+	# Premier lancement (dossier du joueur vide) : la quête d'office, gardée d'une session à l'autre ;
+	# effacée, elle reste effacée.
+	_check(hud.quest != null and hud.quest.entry_id == QuestScript.FIRST_QUEST and hud.quest.title == "La biblioteca de Babel"
+			and FileAccess.file_exists(hud.active_path) and hud.active_path.begins_with(USER_TEST_DIR),
+		"premier lancement : la quête en cours est « La biblioteca de Babel », enregistrée (%s)" % hud.active_path)
+	var again := await _restarted_hud()
+	_check(again.quest != null and again.quest.entry_id == QuestScript.FIRST_QUEST, "relancé : la même quête en cours")
+	again.queue_free()
+	hud.clear_quest()
+	again = await _restarted_hud()
+	_check(again.quest == null and not again._widget.visible, "quête effacée, relancé : aucune quête (l'effacement est gardé)")
+	again.queue_free()
+	await process_frame
+
 	var texts := _texts(hud)
 	var instructions := texts.filter(func(t: String) -> bool:
 		return t.contains("ZQSD") or t.contains("WASD") or t.contains("souris") or t.contains("E :") or t.contains("Échap"))
@@ -516,8 +550,17 @@ func _test_hud() -> void:
 	_type(hud, "Tlön")
 	_check(carnet.word == "tlon", "« Tlön » s'écrit « tlon » (lu : %s)" % carnet.word)
 	_type(hud, " ")
-	_check(_jumps == ["galerie"], "« Tlön␠ » émet « galerie »")
+	_check(_jumps.is_empty() and carnet.word.is_empty() and carnet.is_open(), "« Tlön␠ » sans livre ouvert : rien n'est émis, le mot s'efface comme un autre")
+	_type(hud, "golem ")
+	_check(_jumps.is_empty() and carnet.word.is_empty() and carnet.is_open(), "« golem␠ » tant que sa destination est vide : effacé comme un autre mot")
+	_type(hud, "sator ")
+	_check(_jumps == ["sator"] and not carnet.is_open(), "« sator␠ » émet « sator » et ferme le carnet")
 	_jumps.clear()
+	var asked := []
+	hud.carried_book_requested.connect(func() -> void: asked.append(true))
+	_key(hud, CarnetScript.CARNET_KEY, true)
+	_check(_key(hud, CarnetScript.CARNET_KEY, true) and not carnet.is_open() and asked.size() == 1,
+		"la touche du carnet, carnet ouvert : le carnet se ferme et le livre emporté est demandé")
 	_key(hud, CarnetScript.CARNET_KEY, true)
 	_type(hud, "babel ")
 	_check(_jumps.is_empty() and carnet.word.is_empty() and carnet.is_open(), "« babel␠ » n'émet rien, efface le mot, le carnet reste ouvert")
@@ -534,7 +577,7 @@ func _test_hud() -> void:
 	_check(_key(hud, KEY_ESCAPE, true) and not carnet.is_open() and carnet.mouse_mode_requested == mouse_start and _jumps.is_empty(), "Échap ferme le carnet sans invocation et rend le mode retenu")
 	_check(not _key(hud, KEY_E, true, "e"), "carnet fermé : E reste au jeu")
 	_key(hud, CarnetScript.CARNET_KEY, true)
-	_check(_key(hud, CarnetScript.CARNET_KEY, true) and not carnet.is_open(), "la même touche referme le carnet")
+	_check(_key(hud, CarnetScript.CARNET_KEY, true) and not carnet.is_open() and asked.size() == 2, "la même touche referme le carnet (et demande le livre emporté)")
 	texts = _texts(hud)
 	_check(not texts.any(func(t: String) -> bool: return t.contains("²") or t.contains("`") or t.contains("carnet")), "aucune mention du carnet à l'écran")
 
@@ -596,10 +639,40 @@ func _test_hud() -> void:
 			and QuestScript.is_stolen_book(t.hexagon, t.level, t.wall, t.shelf, t.book), "%s : quête vers ce livre" % item.label)
 	_check(_key(hud, HudScript.CLEAR_KEY, true) and hud.quest == null and not hud._widget.visible, "la touche d'effacement efface la quête")
 	_check(not _key(hud, HudScript.CLEAR_KEY, true), "sans quête, la touche d'effacement reste au jeu")
+	_check(QuestScript.load_active(hud.catalogue, hud.active_path) == {"stored": true, "quest": null}, "l'effacement par la touche est enregistré")
+	_key(hud, CarnetScript.CARNET_KEY, true)
+	_type(hud, "aleph zahir ")
+	_check(_jumps.is_empty() and carnet.is_open() and carnet.word.is_empty(), "sans quête, « aleph␠ » et « zahir␠ » s'effacent comme d'autres mots")
+	_key(hud, KEY_ESCAPE, true)
+	hud.start_register_item(hud.register_items()[0])
+	var kept := await _restarted_hud()
+	_check(kept.quest != null and kept.quest.title == hud.quest.title and kept.quest.address() == hud.quest.address(),
+		"relancé : une quête hors du catalogue (registre) est gardée avec son livre et sa page")
+	kept.queue_free()
 	hud.queue_free()
 	_game.queue_free()
 	_game = null
 	await process_frame
+
+
+## Un second Hud sur les mêmes fichiers, comme au lancement suivant du jeu.
+func _restarted_hud() -> Hud:
+	var other: Hud = HudScript.new()
+	other.pins_path = PINS_TEST_PATH
+	other.set_process_input(false)
+	root.add_child(other)
+	other.set_process_input(false)   # les touches restent au premier Hud
+	await process_frame
+	return other
+
+
+func _clear_user_dir() -> void:
+	var dir := ProjectSettings.globalize_path(USER_TEST_DIR)
+	if not DirAccess.dir_exists_absolute(dir):
+		return
+	for file in DirAccess.get_files_at(dir):
+		DirAccess.remove_absolute(dir.path_join(file))
+	DirAccess.remove_absolute(dir)
 
 
 ## Tape un texte, touche après touche (« \b » : retour arrière, « \n » : Entrée) ; vrai si une
@@ -742,6 +815,17 @@ func _test_direction_glyph() -> void:
 	var here := HudScript.direction({"hall": 0, "vert": 0}, target, camera)
 	_check(here.mode == "ici" and here.glyph == "↘", "galerie atteinte : « ici », flèche couchée vers le livre (↘)")
 	_check(HudScript.direction({"hall": 1, "vert": 0}, target, null).glyph == "+Z", "sans caméra : +Z")
+	# Le cap se lit au sol, quelle que soit l'inclinaison du regard : tourné de 45°, +Z est derrière à
+	# gauche (−135°), tête droite, penchée, ou à la verticale.
+	camera.rotation = Vector3(0.0, PI / 4.0, 0.0)
+	var level_heading: float = HudScript.direction({"hall": 1, "vert": 0}, target, camera).heading
+	var pitched := []
+	for pitch: float in [-1.0, 0.8, -PI / 2.0]:
+		camera.rotation = Vector3(pitch, PI / 4.0, 0.0)
+		pitched.append(HudScript.direction({"hall": 1, "vert": 0}, target, camera).heading)
+	_check(is_equal_approx(level_heading, -0.75 * PI) and pitched.all(func(h: float) -> bool: return absf(h - level_heading) < 1e-4),
+		"regard incliné : le cap de la flèche reste celui du regard couché au sol (%.4f ; inclinés : %s)" % [level_heading, pitched])
+	camera.rotation = Vector3.ZERO
 
 	# La flèche dessinée suit les trois états.
 	var arrow := HudScript.QuestArrow.new()

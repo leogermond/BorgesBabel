@@ -132,6 +132,8 @@ static var _launch_mutex := Mutex.new()
 static var _launch_done := false
 static var _launch_result: Dictionary = {}
 static var _launcher_pid := -1   # commande du lanceur `py` → python.exe (direct_command)
+static var _reap_mutex := Mutex.new()
+static var _reaped: Dictionary = {}   # processus arrêtés par OS.kill (déjà attendus par le moteur)
 # Service d'arrière-plan (voir submit) : état partagé avec son fil, sous _bg_mutex.
 static var _bg_mutex := Mutex.new()
 static var _bg_semaphore := Semaphore.new()
@@ -142,7 +144,11 @@ static var _bg_cancelled: Dictionary = {}
 static var _bg_quit := false
 static var _bg_pid := -1
 static var _bg_busy := 0
-static var _bg_next := 0
+static var _bg_next := 0                # dernier ticket (fil principal seul)
+## Fil principal seul : requêtes et oublis qui attendent le verrou de la file (voir flush).
+static var _staged: Array = []
+static var _staged_cancels: Array = []   # [ticket, retirer de la file : bool]
+static var last_flush_parts := PackedInt32Array([0, 0, 0, 0])
 static var _bg_commands: Array = []      # relevés sur le fil principal à la création du fil
 static var _bg_script := ""
 static var _bg_start_timeout := 20000
@@ -529,11 +535,12 @@ static func b25_difference(a: String, b: String) -> Dictionary:
 ## dépasse changent) et vaut, à l'arrivée, celle de la chaîne relue en entier — quel que soit le
 ## chemin. Coût pour une grande coordonnée : les chiffres lus 8 par 8 dans des entiers de 64 bits
 ## (to_int64_array), ~30 ms à 656 000 chiffres ; les dernières empreintes calculées restent en
-## mémoire (PRINT_CACHE).
-static func b25_print(text: String) -> PackedInt64Array:
+## mémoire (PRINT_CACHE). `remember` faux : ni lue ni écrite dans cette mémoire, ce qui permet le
+## calcul sur un fil du moteur (après un premier appel de b25_fits_int sur le fil principal).
+static func b25_print(text: String, remember := true) -> PackedInt64Array:
 	if b25_fits_int(text):
 		return _print_of_int(b25_to_int(text))
-	if _print_cache.has(text):
+	if remember and _print_cache.has(text):
 		return _print_cache[text]
 	var negative := text.begins_with("-")
 	var bytes := text.to_ascii_buffer()
@@ -560,6 +567,8 @@ static func b25_print(text: String) -> PackedInt64Array:
 		h0 = (h0 * b0 + v % p0) % p0
 		h1 = (h1 * b1 + v % p1) % p1
 	var result := PackedInt64Array([-1 if negative else 1, h0, h1])
+	if not remember:
+		return result
 	if _print_cache.size() >= PRINT_CACHE:
 		_print_cache.erase(_print_cache.keys()[0])
 	_print_cache[text] = result
@@ -598,13 +607,21 @@ static func print_context(text: String, print: PackedInt64Array) -> Dictionary:
 
 
 ## Le contexte de la coordonnée + delta (`text`, déjà calculée), d'après celui de la coordonnée :
-## sans débordement de t₀, les tranches au-dessus ne changent pas (aucune relecture) ; sinon, ou
-## pour une petite coordonnée, print_context.
+## sans débordement de t₀, les tranches au-dessus ne changent pas (aucune relecture). Une retenue
+## (ou un emprunt) qui traverse r ≥ 1 tranches de « o » (ou de « 0 ») les change en autant de
+## tranches de « 0 » (ou de « o ») et touche la suivante sans la vider ni la remplir : les suites
+## s'en déduisent (run_0 = r, run_o = 0, ou l'inverse), sans relire la longue suite (une copie
+## de la coordonnée en moins, ~1,8 ms à 656 000 chiffres). Sinon, ou pour une petite coordonnée,
+## print_context (ses suites sont alors courtes, sauf cas d'une chance sur 25^8).
 static func print_context_step(context: Dictionary, delta: int, text: String) -> Dictionary:
 	var print := print_at(context, delta)
 	if context.has("value") or b25_fits_int(text):
 		return print_context(text, print)
 	var t: int = int(context.tail) + delta * int(context.sign)
+	if t >= PRINT_CHUNK and int(context.run_o) >= 1:
+		return {"sign": print[0], "h": [print[1], print[2]], "tail": t - PRINT_CHUNK, "run_o": 0, "run_0": context.run_o}
+	if t < 0 and int(context.run_0) >= 1:
+		return {"sign": print[0], "h": [print[1], print[2]], "tail": t + PRINT_CHUNK, "run_o": context.run_0, "run_0": 0}
 	if t < 0 or t >= PRINT_CHUNK:
 		return print_context(text, print)
 	return {"sign": print[0], "h": [print[1], print[2]], "tail": t, "run_o": context.run_o, "run_0": context.run_0}
@@ -1217,7 +1234,7 @@ static func _stop_and_read_stderr() -> String:
 	var err := _stderr
 	var pid := _pid
 	var waited := 0
-	while pid > 0 and OS.is_process_running(pid) and waited < STDERR_WAIT_MS:
+	while _running(pid) and waited < STDERR_WAIT_MS:
 		OS.delay_msec(10)
 		waited += 10
 	if pid > 0:
@@ -1267,7 +1284,8 @@ static func _start() -> bool:
 	# Le lancement (fork, interpréteur, ping) se fait sur un fil ; le fil principal l'attend au plus
 	# main_start_wait_ms, puis rend la main (« se lance ») : le lancement continue, la requête
 	# suivante le retrouve.
-	if _launcher == null:
+	var fresh := _launcher == null
+	if fresh:
 		_launch_done = false
 		_launch_result = {}
 		_launcher_pid = -1
@@ -1281,7 +1299,9 @@ static func _start() -> bool:
 			BookTextScript._launch_result = result
 			BookTextScript._launch_done = true
 			BookTextScript._launch_mutex.unlock())
-	var deadline := Time.get_ticks_msec() + main_start_wait_ms
+	# Un lancement déjà attendu une fois (il continue sur son fil) n'est plus attendu : la requête
+	# échoue aussitôt (« se lance encore ») jusqu'à ce qu'il aboutisse.
+	var deadline := Time.get_ticks_msec() + (main_start_wait_ms if fresh else 0)
 	while not _launched() and Time.get_ticks_msec() < deadline:
 		OS.delay_msec(2)
 	if not _launched():
@@ -1338,7 +1358,7 @@ static func _stop_launcher() -> void:
 	_launcher.wait_to_finish()
 	_launcher = null
 	var result := _launch_result
-	if result.has("pid") and OS.is_process_running(int(result.pid)):
+	if result.has("pid"):
 		_kill_tree(int(result.pid))
 
 
@@ -1357,6 +1377,7 @@ static func _launch(commands: Array, script: String, timeout: int, on_spawn := C
 		var process := OS.execute_with_pipe(command[0], args)
 		if process.is_empty():
 			continue
+		_spawned(process.pid)
 		if on_spawn.is_valid():
 			on_spawn.call(process.pid)
 		var watchdog := Watchdog.new()
@@ -1407,6 +1428,7 @@ static func direct_command(command: Array) -> Array:
 	args.append_array(["-c", "import sys; print(sys.executable)"])
 	var process := OS.execute_with_pipe(command[0], args)
 	if not process.is_empty():
+		_spawned(process.pid)
 		var watchdog := Watchdog.new()
 		watchdog.start(process.pid, RESOLVE_TIMEOUT_MS)
 		var path: String = process.stdio.get_line().strip_edges()
@@ -1433,8 +1455,9 @@ static func launcher_selector(arg: String) -> bool:
 ## parent), puis le processus et ses descendants arrêtés (SIGKILL). Rien n'attend sans borne : taskkill
 ## se lance sans être attendu (OS.create_process), pgrep sous un chien de garde. Un processus déjà
 ## fini (et attendu par le moteur) n'est pas visé : son numéro peut désigner un autre processus.
+## Un processus déjà arrêté ici ne l'est pas deux fois, ni interrogé de nouveau (voir _running).
 static func _kill_tree(pid: int) -> void:
-	if pid <= 0 or not OS.is_process_running(pid):
+	if not _claim(pid):
 		return
 	if OS.get_name() == "Windows":
 		# /T suit les liens de parenté : le lanceur doit vivre encore quand taskkill les relève.
@@ -1445,6 +1468,40 @@ static func _kill_tree(pid: int) -> void:
 	OS.kill(pid)
 	for child in family:
 		OS.kill(child)
+
+
+## Vrai si le processus `pid`, lancé par ce jeu, tourne encore. OS.kill attend la fin du processus
+## qu'il arrête (le moteur l'a alors « récolté ») sans que OS.is_process_running le sache : l'y
+## interroger ensuite écrirait une erreur (« does not exist or is not a child »). Les processus
+## arrêtés ici sont donc retenus (_reaped) et ne sont plus interrogés.
+static func _running(pid: int) -> bool:
+	if pid <= 0:
+		return false
+	_reap_mutex.lock()
+	var running := not _reaped.has(pid) and OS.is_process_running(pid)
+	_reap_mutex.unlock()
+	return running
+
+
+## Réserve l'arrêt du processus `pid` : vrai s'il tourne et qu'aucun fil ne l'a déjà arrêté ou ne
+## l'arrête (chien de garde, fil d'arrière-plan et fil principal peuvent viser le même).
+static func _claim(pid: int) -> bool:
+	if pid <= 0:
+		return false
+	_reap_mutex.lock()
+	var claimed := not _reaped.has(pid) and OS.is_process_running(pid)
+	if claimed:
+		_reaped[pid] = true
+	_reap_mutex.unlock()
+	return claimed
+
+
+## Un processus vient d'être lancé : son numéro, peut-être déjà servi à un processus arrêté, redevient
+## celui d'un processus vivant.
+static func _spawned(pid: int) -> void:
+	_reap_mutex.lock()
+	_reaped.erase(pid)
+	_reap_mutex.unlock()
 
 
 ## Les descendants d'un processus (enfants, petits-enfants…), au plus KILL_TREE_LIMIT.
@@ -1483,6 +1540,7 @@ static func _children(pid: int) -> PackedInt64Array:
 	var process := OS.execute_with_pipe("pgrep", ["-P", str(pid)])
 	if process.is_empty():
 		return children
+	_spawned(process.pid)
 	var watchdog := Watchdog.new(Watchdog.POLL_USEC, false)   # pgrep seul, sans sa famille
 	watchdog.start(process.pid, PGREP_TIMEOUT_MS)
 	var pipe: FileAccess = process.stdio
@@ -1544,6 +1602,9 @@ static func _split_command(command: String) -> Array:
 ## d'arrière-plan ; rend son ticket.
 ## `after(réponse) -> Dictionary`, facultatif, s'appelle sur le fil avec la réponse (erreurs comprises)
 ## et rend ce que take() rendra : un calcul qui ne doit pas non plus coûter au fil principal.
+## Le fil principal n'attend jamais le verrou de la file (un fil de priorité basse qu'un autre
+## processus a pu interrompre verrou tenu) : la requête attend dans _staged et passe dans la file
+## dès que le verrou est libre (flush, ici ou à l'image suivante : Gallery.pump_titles, take).
 static func submit(request: Variant, timeout := -1, after := Callable()) -> int:
 	b25_valid("0")   # expressions régulières créées ici, sur le fil principal
 	if _bg_thread == null:
@@ -1554,13 +1615,50 @@ static func submit(request: Variant, timeout := -1, after := Callable()) -> int:
 		_bg_quit = false
 		_bg_thread = Thread.new()
 		_bg_thread.start(_bg_loop, Thread.PRIORITY_LOW)
-	_bg_mutex.lock()
 	_bg_next += 1
 	var ticket := _bg_next
-	_bg_jobs.append([ticket, request, timeout, after])
-	_bg_mutex.unlock()
-	_bg_semaphore.post()
+	_staged.append([ticket, request, timeout, after])
+	flush()
 	return ticket
+
+
+## Passe dans la file du fil d'arrière-plan les requêtes et les oublis en attente, si le verrou est
+## libre ; sinon rien (à refaire à l'image suivante). Fil principal seulement, sans attente.
+## Détail du dernier flush (mesures des tests) : [essai du verrou, requêtes passées (−1 : verrou
+## pris), passage, réveils du fil], en µs sauf le nombre.
+static func flush() -> void:
+	if _staged.is_empty() and _staged_cancels.is_empty():
+		last_flush_parts = PackedInt32Array([0, 0, 0, 0])
+		return
+	var t0 := Time.get_ticks_usec()
+	var locked := _bg_mutex.try_lock()
+	var t1 := Time.get_ticks_usec()
+	if not locked:
+		last_flush_parts = PackedInt32Array([t1 - t0, -1, 0, 0])
+		return
+	var posted := _flush_locked()
+	_bg_mutex.unlock()
+	var t2 := Time.get_ticks_usec()
+	for _i in posted:
+		_bg_semaphore.post()
+	last_flush_parts = PackedInt32Array([t1 - t0, posted, t2 - t1, Time.get_ticks_usec() - t2])
+
+
+## (verrou tenu) Les requêtes en attente rejoignent la file, les oublis s'appliquent ; rend le
+## nombre de requêtes ajoutées.
+static func _flush_locked() -> int:
+	var posted := _staged.size()
+	_bg_jobs.append_array(_staged)
+	_staged.clear()
+	for entry: Array in _staged_cancels:
+		if entry[1]:
+			for i in range(_bg_jobs.size() - 1, -1, -1):
+				if _bg_jobs[i][0] == entry[0]:
+					_bg_jobs.remove_at(i)
+		if not _bg_results.erase(entry[0]):
+			_bg_cancelled[entry[0]] = true
+	_staged_cancels.clear()
+	return posted
 
 
 ## Lance le service d'arrière-plan s'il ne tourne pas encore (une requête « ping » dont la réponse
@@ -1568,35 +1666,42 @@ static func submit(request: Variant, timeout := -1, after := Callable()) -> int:
 static func warm_up() -> void:
 	if _bg_thread == null:
 		var ticket := submit({"op": "ping"})
-		_bg_mutex.lock()
-		_bg_cancelled[ticket] = true   # la requête part, sa réponse est jetée
-		_bg_mutex.unlock()
+		_staged_cancels.append([ticket, false])   # la requête part, sa réponse est jetée
+		flush()
 
 
-## La réponse d'un ticket (retirée de la mémoire), ou null tant qu'elle n'est pas arrivée.
+## La réponse d'un ticket (retirée de la mémoire), ou null tant qu'elle n'est pas arrivée — ou
+## tant que le fil d'arrière-plan tient la file (verrou pris : on relira à l'image suivante, sans
+## attendre un fil de priorité basse).
 static func take(ticket: int) -> Variant:
-	_bg_mutex.lock()
+	if not _bg_mutex.try_lock():
+		return null
+	var posted := _flush_locked()
 	var response: Variant = _bg_results.get(ticket)
 	_bg_results.erase(ticket)
 	_bg_mutex.unlock()
+	for _i in posted:
+		_bg_semaphore.post()
 	return response
 
 
-## Oublie un ticket : retiré de la file s'il y attend, sa réponse jetée si elle arrive.
+## Oublie un ticket : retiré de la file s'il y attend, sa réponse jetée si elle arrive. Sans
+## attente : une requête encore en attente du verrou est simplement retirée ; sinon l'oubli
+## s'applique au prochain verrou libre (flush).
 static func cancel(ticket: int) -> void:
-	_bg_mutex.lock()
-	for i in range(_bg_jobs.size() - 1, -1, -1):
-		if _bg_jobs[i][0] == ticket:
-			_bg_jobs.remove_at(i)
-	if not _bg_results.erase(ticket):
-		_bg_cancelled[ticket] = true
-	_bg_mutex.unlock()
+	for i in range(_staged.size() - 1, -1, -1):
+		if _staged[i][0] == ticket:
+			_staged.remove_at(i)
+			return
+	_staged_cancels.append([ticket, true])
+	flush()
 
 
-## Requêtes en file ou en cours sur le fil d'arrière-plan.
+## Requêtes en attente, en file ou en cours sur le fil d'arrière-plan (diagnostic, tests : attend
+## le verrou).
 static func pending() -> int:
 	_bg_mutex.lock()
-	var count := _bg_jobs.size() + _bg_busy
+	var count := _bg_jobs.size() + _bg_busy + _staged.size()
 	_bg_mutex.unlock()
 	return count
 
@@ -1632,6 +1737,7 @@ static func _bg_stop() -> void:
 	if _bg_thread == null:
 		return
 	_bg_mutex.lock()
+	_flush_locked()
 	_bg_quit = true
 	var pid := _bg_pid
 	for job: Array in _bg_jobs:
@@ -1804,7 +1910,7 @@ class Watchdog:
 			if fire:
 				if _tree:
 					BookTextScript._kill_tree(_pid)   # le processus et ses descendants (lanceur)
-				elif OS.is_process_running(_pid):
+				elif BookTextScript._claim(_pid):
 					OS.kill(_pid)
 				return
 			if done:

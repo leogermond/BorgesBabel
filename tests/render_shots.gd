@@ -4,6 +4,8 @@ extends SceneTree
 ##   xvfb-run -a -s "-screen 0 1600x900x24" godot --rendering-driver opengl3 --path . -s tests/render_shots.gd -- [dossier]
 ## Dossier de sortie par défaut : .foreman/scratch/screenshots
 
+const QuestScript := preload("res://scripts/quest.gd")
+
 const VIEWS := [
 	# nom, position, lacet (rad), tangage (rad)
 	["shelf", Vector3(0.0, 0.0, 0.0), PI / 3.0 + PI, -0.15],
@@ -14,6 +16,8 @@ const VIEWS := [
 
 
 func _initialize() -> void:
+	QuestScript.user_dir = "user://essai_render_shots"   # jamais les fichiers du joueur
+	_clear_user_dir()
 	var out := ProjectSettings.globalize_path("res://.foreman/scratch/screenshots")
 	var args := OS.get_cmdline_user_args()
 	if not args.is_empty():
@@ -43,6 +47,7 @@ func _initialize() -> void:
 	else:
 		push_error("aucun livre visé : capture du lecteur omise")
 
+	_clear_user_dir()
 	quit(0)
 
 
@@ -55,3 +60,13 @@ func _save(out: String, name: String) -> void:
 func _frames(n: int) -> void:
 	for i in n:
 		await process_frame
+
+
+## Retire le dossier des fichiers du joueur du test (quête en cours écrite au premier lancement).
+static func _clear_user_dir() -> void:
+	var dir := ProjectSettings.globalize_path(QuestScript.user_dir)
+	if not QuestScript.user_dir.begins_with("user://essai") or not DirAccess.dir_exists_absolute(dir):
+		return
+	for file in DirAccess.get_files_at(dir):
+		DirAccess.remove_absolute(dir.path_join(file))
+	DirAccess.remove_absolute(dir)

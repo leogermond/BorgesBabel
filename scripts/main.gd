@@ -26,6 +26,15 @@ extends Node3D
 ## distance à l'œil, et le nuanceur ajoute le reste. Les galeries et les anneaux qui
 ## naissent ou disparaissent à un pas sont hors de vue, ou à plus de
 ## Gallery.FAR_FADE_END de l'œil, là où la brume a tout recouvert.
+##
+## Invocations (écrites dans le carnet du Hud, voir Carnet.INVOCATIONS) : un saut instantané
+## (place_origin), caché par un fondu au noir (TRAVEL_FADE à l'aller, autant au retour) ;
+## « couloir » mène à l'hexagone du livre de la quête en gardant le niveau, « puits » à son niveau
+## en gardant l'hexagone, l'orientation du bibliothécaire restant la même ; « sator » et « golem »
+## mènent à la galerie du livre de leur destination (Quest.destination), face à son mur, le livre
+## ouvert à sa page ; « vol » emporte le livre ouvert (un au plus : le précédent retourne à sa
+## place), gardé d'une session à l'autre (Quest.save_carried). Les livres volés (ceux du catalogue,
+## celui qu'emporte le bibliothécaire) laissent un vide sur leur étagère (Gallery.set_missing_books).
 
 const GalleryScript := preload("res://scripts/gallery.gd")
 const AmbientSpeakerScript := preload("res://scripts/ambient_speaker.gd")
@@ -34,6 +43,7 @@ const HudScript := preload("res://scripts/hud.gd")
 const PlayerScript := preload("res://scripts/player.gd")
 const ReaderScript := preload("res://scripts/reader.gd")
 const BookTextScript := preload("res://scripts/book_text.gd")
+const QuestScript := preload("res://scripts/quest.gd")
 
 const REACH_ALONG_HALL := 8    # galeries de chaque côté le long du vestibule : 8 × 12 m = 96 m
 const REACH_VERTICAL := 30     # niveaux au-dessus et au-dessous, par le puits : 30 × 3,4 m = 102 m
@@ -44,6 +54,16 @@ const DIAGONAL_REACH := 8      # diagonales vues à travers les puits voisins (v
 
 const FOG_COLOR := GalleryScript.FOG_COLOR
 const FOG_DENSITY := GalleryScript.FOG_DENSITY
+## Fondu au noir d'une invocation, dans chaque sens : ≈ 0,4 s en tout ; le saut se fait au noir.
+const TRAVEL_FADE := 0.2
+## « tlon » tapé en relisant le livre emporté le rend à sa place (proposé, en attente de
+## confirmation : faux, « tlon » sur le livre emporté ne fait rien).
+const RETURN_CARRIED_ON_TLON := true
+## Après « sator » : distance du centre de la galerie au bibliothécaire, face au mur du livre.
+const FACING_DISTANCE := 3.3
+
+## Une invocation a fini (fondu de retour compris).
+signal travel_finished
 
 ## Adresse de la galerie placée à l'origine du monde : hexagone et niveau, entiers relatifs de
 ## toute taille, en base 25 signée (BookText : la forme du fil et du catalogue). Un pas les
@@ -87,6 +107,25 @@ var _highlight: MeshInstance3D
 var _target: Dictionary = {}        # livre visé, tel que le rend la galerie (repère local)
 var _target_book: Dictionary = {}   # le même livre, à sa vraie adresse (base 25)
 var _mouse_captured := false
+## Dernier mode de souris demandé par le monde (le mode effectif reste VISIBLE sans fenêtre).
+var mouse_mode_requested := -1
+## Le livre qu'emporte le bibliothécaire, {hexagon, level, wall, shelf, book} ; {} sans livre.
+var carried_book: Dictionary = {}
+## Fichier du livre emporté ; un test le détourne avant d'ajouter le monde à l'arbre.
+var carried_path := QuestScript.user_path(QuestScript.CARRIED_FILE)
+## Temps passé sur le fil principal par la dernière invocation, au noir (saut, reconstruction des
+## galeries, livre ouvert), en µs.
+var last_travel_usec := 0
+var _traveling := false
+var _queued: Array[String] = []        # sauts invoqués pendant un saut, dans l'ordre
+var _save_task := -1                   # écriture du livre emporté sur un fil du moteur, ou −1
+var _save_again := false               # le livre emporté a changé pendant l'écriture
+var _fade: ColorRect
+var _carried_key := ""                 # clé de la galerie du livre emporté
+var _reader_key := ""                  # clé de la galerie du livre ouvert, quand elle est connue
+var _stolen_keyed: Array = []          # livres volés du catalogue, chacun avec la clé de sa galerie
+var _missing_task := -1                # calcul de ces clés sur un fil du moteur (~0,5 s), ou −1
+var _missing_holder := {}
 
 
 func _ready() -> void:
@@ -126,13 +165,21 @@ func _ready() -> void:
 	add_child(hud)
 	hud.set_address(origin_hexagon_b25, origin_level_b25)
 	hud.set_target({})
+	hud.invocation.connect(_on_invocation)
+	hud.carried_book_requested.connect(open_carried_book)
 	reader = ReaderScript.new()
 	add_child(reader)
+	_build_fade()
+	_start_missing_keys()
 
 	_capture_mouse()
 
 
 func _exit_tree() -> void:
+	flush_carried_save()
+	if _missing_task >= 0:
+		WorkerThreadPool.wait_for_task_completion(_missing_task)
+		_missing_task = -1
 	GalleryScript.release_pool()
 	for axis: String in _prepared:
 		_drop_prepared(axis)
@@ -142,6 +189,14 @@ func _exit_tree() -> void:
 
 
 func _process(_delta: float) -> void:
+	if _save_task >= 0 and WorkerThreadPool.is_task_completed(_save_task):
+		WorkerThreadPool.wait_for_task_completion(_save_task)
+		_save_task = -1
+		if _save_again:
+			_save_again = false
+			_save_carried()
+	if _missing_task >= 0 and WorkerThreadPool.is_task_completed(_missing_task):
+		_finish_missing_keys()
 	_update_lamps()
 	GalleryScript.pump_titles()
 	for i in range(_orphans.size() - 1, -1, -1):
@@ -176,6 +231,8 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	if event is InputEventMouseMotion and _mouse_captured:
 		player.look(event.relative)
+	elif _traveling:
+		return   # pendant le fondu d'un saut, ni livre ni souris
 	elif event.is_action_pressed("toggle_mouse"):
 		if _mouse_captured:
 			_release_mouse()
@@ -189,30 +246,232 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _open_book() -> void:
-	player.frozen = true
+	_open_address(_target_book, 0, _target.gallery.place.key if not _target.is_empty() else "")
+
+
+## Ouvre le livre `book` (vraie adresse) dans le lecteur, à la page `page` ; `key`, la clé de sa
+## galerie quand on la connaît (livre visé, livre emporté) : « tlon » n'a pas à la recalculer.
+func _open_address(book: Dictionary, page := 0, key := "") -> void:
+	player.hold("lecteur", true)
 	_release_mouse()
-	reader.open(_target_book)
+	reader.open(book, page)
+	_reader_key = key
 
 
 func _close_book() -> void:
 	reader.close()
-	player.frozen = false
+	player.hold("lecteur", false)
 	_capture_mouse()
 
 
 func _capture_mouse() -> void:
 	_mouse_captured = true
+	mouse_mode_requested = Input.MOUSE_MODE_CAPTURED
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 
 func _release_mouse() -> void:
 	_mouse_captured = false
+	mouse_mode_requested = Input.MOUSE_MODE_VISIBLE
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 
+## Retour du focus : la souris se recapture si le bibliothécaire marchait, mais pas sous une
+## fenêtre du Hud (panneau de quête, carnet) qui l'a libérée ; elle le rendra en se fermant.
 func _notification(what: int) -> void:
-	if what == NOTIFICATION_APPLICATION_FOCUS_IN and _mouse_captured:
+	if what == NOTIFICATION_APPLICATION_FOCUS_IN and _mouse_captured and not (hud != null and hud.overlay_open()):
 		_capture_mouse()
+
+
+# --- Invocations ---------------------------------------------------------------------------------
+
+## Applique une invocation du carnet (Hud.invocation) ; le Hud n'émet que celles qui valent ici.
+## Un saut demandé pendant un autre attend sa fin (_queued), puis part de la galerie d'arrivée.
+func _on_invocation(axis: String) -> void:
+	if _traveling and axis in ["couloir", "puits", "sator", "golem"]:
+		_queued.append(axis)
+		return
+	match axis:
+		"couloir":
+			if hud.quest != null:
+				travel(hud.quest.book.hexagon, origin_level_b25)
+		"puits":
+			if hud.quest != null:
+				travel(origin_hexagon_b25, hud.quest.book.level)
+		"vol":
+			steal_open_book()
+		"sator", "golem":
+			var place := QuestScript.destination(axis, hud.catalogue_path)
+			if not place.is_empty():
+				travel(place.address.hexagon, place.address.level, place.address)
+
+
+## Saut à la galerie (hexagone, niveau), caché par un fondu au noir ; `book` (vraie adresse et
+## page), facultatif : le bibliothécaire arrive face à son mur et le livre s'ouvre à cette page ;
+## sinon il garde sa place dans la galerie et son orientation. Rend la main au retour du fondu.
+func travel(hexagon: Variant, level: Variant, book := {}) -> void:
+	if _traveling:
+		return
+	_traveling = true
+	player.hold("saut", true)
+	await _fade_to(1.0)
+	var started := Time.get_ticks_usec()
+	place_origin(hexagon, level)
+	player.velocity = Vector3.ZERO
+	if not book.is_empty():
+		_face_book(book)
+		_open_address(book, int(book.get("page", 0)))
+	last_travel_usec = Time.get_ticks_usec() - started
+	await _fade_to(0.0)
+	player.hold("saut", false)
+	_traveling = false
+	travel_finished.emit()
+	_drain_queue()
+
+
+## Les sauts invoqués pendant un saut, dans l'ordre : une invocation qui ne vaut plus (quête
+## effacée entre-temps, destination vide) est oubliée et la suivante part aussitôt ; chacune
+## sort de la file avant de partir (un mot tapé, un atterrissage au plus).
+func _drain_queue() -> void:
+	while not _queued.is_empty() and not _traveling:
+		_on_invocation(_queued.pop_front())
+
+
+## Vrai pendant une invocation (fondus compris).
+func traveling() -> bool:
+	return _traveling
+
+
+## Place le bibliothécaire face au livre `book` de la galerie d'origine, à FACING_DISTANCE du
+## centre, le regard sur son dos.
+func _face_book(book: Dictionary) -> void:
+	var turn := GalleryScript.BOOK_SIDES[int(book.wall)] * PI / 3.0
+	var along := GalleryScript.SHELF_WIDTH * 0.5 - (int(book.book) + 0.5) * GalleryScript.BOOK_SLOT
+	player.position = Basis(Vector3.UP, turn) * Vector3(along, 0.05, FACING_DISTANCE)
+	player.rotation = Vector3(0.0, turn + PI, 0.0)
+	var spine := GalleryScript.BOARD_BASE + (GalleryScript.SHELVES - 1 - int(book.shelf)) * GalleryScript.BOARD_PITCH \
+		+ GalleryScript.BOOK_MIN_HEIGHT * 0.5
+	player.camera.rotation.x = atan2(spine - 0.05 - PlayerScript.EYE_HEIGHT, GalleryScript.BOOK_FRONT - FACING_DISTANCE)
+
+
+func _build_fade() -> void:
+	var layer := CanvasLayer.new()
+	layer.layer = 100   # au-dessus du lecteur et du carnet
+	add_child(layer)
+	_fade = ColorRect.new()
+	_fade.color = Color(0.0, 0.0, 0.0, 0.0)
+	_fade.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_fade.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	layer.add_child(_fade)
+
+
+func _fade_to(alpha: float) -> void:
+	var tween := create_tween()
+	tween.tween_property(_fade, "color:a", alpha, TRAVEL_FADE)
+	await tween.finished
+
+
+## « tlon » : le livre ouvert dans le lecteur part avec le bibliothécaire ; celui qu'il emportait
+## retourne à sa place. Relu, le livre emporté retourne à sa place (RETURN_CARRIED_ON_TLON).
+func steal_open_book() -> void:
+	if not reader.visible or reader.book.is_empty():
+		return
+	var book := BookTextScript.book_of(reader.book)
+	if book == carried_book:
+		if RETURN_CARRIED_ON_TLON:
+			set_carried_book({})
+		return
+	set_carried_book(book, _reader_key)
+
+
+## Le livre emporté devient `book` ({} : aucun) : enregistré, son vide posé sur son étagère, celui
+## du livre précédent comblé. `key` : la clé de sa galerie, si elle est connue (sinon calculée :
+## ~50 ms à 917 000 chiffres).
+func set_carried_book(book: Dictionary, key := "") -> void:
+	carried_book = BookTextScript.book_of(book) if not book.is_empty() else {}
+	_carried_key = ""
+	if not carried_book.is_empty():
+		_carried_key = key if not key.is_empty() else BookTextScript.gallery_key(carried_book.hexagon, carried_book.level)
+	_save_carried()
+	_apply_missing()
+
+
+## Enregistre le livre emporté sur un fil du moteur (~0,8 Mo, ~65 ms à 917 000 chiffres : jamais
+## sur le fil principal), une écriture à la fois ; un changement pendant l'écriture en relance une
+## à sa fin (_process), avec le livre d'alors.
+func _save_carried() -> void:
+	if _save_task >= 0:
+		_save_again = true
+		return
+	var book := carried_book
+	var path := carried_path
+	_save_task = WorkerThreadPool.add_task(func() -> void:
+		if not QuestScript.save_carried(book, path):
+			push_warning("livre emporté non enregistré : %s" % path), false, "livre emporté")
+
+
+## Attend la fin de l'écriture du livre emporté (et de celle qu'un changement a demandée).
+func flush_carried_save() -> void:
+	while _save_task >= 0:
+		WorkerThreadPool.wait_for_task_completion(_save_task)
+		_save_task = -1
+		if _save_again:
+			_save_again = false
+			_save_carried()
+
+
+## La touche du carnet, carnet ouvert : le livre emporté s'ouvre dans le lecteur (rien sans livre).
+func open_carried_book() -> void:
+	if not carried_book.is_empty() and not _traveling:
+		_open_address(carried_book, 0, _carried_key)
+
+
+## Les clés des galeries des livres volés du catalogue et du livre emporté (enregistré), calculées
+## sur un fil du moteur (~30 ms par coordonnée de 656 000 chiffres) : le jeu démarre sans les
+## attendre ; un saut les attend (_finish_missing_keys), aucune galerie volée n'est près du départ.
+func _start_missing_keys() -> void:
+	carried_book = QuestScript.load_carried(carried_path)
+	var books := QuestScript.stolen_books(hud.catalogue_path).filter(func(b: Dictionary) -> bool: return not b.is_empty())
+	var carried := carried_book
+	var holder := {"stolen": [], "carried": []}
+	BookTextScript.b25_fits_int("0")   # borne des int posée sur le fil principal
+	_missing_holder = holder
+	_missing_task = WorkerThreadPool.add_task(func() -> void:
+		holder.stolen = _keyed(books)
+		holder.carried = _keyed([carried] if not carried.is_empty() else []), false, "livres volés")
+
+
+func _finish_missing_keys() -> void:
+	if _missing_task < 0:
+		return
+	WorkerThreadPool.wait_for_task_completion(_missing_task)
+	_missing_task = -1
+	_stolen_keyed = _missing_holder.stolen
+	var carried: Array = _missing_holder.carried
+	if not carried.is_empty() and carried[0].hexagon == carried_book.get("hexagon") and carried[0].level == carried_book.get("level"):
+		_carried_key = carried[0].key
+	_missing_holder = {}
+	_apply_missing()
+
+
+## Les livres `books` avec la clé de leur galerie (sans mémoire partagée : sur un fil du moteur).
+static func _keyed(books: Array) -> Array:
+	var keyed := []
+	for b: Dictionary in books:
+		var key := BookTextScript.gallery_key_of(BookTextScript.b25_print(b.hexagon, false), BookTextScript.b25_print(b.level, false))
+		keyed.append(b.merged({"key": key}))
+	return keyed
+
+
+## Déclare aux galeries les livres absents : ceux du catalogue (dès que leurs clés sont prêtes) et
+## le livre emporté.
+func _apply_missing() -> void:
+	var books := _stolen_keyed.duplicate()
+	if not carried_book.is_empty() and not _carried_key.is_empty():
+		books.append(carried_book.merged({"key": _carried_key}))
+	GalleryScript.set_missing_books(books)
+	for gallery: GalleryScript in _galleries.values():
+		gallery.refresh_missing()
 
 
 func _show_target(target: Dictionary) -> void:
@@ -248,6 +507,7 @@ func place_origin(hexagon: Variant, level: Variant) -> bool:
 	var l := BookTextScript.b25(level)
 	if h.is_empty() or l.is_empty():
 		return false
+	_finish_missing_keys()   # les vides des livres volés, avant les galeries de la nouvelle origine
 	origin_hexagon_b25 = h
 	origin_level_b25 = l
 	origin_hexagon = _local_coordinate(h)

@@ -209,7 +209,9 @@ par sa clé, renvoie l'adresse quand le service répond `unknown_key`, et lit ch
 délai : au-delà de 3 s (10 s pour une recherche), un chien de garde arrête le service et ses
 descendants, l'appel rend l'erreur (`BookText.last_error`) et le service repart à la requête
 suivante. Un second service, propre à un fil (`BookText.submit` / `take`), répond aux requêtes qui
-ne doivent pas coûter une image : genres des livres d'une galerie, résumé d'une coordonnée.
+ne doivent pas coûter une image : genres des livres d'une galerie, résumé d'une coordonnée. Le fil
+principal n'attend jamais le verrou de sa file : requêtes et oublis attendent le verrou libre
+(`BookText.flush`, à chaque image).
 
 | `op` | Requête | Réponse |
 |---|---|---|
@@ -251,7 +253,9 @@ godot --headless --path . -s tests/test_babel_service.gd
 tools/check_no_class_cache.sh                          # lancement sans réimport : cache de classes périmé ou vide, aucune erreur de script
 ```
 
-`check_no_class_cache.sh` lance le jeu avec `--dossier-joueur` dans son dossier temporaire. Les fichiers du joueur (épingles, quête en cours, livre emporté) vont dans `user://`, ou dans le
+`check_no_class_cache.sh` lance le jeu avec `--dossier-joueur` et `--log-file` dans son dossier
+temporaire. Une écriture abandonnée (`<fichier>.partiel`, jeu tué pendant l'écriture) est retirée
+au lancement suivant. Les fichiers du joueur (épingles, quête en cours, livre emporté) vont dans `user://`, ou dans le
 dossier donné après `--` par `--dossier-joueur=<dossier>` (`QuestScript.user_dir`) : chaque test
 qui crée le monde ou le Hud prend le sien (`user://essai_…`) et le retire en sortant ; les fichiers
 du joueur ne sont jamais touchés. `test_world` relance le monde sur les mêmes fichiers (quête et
@@ -319,7 +323,9 @@ fonctionnement, pour qui développe.
   fondu au noir (0,2 s à l'aller, 0,2 s au retour) ; le bibliothécaire garde son orientation (et sa
   place dans la galerie), sauf pour « sator » et « golem ». Le bibliothécaire reste immobile tant
   qu'une raison le retient (`Player.hold` : saut, lecteur, panneau, carnet), dans tout ordre ; un
-  saut invoqué pendant un autre part, à sa fin, de la galerie d'arrivée. Coût sur le fil principal, au noir, à
+  saut invoqué pendant un autre part, à sa fin, de la galerie d'arrivée ; une invocation qui ne vaut
+  plus à son tour (quête effacée entre-temps) s'oublie et la suivante part : un mot tapé, un
+  atterrissage au plus. Coût sur le fil principal, au noir, à
   ~917 000 chiffres (test_world) : « aleph » et « zahir » ~30 à 60 ms, « sator » ~0,23 s (livre
   jamais ouvert compris).
 

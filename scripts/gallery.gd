@@ -45,6 +45,11 @@ extends Node3D
 ## Des titres arrivés en retard entrent en fondu (TITLE_APPEAR). La dorure est éclairée comme le
 ## cuir (part réelle et part du nuanceur) ; son reflet, que les vraies lampes ne portent pas, vient
 ## du nuanceur seul, pour toutes les lampes du réseau.
+##
+## Livres absents (volés : set_missing_books) : la même texture les marque (bit 21 du premier mot,
+## BookSpine.MISSING_BIT), le nuanceur réduit leur boîte à un point ; sans titres encore, une
+## texture vide qui ne porte que ces marques. Les façades peintes reçoivent leurs rangs par un
+## uniforme (quatre au plus). locate_book ne rend rien à leur place.
 
 const GalleryScript := preload("res://scripts/gallery.gd")
 const BookSpineScript := preload("res://scripts/book_spine.gd")

@@ -26,6 +26,14 @@ direct au GPU et la souris reste libre ; le Godot Windows capture la souris et r
 | ← → (ou Page préc. / Page suiv., ou les boutons) | tourner la page |
 | E ou Échap, livre ouvert | refermer le livre |
 | Échap | libérer ou reprendre la souris |
+| Tab | panneau de quête (épingles, recherche d'un texte ou d'une image) |
+| Suppr | effacer la quête en cours |
+
+Le jeu n'affiche aucune aide de commande (ni sous le lecteur, ni ailleurs) : le mode d'emploi est
+un livre de la Bibliothèque, l'entrée « Mode d'emploi de la Bibliothèque » du catalogue.
+
+La quête en cours se garde d'une session à l'autre (`user://quete_en_cours.json`), son
+effacement aussi ; au premier lancement (rien d'enregistré), c'est « La biblioteca de Babel ».
 
 ## La Bibliothèque
 
@@ -66,6 +74,15 @@ direct au GPU et la souris reste libre ; le Godot Windows capture la souris et r
   l'écran ; ouvrir un de ces livres affiche l'erreur du service).
 - Une musique d'ambiance, la même partout et synchronisée, sort d'un haut-parleur au milieu de
   chaque vestibule du niveau du bibliothécaire, et s'éteint avec la distance.
+- Les livres volés (ceux du catalogue, `stolen_books`, et celui qu'emporte le bibliothécaire)
+  laissent un vide sur leur étagère et ne se visent pas. Le vide passe par la texture de données
+  de la galerie (bit 21 du premier mot d'un livre : le nuanceur réduit sa boîte à un point), sous
+  Forward+ comme sous Compatibility, et par un uniforme `ivec4` des façades peintes au loin (quatre
+  livres absents par galerie au plus : les volés du catalogue sont dans des galeries distinctes,
+  le bibliothécaire n'en porte qu'un ; quatre comparaisons d'entiers par pixel). Une galerie se
+  reconnaît à sa clé (rien à faire pour les autres) puis, une fois par clé, à ses vraies
+  coordonnées base 25 comparées exactement à celles des livres volés. Les clés des livres du
+  catalogue (~30 ms par coordonnée de 656 000 chiffres) se calculent sur un fil au lancement.
 
 ## Les livres
 
@@ -102,7 +119,10 @@ direct au GPU et la souris reste libre ; le Godot Windows capture la souris et r
   lanceur, `uv run` par exemple) : la page affiche l'erreur, le jeu ne se fige pas, et le service
   est relancé à la requête suivante ; après un lancement trop lent, la relance attend quelques
   secondes (5 s, doublées à chaque nouvel échec). Seul un Python absent reste un échec durable. Le
-  lancement se fait sur un fil : le jeu ne l'attend que 2 s au plus, puis continue.
+  lancement se fait sur un fil : le jeu ne l'attend que 2 s au plus, une fois, puis continue ; les
+  requêtes suivantes échouent aussitôt (« se lance encore ») jusqu'à ce qu'il aboutisse. Un
+  processus arrêté par le jeu (OS.kill l'attend) n'est plus interrogé : la sortie n'écrit aucune
+  erreur « process does not exist ».
 
 ## Recherche inverse
 
@@ -222,10 +242,23 @@ godot --headless --path . -s tests/test_babel_service.gd         # temps de rép
 ```sh
 godot --headless --path . --import
 godot --headless --path . -s tests/test_book_text.gd   # texte : déterminisme, 40 × 80, alphabet, diversité
-godot --headless --path . -s tests/test_world.gd       # monde : apparition, livre visé, lecture, vestibule, balustrade
+godot --headless --path . -s tests/test_world.gd       # monde : apparition, livre visé, lecture, vestibule, balustrade, invocations, vides, sortie
 godot --headless --path . -s tests/test_depth.gd       # profondeur, continuité de la lumière, coût d'un pas
+godot --headless --path . -s tests/test_quest.gd       # quête : arithmétique, guidage, catalogue, épingles, Hud, carnet, quête gardée
+godot --headless --path . -s tests/test_book_spine.gd  # titres des dos, texture des titres, livres absents
+godot --headless --path . -s tests/test_ambient.gd     # musique d'ambiance
+godot --headless --path . -s tests/test_babel_service.gd
 tools/check_no_class_cache.sh                          # lancement sans réimport : cache de classes périmé ou vide, aucune erreur de script
 ```
+
+Les fichiers du joueur (épingles, quête en cours, livre emporté) vont dans `user://`, ou dans le
+dossier donné après `--` par `--dossier-joueur=<dossier>` (`QuestScript.user_dir`) : chaque test
+qui crée le monde ou le Hud prend le sien (`user://essai_…`) et le retire en sortant ; les fichiers
+du joueur ne sont jamais touchés. `test_world` relance le monde sur les mêmes fichiers (quête et
+livre emporté gardés), tape les invocations par `push_input` dans la vraie scène, et lance en
+sous-processus `tests/exit_scene.gd` (la scène principale, puis la fenêtre fermée comme par le
+joueur) : aucune ligne « ERROR » à la sortie. Le premier pas juste après un saut (retenue sur
+toute la coordonnée comprise) est mesuré tel quel, sans attente.
 
 Les scripts de `scripts/` se référencent par `preload` (`const QuestScript := preload("res://scripts/quest.gd")`)
 et non par leur `class_name` : le jeu se lance ainsi après un `pull` sans `--import`, avant que
@@ -259,6 +292,34 @@ coordonnées de ~656 000 chiffres, qui partagent presque toutes leurs chiffres d
 s'enregistrent sous la même forme. `python3 tools/make_catalogue.py --from <catalogue>` récrit un
 catalogue existant (livres relus à leur adresse, aller-retour vérifié).
 
+## Secrets (développeurs)
+
+Rien de ce qui suit n'apparaît dans le jeu (aucune aide, aucun indice à l'écran) : c'est le
+fonctionnement, pour qui développe.
+
+- **Le carnet.** La touche physique sous Échap (« ² » en AZERTY, « ` » en QWERTY,
+  `Carnet.CARNET_KEY`) ouvre une page blanche où l'on écrit un mot dans l'alphabet de la
+  Bibliothèque ; espace ou Entrée le referme. Un mot qui n'est pas une invocation valable ici
+  s'efface en fondu (`Carnet.INVOCATIONS`, `Hud.can_invoke`). Échap ferme le carnet.
+- **« aleph »** (avec une quête) : le bibliothécaire est porté par les vestibules jusqu'à
+  l'hexagone du livre de la quête, au même niveau. **« zahir »** (avec une quête) : par le puits
+  jusqu'au niveau du livre, au même hexagone. Sans quête, le mot s'efface.
+- **« tlon »** (seulement en lisant : lecteur ouvert, ou carnet ouvert par-dessus) : le livre lu
+  est emporté. Le bibliothécaire en porte un au plus : en emporter un autre rend le précédent à
+  sa place. Le livre emporté est gardé d'une session à l'autre (`user://livre_emporte.json`) et
+  laisse un vide sur son étagère tant qu'il n'est pas rendu. La touche du carnet, carnet ouvert,
+  ouvre le livre emporté dans le lecteur. Proposé, en attente de confirmation :
+  `main.gd` `RETURN_CARRIED_ON_TLON` (vrai) — « tlon » en relisant le livre emporté le rend à sa
+  place ; faux, rien ne se passe.
+- **« sator »** : la galerie du livre du carré Sator (`destinations.sator` du catalogue), face à
+  son mur, le livre ouvert à la page du carré. **« golem »** : le livre du commentaire de Rachi
+  (`destinations.golem`, rempli plus tard) ; tant que la destination est vide, le mot s'efface.
+- Un déplacement est un saut instantané (`place_origin`, galeries reconstruites) caché par un
+  fondu au noir (0,2 s à l'aller, 0,2 s au retour) ; le bibliothécaire garde son orientation (et sa
+  place dans la galerie), sauf pour « sator » et « golem ». Coût sur le fil principal, au noir, à
+  ~917 000 chiffres (test_world) : « aleph » et « zahir » ~30 à 60 ms, « sator » ~0,23 s (livre
+  jamais ouvert compris).
+
 ## Organisation
 
 - `scripts/main.gd` : tirage de la galerie, entretien des galeries voisines (degrés de détail, part réelle des lampes), entrées, environnement.
@@ -269,4 +330,6 @@ catalogue existant (livres relus à leur adresse, aller-retour vérifié).
 - `scripts/player.gd` : déplacement à la première personne et rayon de visée.
 - `scripts/book_text.gd` : texte des pages.
 - `scripts/reader.gd` : fenêtre de lecture.
-- `scripts/hud.gd` : adresse, réticule, livre visé.
+- `scripts/hud.gd` : adresse, réticule, livre visé, encart et panneau de quête, quête gardée.
+- `scripts/carnet.gd` : le carnet (invocations).
+- `scripts/quest.gd` : quête, guidage, catalogue, épingles, fichiers du joueur.

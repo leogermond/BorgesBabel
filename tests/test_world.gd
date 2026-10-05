@@ -7,6 +7,7 @@ const GalleryScript := preload("res://scripts/gallery.gd")
 const BookTextScript := preload("res://scripts/book_text.gd")
 const QuestScript := preload("res://scripts/quest.gd")
 const BookSpineScript := preload("res://scripts/book_spine.gd")
+const AmbientSpeakerScript := preload("res://scripts/ambient_speaker.gd")
 ## Budget d'un pas (vestibule ou niveau), celui de test_depth : moins d'une demi-image à 60 i/s.
 const SHIFT_BUDGET_USEC := 8000
 # 17 galeries sur 3 niveaux le long du vestibule, 6 niveaux du puits en galeries entières,
@@ -91,6 +92,7 @@ func _initialize() -> void:
 	await _test_far_walk(main, player)
 	_test_same_gallery(main)
 
+	_check(await AmbientSpeakerScript.silence_all(self), "sortie : les haut-parleurs se taisent, le serveur audio rend leurs lectures")
 	print("test_world : %s" % ("OK" if _failures == 0 else "%d échec(s)" % _failures))
 	BookTextScript.shutdown()
 	quit(1 if _failures else 0)

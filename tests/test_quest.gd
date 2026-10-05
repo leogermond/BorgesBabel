@@ -7,6 +7,7 @@ const QuestScript := preload("res://scripts/quest.gd")
 const HudScript := preload("res://scripts/hud.gd")
 const CarnetScript := preload("res://scripts/carnet.gd")
 const BookTextScript := preload("res://scripts/book_text.gd")
+const AmbientSpeakerScript := preload("res://scripts/ambient_speaker.gd")
 const PINS_TEST_PATH := "user://test_quete_epinglees.json"
 const ARITH_CASES_PATH := "user://test_quete_arith.json"
 const ARITH_SCRIPT_PATH := "user://test_quete_arith.py"
@@ -64,6 +65,7 @@ func _initialize() -> void:
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(PINS_TEST_PATH))
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(ARITH_CASES_PATH))
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(ARITH_SCRIPT_PATH))
+	_check(await AmbientSpeakerScript.silence_all(self), "sortie : les haut-parleurs se taisent, le serveur audio rend leurs lectures")
 	print("test_quest : %s" % ("OK" if _failures == 0 else "%d échec(s)" % _failures))
 	BookTextScript.shutdown()
 	quit(1 if _failures else 0)

@@ -134,6 +134,7 @@ func _initialize() -> void:
 		_check(_world_done, "contrôles du monde menés à terme")
 
 	speaker.free()
+	_check(await Speaker.silence_all(self), "sortie : les haut-parleurs se taisent, le serveur audio rend leurs lectures")
 	print("test_ambient : %s" % ("OK" if _failures == 0 else "%d échec(s)" % _failures))
 	quit(1 if _failures else 0)
 

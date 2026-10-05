@@ -125,6 +125,7 @@ func _initialize() -> void:
 
 	_check_shaders(main)
 
+	_check(await AmbientSpeakerScript.silence_all(self), "sortie : les haut-parleurs se taisent, le serveur audio rend leurs lectures")
 	print("test_depth : %s" % ("OK" if _failures == 0 else "%d échec(s)" % _failures))
 	quit(1 if _failures else 0)
 

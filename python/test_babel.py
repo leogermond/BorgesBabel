@@ -429,10 +429,24 @@ def test_search_of_a_book_shows_that_book():
 
 
 @pytest.mark.parametrize("raw,expected", [
-    ("Été À L'ÎLE", "ete a lile"),
+    ("Été À L'ÎLE", "ete a l ile"),
     ("kiwi quay yoyo", "civi cuai ioio"),
     ("cœur, æther. Straße", "coeur, aether. strasse"),
-    ("ligne 1\nligne\t2 !?;:", "ligne  ligne  "),
+    ("ligne 1\nligne\t2", "ligne  ligne "),
+    ("l'espace d'or, ouvrez-le ; lui-même", "l espace d or, ouvrez le, lui meme"),
+    ("l’aube ʼ‘ — un–deux ‐ trois‑", "l aube      un deux   trois "),
+    ("image : le jeu ; fin", "image, le jeu, fin"),
+    ("galerie : son hexagone", "galerie, son hexagone"),
+    ("\u00ab \u0301 a \u00bb", "a"),
+    ("\u00ab\u0301 \u0301 a", "a"),
+    ("a\u037e b \u01fd \u1e31\u1e71", "a, b ae ct"),
+    ("dit « mot », puis", "dit mot, puis"),
+    ("dit\u00a0«\u00a0mot\u202f»\u00a0; ‹ x › fin", "dit mot, x fin"),
+    ("dit \"mot\" , puis “x” ”", "dit mot , puis x "),
+    ("quoi ? a ; b x\u00a0: z\u202f! z", "cuoi. a, b x, z. z"),
+    ("l'étage \u00a0\n ; suite", "l etage, suite"),
+    ("quoi ? non ! voir… ok...", "cuoi. non. voir. oc..."),
+    ("« cité » \"ici\" “là” ‹x› 12 %", "cite ici la x  "),
     ("ñandú çà", "nandu ca"),
 ])
 def test_normalize(raw, expected):

@@ -21,16 +21,23 @@ de « - » si `négatif`. Le jeu (scripts/quest.gd, _read_document) relit la mê
 en mémoire ; les épingles du joueur s'enregistrent sous la même forme. Le fichier passe de
 ~22 Mo à moins de 1 Mo.
 
-Contenu des livres (texte normalisé par babel.normalize_all, coulé de page en page, puis des
-espaces jusqu'à la fin du livre ; c'est l'unique livre qui contient ce texte, babel.search_text) :
+Contenu des livres (texte normalisé mot à mot par babel.normalize_all puis composé en lignes de 80
+symboles, coulé de page en page, puis des espaces jusqu'à la fin du livre ; c'est l'unique livre
+qui contient ce texte, babel.search_text). Composition (typeset) : jamais de mot coupé d'une ligne
+à l'autre (seul un mot de plus de 80 symboles est coupé) ; un paragraphe est séparé du suivant par
+une ligne blanche (80 espaces), deux lignes blanches de la source restent deux ; la première ligne
+du texte (son titre) est centrée ; une ligne seule entre deux lignes blanches, de moins de 40
+caractères et sans ponctuation finale, est un intertitre, centré, avec une ligne blanche avant et
+après (gardé avec le paragraphe qui suit) ; une page ne commence jamais par une ligne blanche ; un
+paragraphe peut se poursuivre à la page suivante :
 - cinq livres de Borges : page 1, ligne 1 la citation brève (quotes.txt, « titre | citation |
   source ») ; ligne 2 « ... » centré ; puis la loi argentine 11.723 nommée en toutes lettres et la
   première phrase de son article 5 (ley_11723_art5.txt), « 1 de Enero » écrit « primero de enero »
   puisque les chiffres n'existent pas ; à partir de la page 2, la présentation en français écrite
   pour le jeu (babel_fr.txt, aleph_fr.txt, zahir_fr.txt, tlon_fr.txt, golem_fr.txt) ;
-- trois textes de Claude, un livre chacun (mode d'emploi, sur la vertu, sur l'humour). Les marques
-  {NOM} du mode d'emploi reçoivent d'abord les noms de touches du jeu (KEY_NAMES, ceux de
-  scripts/hud.gd), dans une copie écrite sous tools/.travail/ (hors du dépôt).
+- trois textes de Claude, un livre chacun (« Mode d'emploi de Babel », sur la vertu, sur l'humour).
+  Le mode d'emploi nomme les touches en toutes lettres et s'écrit sans les lettres q, k, w, y
+  (la normalisation k, q → c, w → v, y → i n'y crée aucune faute) : l'outil l'exige.
 
 Notices : la notice d'une entrée (titre, auteur et contexte, une ligne chacun) est le contenu
 d'un livre, suivi d'espaces : un livre volé à la Bibliothèque. stolen_books liste ces livres
@@ -50,7 +57,8 @@ Les sources restent hors du dépôt. Elles arrivent par une liste de chemins, un
     python3 tools/make_catalogue.py --sources tools/.travail/sources.txt
 
 Clés attendues : SOURCES. L'outil n'affiche que des titres, des longueurs, des nombres de pages
-et des condensats ; il n'écrit que le catalogue (et la copie de travail des textes à marques).
+et des condensats ; il n'écrit que le catalogue. Pour relire la mise en page d'un livre :
+tools/preview_book.py (aperçu sous .foreman/scratch/, hors du dépôt).
 Chaque livre est relu à son adresse (babel.Book.at) et comparé page à page à la source avant d'être
 écrit ; le fichier écrit est relu et comparé au catalogue (aller-retour de la forme compacte).
 
@@ -79,11 +87,24 @@ sys.path.insert(0, os.path.join(ROOT, "python"))
 import babel  # noqa: E402
 
 OUTPUT = os.path.join(ROOT, "data", "quetes", "catalogue.bcat")
-WORK_DIR = os.path.join(ROOT, "tools", ".travail")
 VERSION = 2
 
-## Noms des touches du jeu, à l'identique de Hud.QUEST_KEY_NAME et Hud.CLEAR_KEY_NAME.
-KEY_NAMES = {"QUETE": "Tab", "EFFACER": "Suppr"}
+## Lettres que le mode d'emploi s'interdit : la normalisation les change (k, q → c, w → v, y → i).
+FORBIDDEN_LETTERS = "qkwy"
+
+## Sources qui ne doivent contenir aucune de ces lettres.
+NO_FORBIDDEN_LETTERS = ("mode_d_emploi",)
+
+## Mots que la composition ne sépare pas : l'élidé d'au plus ELISION_MAX symboles (« l'espace », « qu'il » → « cu »)
+## et la première partie d'au plus HYPHEN_MAX symboles d'un mot à trait d'union (« lui-même »).
+APOSTROPHES = "'’ʼ‘"
+CONNECTORS = APOSTROPHES + "-‐‑–—"
+ELISION_MAX = 2
+HYPHEN_MAX = 3
+
+## Intertitre : une ligne seule de moins de 40 caractères, sans ponctuation finale.
+HEADING_MAX = 40
+FINAL_PUNCTUATION = ".,;:!?…»)\"”’'"
 
 ## Clés de source attendues.
 SOURCES = (
@@ -164,7 +185,7 @@ ENTRIES = [
     },
     {
         "id": "claude-mode-d-emploi",
-        "title": "Mode d'emploi de la Bibliothèque",
+        "title": "Mode d'emploi de Babel",
         "author": "Claude",
         "year": 2026,
         "language": "fr",
@@ -218,21 +239,12 @@ def read(paths: dict[str, str], key: str) -> str:
         return f.read()
 
 
-def fill_key_names(key: str, text: str) -> str:
-    """Remplace les marques {NOM} par les noms de touches ; écrit la copie sous WORK_DIR."""
-    marks = set(re.findall(r"\{([A-Z_]+)\}", text))
-    if not marks:
-        return text
-    unknown = marks - KEY_NAMES.keys()
-    if unknown:
-        raise SystemExit(f"{key} : marques inconnues {sorted(unknown)}")
-    for name in marks:
-        text = text.replace("{%s}" % name, KEY_NAMES[name])
-    os.makedirs(WORK_DIR, exist_ok=True)
-    with open(os.path.join(WORK_DIR, key + ".txt"), "w", encoding="utf-8") as f:
-        f.write(text)
-    print(f"  {key} : {len(marks)} marque(s) remplacée(s), copie de travail sous tools/.travail/")
-    return text
+def check_forbidden_letters(key: str, text: str) -> None:
+    """Le mode d'emploi s'écrit sans q, k, w, y : la normalisation n'y crée alors aucune faute."""
+    # lettres de base, majuscules ou accentuées comprises (« Ý », « ÿ », « ẃ », « ḱ » : y, y, w, k)
+    found = sorted({c for char in text for c in babel.fold_char(char) if c in FORBIDDEN_LETTERS})
+    if found:
+        raise SystemExit(f"{key} : les lettres {found} sont interdites dans cette source")
 
 
 def normalized(key: str, text: str) -> str:
@@ -241,6 +253,148 @@ def normalized(key: str, text: str) -> str:
     if not symbols:
         raise SystemExit(f"{key} : texte vide après normalisation")
     return symbols
+
+
+def words_of(text: str) -> list[str]:
+    """Les mots du texte, un par un, normalisés (babel.normalize_all : le blanc qui précède « : ; ! ? … »
+    s'efface avec le signe converti, d'où le texte entier et non chaque mot isolé) ; ceux qui ne
+    laissent rien (« — », chiffres seuls) disparaissent."""
+    return babel.normalize_all(text).split()
+
+
+def units_of(paragraph: str) -> list[str]:
+    """Les mots du paragraphe (words_of), réunis en unités qu'une ligne ne sépare pas : un mot élidé
+    d'au plus ELISION_MAX symboles avec le mot qui suit (« l'espace » → « l espace »), une première
+    partie d'au plus HYPHEN_MAX symboles avec la suivante (« lui-même » → « lui meme »). Chaque unité
+    est ses mots séparés par une espace."""
+    words = words_of(paragraph)
+    # le blanc qu'efface la normalisation devant « : ; ! ? … » ou après « ‹ doit partir avant le découpage en jetons
+    merged = re.sub(r"\s+(?=[:;!?…»›])", "", paragraph)
+    merged = re.sub(r"(?<=[«‹])\s+", "", merged)
+    units: list[str] = []
+    flat: list[str] = []
+    for token in merged.split():
+        pieces = re.split("([" + re.escape(CONNECTORS) + "])", token)     # pièce, lien, pièce, lien…
+        previous = ""
+        for index in range(0, len(pieces), 2):
+            connector = pieces[index - 1] if index else ""
+            piece = words_of(pieces[index])
+            for number, word in enumerate(piece):
+                limit = ELISION_MAX if connector in APOSTROPHES else HYPHEN_MAX
+                if number == 0 and connector and previous and len(previous) <= limit and units:
+                    units[-1] += " " + word
+                else:
+                    units.append(word)
+                flat.append(word)
+            previous = piece[-1] if piece else ""
+    if flat != words:
+        raise SystemExit("unités : les jetons normalisés un à un ne redonnent pas les mots du paragraphe")
+    return units
+
+
+def wrap(words: list[str], width: int = babel.CHARS) -> list[str]:
+    """Les mots répartis en lignes d'au plus `width` symboles, sans jamais couper un mot (sauf un
+    mot plus long que `width`, coupé tous les `width` symboles)."""
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        while len(word) > width:
+            if current:
+                lines.append(current)
+                current = ""
+            lines.append(word[:width])
+            word = word[width:]
+        if not word:
+            continue
+        if not current:
+            current = word
+        elif len(current) + 1 + len(word) <= width:
+            current += " " + word
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines
+
+
+def blocks_of(text: str) -> list[dict]:
+    """La source en blocs {"words", "blank", "kind"} : blank, lignes blanches avant (au plus 2) ;
+    kind « title » (la première ligne, seule), « heading » (intertitre) ou « paragraph »."""
+    blocks: list[dict] = []
+    group: list[str] = []
+    state = {"blank": 0, "pending": 0}
+
+    def flush() -> None:
+        nonlocal group
+        if group:
+            words = units_of(" ".join(group))
+            if words:
+                plain = group[0].strip()
+                kind = "paragraph"
+                if len(group) == 1 and not blocks:
+                    kind = "title"
+                elif len(group) == 1 and len(plain) < HEADING_MAX and plain[-1] not in FINAL_PUNCTUATION:
+                    kind = "heading"
+                blocks.append({"words": words, "blank": min(state["blank"], 2), "kind": kind})
+        group = []
+
+    for line in text.splitlines():
+        if line.strip():
+            if not group:
+                state["blank"], state["pending"] = state["pending"], 0
+            group.append(line)
+        else:
+            flush()
+            state["pending"] += 1
+    flush()
+    return blocks
+
+
+def typeset(text: str) -> str:
+    """Le texte composé en lignes de 80 symboles, en une seule chaîne (sans fin de ligne), espaces
+    de queue ôtés. Les règles sont décrites en tête du module."""
+    width, per_page = babel.CHARS, babel.LINES
+    blank_line = " " * width
+    lines: list[str] = []
+    blocks = blocks_of(text)
+
+    for number, block in enumerate(blocks):
+        centred = block["kind"] in ("title", "heading")
+        body = [line.center(width) if centred else line.ljust(width) for line in wrap(block["words"])]
+        gap = max(1, block["blank"]) if lines else 0
+        if block["kind"] == "heading" and lines and number < len(blocks) - 1:
+            # l'intertitre reste avec la suite : lui, une ligne blanche et une ligne du paragraphe
+            at = (len(lines) + gap) % per_page
+            if at != 0 and per_page - at < 3:
+                lines.extend([blank_line] * (per_page - len(lines) % per_page))
+                gap = 0
+        for _ in range(gap):
+            if len(lines) % per_page != 0:        # jamais de ligne blanche en tête de page
+                lines.append(blank_line)
+        lines.extend(body)
+    return "".join(lines).rstrip(" ")
+
+
+def check_layout(text: str, composed: str) -> None:
+    """Contre-épreuve de la composition, sur la liste des mots normalisés de la source : lignes de
+    80 symboles dont la lecture ligne à ligne redonne les mots un à un, dans l'ordre, aucun coupé
+    en tête ni en queue de ligne (hors mot de plus de 80 symboles) ; aucune page ne commence par
+    une ligne blanche."""
+    width = babel.CHARS
+    padded = composed.ljust(-(-len(composed) // width) * width)
+    lines = [padded[i:i + width] for i in range(0, len(padded), width)]
+    expected = words_of(text)
+    read: list[str] = []
+    for number, line in enumerate(lines):
+        if number % babel.LINES == 0 and not line.strip():
+            raise SystemExit(f"composition : la ligne {number + 1}, en tête de page, est blanche")
+        read.extend(line.split())
+    if max(len(word) for word in expected) > width:
+        if "".join(read) != "".join(expected):
+            raise SystemExit("composition : les symboles lus ne sont pas ceux de la source")
+    elif read != expected:
+        raise SystemExit("composition : les mots lus ne sont pas ceux de la source (un mot est coupé)")
 
 
 def quotations(text: str) -> dict[str, str]:
@@ -477,10 +631,19 @@ def main(argv: list[str] | None = None) -> int:
         if meta["author"] == BORGES:
             if meta["title"] not in quotes:
                 raise SystemExit(f"{meta['title']} : citation absente de quotes.txt")
-            content = borges_first_page(quotes[meta["title"]], law) + normalized(key, text)
+            body = typeset(text)
+            check_layout(text, body)
+            content = borges_first_page(quotes[meta["title"]], law) + body
         else:
-            content = normalized(key, fill_key_names(key, text))
+            if key in NO_FORBIDDEN_LETTERS:
+                check_forbidden_letters(key, text)
+            body = typeset(text)
+            check_layout(text, body)
+            content = body
         entry = {k: v for k, v in meta.items() if k != "source"}
+        content = content.rstrip(" ")
+        if not content:
+            raise SystemExit(f"{meta['title']} : texte vide après normalisation")
         entry.update(book_record(entry["title"], content))
 
         notice = babel.normalize_all(notice_text(entry))

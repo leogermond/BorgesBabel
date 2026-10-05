@@ -73,6 +73,7 @@ func _initialize() -> void:
 	QuestScript.user_dir = USER_TEST_DIR
 	_clear_user_dir()
 	_test_arithmetic()
+	_test_normalize_crosscheck()
 	_test_guidance()
 	_test_catalogue()
 	_test_pins()
@@ -87,6 +88,133 @@ func _initialize() -> void:
 	print("test_quest : %s" % ("OK" if _failures == 0 else "%d échec(s)" % _failures))
 	BookTextScript.shutdown()
 	quit(1 if _failures else 0)
+
+
+# --- Normalisation : le même texte, normalisé par le carnet (GDScript) et par babel.py -----------
+
+const NORMALIZE_CASES_PATH := "user://test_quete_normalize.json"
+const NORMALIZE_SCRIPT_PATH := "user://test_quete_normalize.py"
+const NORMALIZE_CHECK := """
+import json, sys
+sys.path.insert(0, sys.argv[2])
+import babel
+with open(sys.argv[1], encoding="ascii") as f:
+    texts = [bytes.fromhex(line.strip()).decode("utf-8") for line in f if line.strip()]
+print(json.dumps([babel.normalize_all(t) for t in texts]))
+"""
+
+
+func _test_normalize_crosscheck() -> void:
+	# Cas écrits : apostrophes et traits d'union → espace, « : » « ; » → « , », « ! » « ? » « … » → « . »,
+	# guillemets retirés, espaces répétées gardées.
+	var written := {
+		"l'espace d'or, ouvrez-le ; lui-même": "l espace d or, ouvrez le, lui meme",
+		"l’aube ʼ‘ — un–deux ‐ trois‑": "l aube      un deux   trois ",
+		"image : le jeu ; fin": "image, le jeu, fin",
+		"galerie : son hexagone": "galerie, son hexagone",
+		"quoi ? a ; b x\u00a0: z\u202f! z": "cuoi. a, b x, z. z",
+		"x : z": "x, z",
+		"dit « mot », puis": "dit mot, puis",
+		"dit\u00a0«\u00a0mot\u202f»\u00a0; ‹ x › fin": "dit mot, x fin",
+		"dit \"mot\" , puis “x” ”": "dit mot , puis x ",
+		"l'étage \u00a0\n ; suite": "l etage, suite",
+		"quoi ? non ! voir… ok...": "cuoi. non. voir. oc...",
+		"« cité » \"ici\" “là” ‹x› 12 %": "cite ici la x  ",
+		"Été À L'ÎLE, kiwi quay yoyo, cœur æther Straße": "ete a l ile, civi cuai ioio, coeur aether strasse",
+	}
+	var cases := []
+	for text: String in written:
+		_check(CarnetScript.normalize(text) == written[text], "normalisation du carnet : « %s »" % text.c_escape())
+		cases.append(text)
+	# Chaque caractère de U+0009 à U+250 (Latin-1, Latin étendu A et B), des marques combinantes, du Latin
+	# étendu additionnel, de la ponctuation générale, des blancs typographiques : seul, entre deux lettres.
+	var ranges := [[0x09, 0x0e], [0x1c, 0x250], [0x300, 0x370], [0x37e, 0x37f], [0x1680, 0x1681], [0x1e00, 0x1f00],
+		[0x2000, 0x2070], [0x2126, 0x2127], [0x212a, 0x212c], [0x3000, 0x3001]]
+	var sweep := ""
+	for r: Array in ranges:
+		for code in range(r[0], r[1]):
+			sweep += String.chr(code)
+	for c in sweep:
+		cases.append(c)
+		cases.append("a%sb" % c)
+	cases.append(sweep)
+	# Les points de code que Python plie ou range parmi les marques (toutes classes combinantes, tous plans).
+	var interpreter: Array = BookTextScript._interpreters()[0]
+	var list_args := PackedStringArray(interpreter.slice(1))
+	list_args.append_array([ProjectSettings.globalize_path("res://tools/make_fold_table.py"), "--lists"])
+	var listing := []
+	var list_code := OS.execute(interpreter[0], list_args, listing, true)
+	var lists: Variant = JSON.parse_string(listing[0] if list_code == 0 and not listing.is_empty() else "")
+	_check(lists is Dictionary and lists.combining.size() > 800 and lists.fold.size() > 1000,
+		"Python liste ses marques combinantes (%d) et les points de code qu'il plie (%d)" % [lists.combining.size() if lists is Dictionary else 0, lists.fold.size() if lists is Dictionary else 0])
+	var marks := []
+	var folding := []
+	if lists is Dictionary:
+		for code: Variant in lists.combining:
+			marks.append(int(code))
+		for code: Variant in lists.fold:
+			folding.append(int(code))
+	# Le cas relevé : une marque combinante hors U+0300–036F après « ; chaque marque, après chaque ouverture.
+	cases.append("«\u20d0 x")
+	for code: int in marks:
+		cases.append("« %s x" % String.chr(code))
+		cases.append("‹%s x » y" % String.chr(code))
+	for code: int in folding:
+		cases.append("a%s ; b" % String.chr(code))
+	# Chaînes au hasard (graine fixe) : tous plans, marques de toutes classes après chaque signe et guillemet,
+	# lettres, accents, blancs (insécables compris), « ; » grec, apostrophes, traits d'union.
+	var specials := ["'", "’", "ʼ", "‘", "-", "‐", "‑", "–", "—", ":", ";", "!", "?", "…", "«", "»", "‹", "›", "\"", "“", "”",
+		",", ".", " ", " ", "\t", "\n", "\u00a0", "\u202f", "\u037e", "\u2003", "\u3000", "\u0085", "1", "%", "œ", "æ", "ß", "k", "q", "w", "y"]
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 7311
+	var random_count := 0
+	for _i in 12000:
+		var text := ""
+		for _j in rng.randi_range(1, 24):
+			var pick := rng.randi() % 12
+			if pick < 3:
+				text += specials[rng.randi() % specials.size()]
+			elif pick < 5 and not marks.is_empty():
+				text += String.chr(marks[rng.randi() % marks.size()])                    # marque combinante, toute classe
+			elif pick < 6:
+				text += String.chr(0x41 + rng.randi() % 26)                              # capitale
+			elif pick < 7:
+				text += String.chr(0x61 + rng.randi() % 26)
+			elif pick < 8 and not folding.is_empty():
+				text += String.chr(folding[rng.randi() % folding.size()])                # un caractère que Python plie
+			elif pick < 10:
+				var code := rng.randi_range(1, 0x10ffff)                                 # tous plans
+				while code >= 0xd800 and code < 0xe000:
+					code = rng.randi_range(1, 0x10ffff)
+				text += String.chr(code)
+			else:
+				text += specials[rng.randi() % specials.size()] + (String.chr(marks[rng.randi() % marks.size()]) if not marks.is_empty() else "")
+		cases.append(text)
+		random_count += 1
+	var file := FileAccess.open(NORMALIZE_CASES_PATH, FileAccess.WRITE)
+	for text: String in cases:
+		file.store_line(text.to_utf8_buffer().hex_encode())   # un texte par ligne, en hexadécimal
+	file.close()
+	file = FileAccess.open(NORMALIZE_SCRIPT_PATH, FileAccess.WRITE)
+	file.store_string(NORMALIZE_CHECK)
+	file.close()
+	var command: Array = BookTextScript._interpreters()[0]
+	var args := PackedStringArray(command.slice(1))
+	args.append_array([ProjectSettings.globalize_path(NORMALIZE_SCRIPT_PATH), ProjectSettings.globalize_path(NORMALIZE_CASES_PATH),
+		ProjectSettings.globalize_path("res://python")])
+	var output := []
+	var code := OS.execute(command[0], args, output, true)
+	var want: Variant = JSON.parse_string(output[0] if code == 0 and not output.is_empty() else "")
+	_check(want is Array and want.size() == cases.size(), "Python normalise les mêmes %d textes (code %d)" % [cases.size(), code])
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(NORMALIZE_CASES_PATH))
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(NORMALIZE_SCRIPT_PATH))
+	if not want is Array or want.size() != cases.size():
+		return
+	var different := []
+	for i in cases.size():
+		if CarnetScript.normalize(cases[i]) != want[i]:
+			different.append(cases[i].c_escape())
+	_check(different.is_empty(), "le carnet (GDScript) et babel.py normalisent à l'identique (écarts : %s)" % [different.slice(0, 5)])
 
 
 # --- Arithmétique -------------------------------------------------------------------------------
@@ -291,7 +419,7 @@ func _test_catalogue() -> void:
 		"catalogue sous forme compacte : %.2f Mo (≤ 2 Mo), lu en %.0f ms (≤ 0,5 s), l'ancien JSON retiré" % [size / 1.0e6, load_ms])
 	var titles := entries.map(func(e: Dictionary) -> String: return e.title)
 	_check(titles == ["La biblioteca de Babel", "El Aleph", "El Zahir", "Tlön, Uqbar, Orbis Tertius", "El Golem",
-		"Mode d'emploi de la Bibliothèque", "Sur la vertu", "Sur l'humour"], "catalogue : 8 entrées dans l'ordre (lu : %s)" % [titles])
+		"Mode d'emploi de Babel", "Sur la vertu", "Sur l'humour"], "catalogue : 8 entrées dans l'ordre (lu : %s)" % [titles])
 	var raw: Dictionary = QuestScript._read_document(QuestScript.CATALOGUE_PATH)
 	_check(int(raw.version) == QuestScript.CATALOGUE_VERSION and raw.keys().size() == 5, "catalogue version %d : entries, stolen_books, destinations" % QuestScript.CATALOGUE_VERSION)
 	var extra := []
@@ -309,8 +437,8 @@ func _test_catalogue() -> void:
 	_check(borges.size() == 5 and borges.all(func(e: Dictionary) -> bool: return e.protected and e.page_count >= 2 and e.pages.size() == e.page_count),
 		"5 livres protégés de Borges : la citation et la loi en page 1, le texte français ensuite (pages : %s)" % [borges.map(func(e: Dictionary) -> int: return e.page_count)])
 	var claude := entries.filter(func(e: Dictionary) -> bool: return e.author == "Claude")
-	_check(claude.size() == 3 and claude.all(func(e: Dictionary) -> bool: return e.licence == "texte original écrit pour le jeu" and e.pages.size() == 1),
-		"3 textes de Claude, un livre d'une page chacun, « texte original écrit pour le jeu »")
+	_check(claude.size() == 3 and claude.all(func(e: Dictionary) -> bool: return e.licence == "texte original écrit pour le jeu" and e.page_count >= 1 and e.pages.size() == e.page_count),
+		"3 textes de Claude, un livre chacun (pages : %s), « texte original écrit pour le jeu »" % [claude.map(func(e: Dictionary) -> int: return e.page_count)])
 	var books := {}
 	for entry: Dictionary in entries:
 		_check(not entry.author.strip_edges().is_empty() and not entry.context.strip_edges().is_empty(), "%s : auteur et contexte présents" % entry.title)
@@ -355,9 +483,101 @@ func _test_catalogue() -> void:
 	_check(quest != null and quest.pages == range(entries[0].page_count) and quest.book == entries[0].address and quest.author == "Jorge Luis Borges",
 		"quête d'une entrée du catalogue : son livre, ses pages")
 	var tool := FileAccess.get_file_as_string("res://tools/make_catalogue.py")
-	_check(tool.contains("KEY_NAMES = {\"QUETE\": \"%s\", \"EFFACER\": \"%s\"}" % [HudScript.QUEST_KEY_NAME, HudScript.CLEAR_KEY_NAME]),
-		"le mode d'emploi reçoit les noms des touches du Hud (%s, %s)" % [HudScript.QUEST_KEY_NAME, HudScript.CLEAR_KEY_NAME])
+	_check(not tool.contains("KEY_NAMES") and not tool.contains("fill_key_names") and tool.contains("FORBIDDEN_LETTERS = \"qkwy\"")
+		and tool.contains("NO_FORBIDDEN_LETTERS = (\"mode_d_emploi\",)"),
+		"l'outil ne remplace plus de marques : le mode d'emploi est vérifié sans q, k, w, y")
+	_test_catalogue_layout(entries)
 	_check(QuestScript.load_catalogue("res://absent.json").is_empty(), "catalogue absent → aucune entrée")
+
+
+# --- Mise en page des textes du catalogue ---------------------------------------------------------
+
+const SOURCES_PATH := "res://tools/.travail/sources.txt"
+## Source de chaque entrée (clés de tools/make_catalogue.py), dans l'ordre du catalogue.
+const SOURCE_KEYS := ["borges_babel_fr", "borges_aleph_fr", "borges_zahir_fr", "borges_tlon_fr", "borges_golem_fr",
+	"mode_d_emploi", "sur_la_vertu", "sur_l_humour"]
+
+
+## Les lignes de 80 symboles du texte d'une entrée (pages relues au service) : à partir de la page 2
+## pour Borges (la page 1 est la citation et la loi), de la page 1 sinon.
+func _text_lines(entry: Dictionary) -> Array:
+	var lines := []
+	for page in range(1 if entry.author == "Jorge Luis Borges" else 0, entry.page_count):
+		lines.append_array(BookTextScript.page_lines_at(entry.address, page))
+	return lines
+
+
+## Les mots lus ligne à ligne, un à un (une ligne se lit entre ses espaces).
+func _read_words(lines: Array) -> Array:
+	var out := []
+	for line: String in lines:
+		for word in line.split(" ", false):
+			out.append(word)
+	return out
+
+
+## Rang du premier mot lu qui n'est pas celui de la source (un mot coupé d'une ligne à l'autre
+## en donne deux morceaux) ; -1 si les mots lus sont exactement ceux de la source.
+func _first_mismatch(read: Array, expected: Array) -> int:
+	for i in mini(read.size(), expected.size()):
+		if read[i] != expected[i]:
+			return i
+	return -1 if read.size() == expected.size() else mini(read.size(), expected.size())
+
+
+func _test_catalogue_layout(entries: Array) -> void:
+	# Contre-épreuve : un mot coupé d'une ligne à l'autre est bien vu.
+	var expected_demo := ["abc", "def", "ghi", "jkl"]
+	_check(_first_mismatch(_read_words(["abc def".rpad(80), "ghi jkl".rpad(80)]), expected_demo) == -1
+		and _first_mismatch(_read_words(["abc de".rpad(80), "f ghi jkl".rpad(80)]), expected_demo) == 1,
+		"contre-épreuve : un mot coupé en fin de ligne est détecté")
+	var sources := {}
+	if FileAccess.file_exists(SOURCES_PATH):
+		for row in FileAccess.get_file_as_string(SOURCES_PATH).split("
+"):
+			if not row.strip_edges().is_empty() and not row.begins_with("#"):
+				sources[row.get_slice(" ", 0)] = row.substr(row.find(" ") + 1).strip_edges()
+	for index in entries.size():
+		var entry: Dictionary = entries[index]
+		var lines := _text_lines(entry)
+		var label: String = entry.title
+		var shapes_ok := true
+		for number in lines.size():
+			var line: String = lines[number]
+			shapes_ok = shapes_ok and line.length() == 80
+			if number % 40 == 0 and line.strip_edges().is_empty():
+				shapes_ok = false
+		_check(shapes_ok, "%s : lignes de 80 symboles, aucune page ne commence par une ligne blanche" % label)
+		var first: String = lines[0]
+		var left := first.length() - first.lstrip(" ").length()
+		var right := first.length() - first.rstrip(" ").length()
+		_check(not first.strip_edges().is_empty() and left >= 1 and absi(left - right) <= 1,
+			"%s : la première ligne du texte (son titre) est centrée" % label)
+		_check(_has_blank_between_paragraphs(lines), "%s : des lignes blanches séparent les paragraphes" % label)
+		var key: String = SOURCE_KEYS[index]
+		if not sources.has(key) or not FileAccess.file_exists(sources[key]):
+			print("    (source %s absente : mots coupés non vérifiés contre la source)" % key)
+			continue
+		var expected := []
+		# le texte entier : le blanc qui précède « : ; ! ? … » s'efface avec le signe converti
+		for word in CarnetScript.normalize(FileAccess.get_file_as_string(sources[key])).split(" ", false):
+			expected.append(word)
+		var mismatch := _first_mismatch(_read_words(lines), expected)
+		_check(mismatch == -1, "%s : aucune ligne ne commence ni ne finit par un mot coupé (%d mots de la source, écart au rang %d)" % [label, expected.size(), mismatch])
+
+
+## Au moins une ligne blanche entre deux lignes de texte (les paragraphes ne sont pas collés).
+func _has_blank_between_paragraphs(lines: Array) -> bool:
+	var seen_text := false
+	var seen_blank_after := false
+	for line: String in lines:
+		if line.strip_edges().is_empty():
+			seen_blank_after = seen_blank_after or seen_text
+		elif seen_blank_after:
+			return true
+		else:
+			seen_text = true
+	return false
 
 
 # --- Épingles -----------------------------------------------------------------------------------
@@ -504,7 +724,7 @@ func _test_hud() -> void:
 
 	# Adresse à 917 000 chiffres : forme « display » du service (signe, 4 premiers…4 derniers, nombre
 	# de chiffres) ; un pas avance les derniers chiffres et le guidage sans relire la coordonnée.
-	var huge: String = QuestScript.load_catalogue()[0].address.hexagon
+	var huge: String = QuestScript.load_catalogue()[0].address.hexagon.trim_prefix("-")
 	var deep := "-" + huge
 	var t_jump := Time.get_ticks_usec()
 	hud.set_address(huge, deep)
@@ -565,10 +785,10 @@ func _test_hud() -> void:
 	_type(hud, "babel ")
 	_check(_jumps.is_empty() and carnet.word.is_empty() and carnet.is_open(), "« babel␠ » n'émet rien, efface le mot, le carnet reste ouvert")
 	_type(hud, "Kyw,Q1é!Æ")
-	_check(carnet.word == "civ,ceae", "symboles normalisés, autres ignorés (lu : %s)" % carnet.word)
+	_check(carnet.word == "civ,ce.ae", "symboles normalisés, autres ignorés (lu : %s)" % carnet.word)
 	_type(hud, "\b\b\b")
-	_check(carnet.word == "civ,c", "retour arrière efface (lu : %s)" % carnet.word)
-	_type(hud, "\b\b\b\b\bZAHIR\n")
+	_check(carnet.word == "civ,ce", "retour arrière efface (lu : %s)" % carnet.word)
+	_type(hud, "\b\b\b\b\b\bZAHIR\n")
 	_check(_jumps == ["puits"] and not carnet.is_open(), "« ZAHIR » puis Entrée émet « puits »")
 	_jumps.clear()
 	_key(hud, CarnetScript.CARNET_KEY, true)
@@ -629,9 +849,9 @@ func _test_hud() -> void:
 	_check(hud.pins.size() == 9, "désépingler depuis le Hud")
 	hud.restore_pins()
 	_check(hud.pins.size() == 10 and hud.pins[9].kind == QuestScript.KIND_REGISTER and hud.pins[0].entry == "borges-biblioteca-de-babel", "rétablir depuis le Hud")
-	_check(hud.start_pin(hud.pins[5]) and hud.quest.title == "Mode d'emploi de la Bibliothèque", "un clic sur une épingle démarre sa quête")
+	_check(hud.start_pin(hud.pins[5]) and hud.quest.title == "Mode d'emploi de Babel", "un clic sur une épingle démarre sa quête")
 
-	_check(not hud.start_pin(hud.pins[9]) and hud.quest.title == "Mode d'emploi de la Bibliothèque", "le registre lui-même ne démarre rien")
+	_check(not hud.start_pin(hud.pins[9]) and hud.quest.title == "Mode d'emploi de Babel", "le registre lui-même ne démarre rien")
 	for item: Dictionary in hud.register_items():
 		hud.start_register_item(item)
 		var t := hud.quest.address()

@@ -30,7 +30,7 @@ direct au GPU et la souris reste libre ; le Godot Windows capture la souris et r
 | Suppr | effacer la quête en cours |
 
 Le jeu n'affiche aucune aide de commande (ni sous le lecteur, ni ailleurs) : le mode d'emploi est
-un livre de la Bibliothèque, l'entrée « Mode d'emploi de la Bibliothèque » du catalogue.
+un livre de la Bibliothèque, l'entrée « Mode d'emploi de Babel » du catalogue.
 
 La quête en cours se garde d'une session à l'autre (`user://quete_en_cours.json`), son
 effacement aussi ; au premier lancement (rien d'enregistré), c'est « La biblioteca de Babel ».
@@ -135,8 +135,17 @@ vides. Une adresse prise au hasard, ou trouvée par une recherche, a un hexagone
 d'environ 917 000 chiffres décimaux chacun. Le détail (rang, région, mélange) est dans l'en-tête
 de `python/babel.py`.
 
-- **Texte.** Le texte cherché est normalisé : minuscules, accents retirés, œ → oe, æ → ae,
-  ß → ss, k et q → c, w → v, y → i, blancs → espace, autres caractères retirés ; puis complété par
+- **Texte.** Le texte cherché est normalisé, caractère par caractère : minuscules, décomposition
+  Unicode (NFD) puis marques combinantes retirées (« é » → « e », « ǽ » → « æ »), œ → oe, æ → ae,
+  ß → ss, k et q → c, w → v, y → i, blancs (espace, tabulation, retour, insécables) → espace ;
+  apostrophes et traits d'union ou tirets → espace ; « : » et « ; » → « , » ; « ! » « ? » « … » →
+  « . » ; autres caractères (chiffres, symboles) retirés. Les blancs qui précèdent immédiatement
+  un « : ; ! ? … » converti sont retirés avec lui (« galerie : son » → « galerie, son »). Les
+  guillemets (« » ‹ › " “ ”) sont retirés, et les guillemets français emportent leurs espaces
+  intérieures : les blancs qui suivent un « ou un ‹, ceux qui précèdent un » ou un ›
+  (« dit « mot », puis » → « dit mot, puis »). Hors de ces cas, les blancs ne sont jamais fondus :
+  deux espaces de la source restent deux symboles, de sorte que la recherche reste exacte et
+  prévisible. Le texte est ensuite complété par
   des espaces jusqu'à la fin du livre. La recherche rend l'unique livre qui contient ce texte suivi
   seulement d'espaces ; un texte de plusieurs pages occupe les pages 0, 1, 2 … du même livre. Au-delà
   de 1 312 000 symboles (un livre), la suite est ignorée et la réponse le signale.
@@ -296,6 +305,13 @@ coordonnées de ~656 000 chiffres, qui partagent presque toutes leurs chiffres d
 s'enregistrent sous la même forme. `python3 tools/make_catalogue.py --from <catalogue>` récrit un
 catalogue existant (livres relus à leur adresse, aller-retour vérifié).
 
+Les textes des livres du catalogue sont composés en lignes de 80 symboles par `tools/make_catalogue.py` (aucun mot
+coupé, titre et intertitres centrés, paragraphes séparés par une ligne blanche, aucune page ouverte par une ligne
+blanche ; une élision ou un mot à trait d'union court ne se sépare pas en fin de ligne). Le mode d'emploi, « Mode d'emploi
+de Babel », s'écrit sans les lettres q, k, w, y (la normalisation les change en c, v, i : elles créeraient des fautes) et
+l'outil refuse une source qui en contient, accentuée ou non. `python3 tools/preview_book.py "<titre>"` (ou `--all`) relit un
+livre à son adresse et en écrit un aperçu page par page sous `.foreman/scratch/`, pour vérifier la mise en page à l'œil.
+
 ## Secrets (développeurs)
 
 Rien de ce qui suit n'apparaît dans le jeu (aucune aide, aucun indice à l'écran) : c'est le
@@ -340,5 +356,13 @@ fonctionnement, pour qui développe.
 - `scripts/book_text.gd` : texte des pages.
 - `scripts/reader.gd` : fenêtre de lecture.
 - `scripts/hud.gd` : adresse, réticule, livre visé, encart et panneau de quête, quête gardée.
-- `scripts/carnet.gd` : le carnet (invocations).
+- `scripts/carnet.gd` : le carnet (invocations) et sa normalisation du texte, étape pour étape celle de `python/babel.py`.
+- `scripts/fold_table.gd` : table de pliage du carnet (minuscule, décomposition NFD, marques combinantes ôtées, et la liste des blancs),
+  copie de la table **épinglée** `python/fold_data.py` que lit aussi `python/babel.py` : la normalisation ne dépend d'aucune
+  version d'Unicode ni de Python (le pliage ne passe plus par `unicodedata` à l'exécution), donc tous les joueurs obtiennent la
+  même chose, et la recherche et le carnet s'accordent. 1 413 entrées (Unicode 14.0.0), 18 Ko, chargée par le jeu en ~12 ms.
+  `tools/make_fold_table.py` écrit le fichier GDScript d'après `fold_data.py` ; `--check` vérifie qu'il est à jour (toute version
+  de Python), `--check-data` que `fold_data.py` est ce que donne `unicodedata` (seulement sous la version épinglée), `--pin`
+  le récrit (pour changer de version d'Unicode, à dessein : les adresses des textes accentués changeraient). test_quest compare
+  les deux normalisations sur plus de 30 000 textes (toutes les marques combinantes, tous les plans).
 - `scripts/quest.gd` : quête, guidage, catalogue, épingles, fichiers du joueur.

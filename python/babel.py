@@ -93,10 +93,21 @@ Image cherchée (image_grid, fit_samples, quantize_samples)
     puis tramée aux 25 encres par Floyd–Steinberg.
 
 Normalisation d'un texte cherché (normalize)
-    minuscules ; accents retirés (décomposition Unicode NFD, marques combinantes ôtées) ;
+    minuscules ; accents retirés (décomposition Unicode NFD, marques combinantes ôtées : fold_char,
+    caractère par caractère, étape 1) d'après la table ÉPINGLÉE de python/fold_data.py, que lit
+    aussi le carnet du jeu (scripts/fold_table.gd) : le résultat ne dépend d'aucune version d'Unicode
+    ni de Python installée ;
     œ → oe, æ → ae, ß → ss ; k → c, q → c, w → v, y → i ; tout blanc (espace, tabulation,
-    retour à la ligne) → espace ; les autres caractères (chiffres, apostrophes, ! ? ; : …)
-    sont retirés. Au-delà de M = 1 312 000 symboles, la suite est ignorée.
+    retour à la ligne) → espace ; ponctuation : apostrophes (' ’ ʼ ‘) et traits d'union ou
+    tirets (- ‐ ‑ – —) → espace, « : » et « ; » → « , », « ! » « ? » « … » → « . » (« … » donne
+    un seul « . »), guillemets et apostrophes doubles (« » " “ ” ‹ ›) retirés ; les autres
+    caractères (chiffres, symboles…) sont retirés. Quand « : ; ! ? … » devient « , » ou « . »,
+    les blancs qui le précèdent immédiatement (espaces, insécables U+00A0 et U+202F compris, comme
+    en typographie française) sont retirés : « galerie : son » → « galerie, son ». Hors de ces
+    cas, les blancs ne sont jamais fondus (deux espaces de la source restent deux symboles) : la
+    recherche reste exacte. Les guillemets français portent leurs espaces intérieures : en retirant
+    « ou ‹, les blancs qui le suivent sont retirés ; en retirant » ou ›, ceux qui le précèdent :
+    « dit « mot », puis » → « dit mot, puis ». Au-delà de M = 1 312 000 symboles, la suite est ignorée.
 Remplissage (pad) : le texte normalisé est complété par des espaces jusqu'à M symboles.
 
 Coordonnées sur le fil : base 25 signée
@@ -153,11 +164,12 @@ import json
 import math
 import struct
 import sys
-import unicodedata
 import zlib
 from collections import OrderedDict
 from dataclasses import dataclass
 from functools import lru_cache
+
+from fold_data import FOLD as _FOLD   # table de pliage épinglée (python/fold_data.py)
 
 # Les petites conversions int ↔ texte de plus de 4300 chiffres (pages, constantes) restent permises.
 if hasattr(sys, "set_int_max_str_digits"):
@@ -1022,6 +1034,32 @@ def page_lines(address: Address, page: int) -> list[str]:
 # --- Texte --------------------------------------------------------------------------------
 
 _LIGATURES = {"œ": "oe", "æ": "ae", "ß": "ss", "k": "c", "q": "c", "w": "v", "y": "i"}
+## Ponctuation ramenée à l'alphabet (les guillemets « » " “ ” ‹ › n'y sont pas : retirés).
+_SPACE_BEFORE = ":;!?…»›"   # leur conversion (ou leur retrait, pour » ›) efface les blancs qui précèdent
+_OPENING = "«‹"              # leur retrait efface les blancs qui suivent
+_PUNCTUATION = {
+    "'": " ", "’": " ", "ʼ": " ", "‘": " ",
+    "-": " ", "‐": " ", "‑": " ", "–": " ", "—": " ",
+    ":": ",", ";": ",",
+    "!": ".", "?": ".", "…": ".",
+}
+
+
+## Les blancs de la normalisation (ceux de str.isspace) : tous deviennent une espace. Liste figée, comme
+## la table de pliage : aucune version d'Unicode n'y change rien (tools/make_fold_table.py --check-data).
+_BLANKS = frozenset("\t\n\x0b\x0c\r\x1c\x1d\x1e\x1f \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006"
+                    "\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000")
+
+
+def fold_char(char: str) -> str:
+    """Un caractère passé en minuscules, décomposé (NFD), marques combinantes ôtées : « É » → « e »,
+    « ǽ » → « æ », une marque → «  ». Première étape de la normalisation, lue dans la table épinglée
+    python/fold_data.py (aucun unicodedata à l'exécution) ; un caractère qu'elle ne cite pas reste tel
+    quel, sauf les capitales ASCII."""
+    folded = _FOLD.get(char)
+    if folded is not None:
+        return folded
+    return chr(ord(char) + 32) if "A" <= char <= "Z" else char
 
 
 def normalize(text: str) -> str:
@@ -1031,15 +1069,25 @@ def normalize(text: str) -> str:
 
 def normalize_all(text: str) -> str:
     """Comme normalize, sans limite de longueur."""
-    out = []
-    for char in unicodedata.normalize("NFD", text.lower()):
-        if unicodedata.combining(char):
-            continue
-        char = _LIGATURES.get(char, char)
-        if char.isspace():
-            out.append(" ")
-        elif all(c in ALPHABET for c in char):
-            out.append(char)
+    out: list[str] = []
+    blanks = 0          # blancs de la source qui terminent `out` (ceux qu'un « : ; ! ? … » efface)
+    after_opening = False   # le caractère précédent est un « ou un ‹ : les blancs qui suivent s'effacent
+    for source in text:
+        for raw in fold_char(source):      # étape 1 : minuscule, décomposition, marques combinantes ôtées
+            char = _LIGATURES.get(raw) or _PUNCTUATION.get(raw, raw)
+            blank = raw in _BLANKS
+            if after_opening and blank:
+                continue
+            after_opening = raw in _OPENING
+            if raw in _SPACE_BEFORE:
+                del out[len(out) - blanks:]
+                blanks = 0
+            if char in _BLANKS:
+                out.append(" ")
+                blanks = blanks + 1 if blank else 0
+            elif all(c in ALPHABET for c in char):
+                out.append(char)
+                blanks = 0
     return "".join(out)
 
 

@@ -28,16 +28,23 @@ const PAPER_BORDER := Color(0.45, 0.32, 0.2)
 const INK := Color(0.16, 0.11, 0.07)
 const CARET_PERIOD := 0.53
 const FADE_SECONDS := 0.45
-## Lettres accentuées (après passage en minuscules) → leur lettre de base, comme la décomposition
-## NFD de la recherche ; les ligatures et les lettres absentes de l'alphabet suivent.
-const ACCENTS := {
-	"a": "àáâãäåāăąǎǟǡǻȁȃȧạảấầẩẫậắằẳẵặ", "c": "çćĉċč", "d": "ďḍḏ",
-	"e": "èéêëēĕėęěȅȇȩẹẻẽếềểễệ", "g": "ĝğġģǧǵ", "h": "ĥȟḥ", "i": "ìíîïĩīĭįǐȉȋỉị",
-	"j": "ĵǰ", "k": "ķǩ", "l": "ĺļľḷ", "n": "ñńņňǹṇ", "o": "òóôõöōŏőơǒȍȏȫȭȯȱọỏốồổỗộớờởỡợ",
-	"r": "ŕŗřȑȓ", "s": "śŝşšșṣ", "t": "ţťțṭ", "u": "ùúûüũūŭůűųưǔǖǘǚǜȕȗụủứừửữự",
-	"w": "ŵẁẃẅ", "y": "ýÿŷỳỹỷ", "z": "źżžẓ",
-}
+## Étape 1 de la normalisation : minuscule, décomposition NFD, marques combinantes ôtées, et les blancs.
+## Table ÉPINGLÉE, la même que lit python/babel.py (python/fold_data.py), copiée par tools/make_fold_table.py
+## dans scripts/fold_table.gd ; absent de la table, un caractère reste tel quel.
+const FoldTable := preload("res://scripts/fold_table.gd")
 const LIGATURES := {"œ": "oe", "æ": "ae", "ß": "ss", "k": "c", "q": "c", "w": "v", "y": "i"}
+## Ponctuation ramenée à l'alphabet, comme babel.py (_PUNCTUATION) : apostrophes et traits d'union
+## → espace, « : » « ; » → « , », « ! » « ? » « … » → « . » ; les guillemets sont retirés.
+## Leur conversion efface les blancs qui précèdent (typographie française : « galerie : son »).
+const SPACE_BEFORE := ":;!?…»›"
+## Leur retrait efface les blancs qui suivent (guillemets français : « mot »).
+const OPENING := "«‹"
+const PUNCTUATION := {
+	"'": " ", "’": " ", "ʼ": " ", "‘": " ",
+	"-": " ", "‐": " ", "‑": " ", "–": " ", "—": " ",
+	":": ",", ";": ",",
+	"!": ".", "?": ".", "…": ".",
+}
 
 ## Le mot en cours, normalisé.
 var word := ""
@@ -51,7 +58,6 @@ var _blink := 0.0
 var _mouse_before := Input.MOUSE_MODE_VISIBLE
 ## Dernier mode de souris demandé par le carnet (le mode effectif reste VISIBLE sans fenêtre).
 var mouse_mode_requested := -1
-static var _base: Dictionary = {}
 
 
 func _ready() -> void:
@@ -180,21 +186,35 @@ func submit() -> void:
 	_render()
 
 
-## Le texte ramené à l'alphabet de 25 symboles, comme la normalisation de la recherche.
+## Le texte ramené à l'alphabet de 25 symboles, étape pour étape comme babel.normalize_all : chaque
+## caractère est d'abord plié (table FOLD ; capitales ASCII → minuscules ; sinon inchangé), puis ses caractères suivent les règles
+## de ligatures, de ponctuation et de blancs.
 static func normalize(text: String) -> String:
-	if _base.is_empty():
-		for letter: String in ACCENTS:
-			for accented in ACCENTS[letter]:
-				_base[accented] = letter
 	var out := ""
-	for c in text.to_lower():
-		var base: String = _base.get(c, c)
-		var mapped: String = LIGATURES.get(base, base)
-		if mapped in ["\t", "\n", "\r", "\u00a0", "\u202f"]:
-			mapped = " "
-		for s in mapped:
-			if ALPHABET.contains(s):
-				out += s
+	var blanks := 0   # blancs de la source qui terminent `out` (ceux qu'un « : ; ! ? … » efface)
+	var after_opening := false   # le caractère précédent est un « ou un ‹ : les blancs qui suivent s'effacent
+	for source in text:
+		var code := source.unicode_at(0)
+		var folded: String = FoldTable.FOLD.get(code, source)
+		if code >= 0x41 and code <= 0x5a:
+			folded = String.chr(code + 32)   # capitales ASCII ; le reste vient de la table
+		for base in folded:
+			var mapped: String = LIGATURES.get(base, PUNCTUATION.get(base, base))
+			var blank: bool = base in FoldTable.BLANKS
+			if blank and after_opening:
+				continue
+			after_opening = OPENING.contains(base)
+			if blank:
+				mapped = " "
+			elif SPACE_BEFORE.contains(base):
+				out = out.left(out.length() - blanks)
+				blanks = 0
+			var inside := true
+			for symbol in mapped:
+				inside = inside and ALPHABET.contains(symbol)
+			if inside:
+				out += mapped
+				blanks = blanks + 1 if blank else 0
 	return out
 
 

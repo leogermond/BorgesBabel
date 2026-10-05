@@ -108,10 +108,14 @@ func _test_normalize_crosscheck() -> void:
 	# Cas écrits : apostrophes et traits d'union → espace, « : » « ; » → « , », « ! » « ? » « … » → « . »,
 	# guillemets retirés, espaces répétées gardées.
 	var written := {
-		"l'espace d'or, ouvrez-le ; lui-même": "l espace d or, ouvrez le , lui meme",
+		"l'espace d'or, ouvrez-le ; lui-même": "l espace d or, ouvrez le, lui meme",
 		"l’aube ʼ‘ — un–deux ‐ trois‑": "l aube      un deux   trois ",
-		"image : le jeu ; fin": "image , le jeu , fin",
-		"quoi ? non ! voir… ok...": "cuoi . non . voir. oc...",
+		"image : le jeu ; fin": "image, le jeu, fin",
+		"galerie : son hexagone": "galerie, son hexagone",
+		"quoi ? a ; b x\u00a0: z\u202f! z": "cuoi. a, b x, z. z",
+		"x : z": "x, z",
+		"l'étage \u00a0\n ; suite": "l etage, suite",
+		"quoi ? non ! voir… ok...": "cuoi. non. voir. oc...",
 		"« cité » \"ici\" “là” ‹x› 12 %": " cite  ici la x  ",
 		"Été À L'ÎLE, kiwi quay yoyo, cœur æther Straße": "ete a l ile, civi cuai ioio, coeur aether strasse",
 	}
@@ -499,11 +503,9 @@ func _test_catalogue_layout(entries: Array) -> void:
 			print("    (source %s absente : mots coupés non vérifiés contre la source)" % key)
 			continue
 		var expected := []
-		var text := FileAccess.get_file_as_string(sources[key]).replace("
-", " ").replace("	", " ")
-		for token in text.split(" ", false):
-			for word in CarnetScript.normalize(token).split(" ", false):
-				expected.append(word)
+		# le texte entier : le blanc qui précède « : ; ! ? … » s'efface avec le signe converti
+		for word in CarnetScript.normalize(FileAccess.get_file_as_string(sources[key])).split(" ", false):
+			expected.append(word)
 		var mismatch := _first_mismatch(_read_words(lines), expected)
 		_check(mismatch == -1, "%s : aucune ligne ne commence ni ne finit par un mot coupé (%d mots de la source, écart au rang %d)" % [label, expected.size(), mismatch])
 

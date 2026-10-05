@@ -98,7 +98,10 @@ Normalisation d'un texte cherché (normalize)
     retour à la ligne) → espace ; ponctuation : apostrophes (' ’ ʼ ‘) et traits d'union ou
     tirets (- ‐ ‑ – —) → espace, « : » et « ; » → « , », « ! » « ? » « … » → « . » (« … » donne
     un seul « . »), guillemets et apostrophes doubles (« » " “ ” ‹ ›) retirés ; les autres
-    caractères (chiffres, symboles…) sont retirés. Les espaces répétées ne sont pas fondues : la
+    caractères (chiffres, symboles…) sont retirés. Quand « : ; ! ? … » devient « , » ou « . »,
+    les blancs qui le précèdent immédiatement (espaces, insécables U+00A0 et U+202F compris, comme
+    en typographie française) sont retirés : « galerie : son » → « galerie, son ». Les espaces
+    répétées ne sont pas fondues : la
     recherche reste exacte. Au-delà de M = 1 312 000 symboles, la suite est ignorée.
 Remplissage (pad) : le texte normalisé est complété par des espaces jusqu'à M symboles.
 
@@ -1026,6 +1029,7 @@ def page_lines(address: Address, page: int) -> list[str]:
 
 _LIGATURES = {"œ": "oe", "æ": "ae", "ß": "ss", "k": "c", "q": "c", "w": "v", "y": "i"}
 ## Ponctuation ramenée à l'alphabet (les guillemets « » " “ ” ‹ › n'y sont pas : retirés).
+_SPACE_BEFORE = ":;!?…"     # leur conversion efface les blancs qui précèdent
 _PUNCTUATION = {
     "'": " ", "’": " ", "ʼ": " ", "‘": " ",
     "-": " ", "‐": " ", "‑": " ", "–": " ", "—": " ",
@@ -1041,15 +1045,22 @@ def normalize(text: str) -> str:
 
 def normalize_all(text: str) -> str:
     """Comme normalize, sans limite de longueur."""
-    out = []
-    for char in unicodedata.normalize("NFD", text.lower()):
-        if unicodedata.combining(char):
+    out: list[str] = []
+    blanks = 0          # blancs de la source qui terminent `out` (ceux qu'un « : ; ! ? … » efface)
+    for raw in unicodedata.normalize("NFD", text.lower()):
+        if unicodedata.combining(raw):
             continue
-        char = _LIGATURES.get(char) or _PUNCTUATION.get(char, char)
+        char = _LIGATURES.get(raw) or _PUNCTUATION.get(raw, raw)
+        if raw in _SPACE_BEFORE:
+            del out[len(out) - blanks:]
         if char.isspace():
             out.append(" ")
+            blanks = blanks + 1 if raw.isspace() else 0
         elif all(c in ALPHABET for c in char):
             out.append(char)
+            blanks = 0
+        else:
+            continue
     return "".join(out)
 
 

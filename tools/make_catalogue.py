@@ -248,12 +248,10 @@ def normalized(key: str, text: str) -> str:
 
 
 def words_of(text: str) -> list[str]:
-    """Les mots du texte, un par un (blancs de la source), chacun normalisé : ceux qui ne laissent
-    rien (« — », chiffres seuls) disparaissent."""
-    out: list[str] = []
-    for token in text.split():
-        out.extend(babel.normalize_all(token).split())
-    return out
+    """Les mots du texte, un par un, normalisés (babel.normalize_all : le blanc qui précède « : ; ! ? … »
+    s'efface avec le signe converti, d'où le texte entier et non chaque mot isolé) ; ceux qui ne
+    laissent rien (« — », chiffres seuls) disparaissent."""
+    return babel.normalize_all(text).split()
 
 
 def wrap(words: list[str], width: int = babel.CHARS) -> list[str]:

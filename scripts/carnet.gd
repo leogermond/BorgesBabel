@@ -44,6 +44,8 @@ const WHITESPACE := ["\t", "\n", "\u000b", "\u000c", "\r", "\u001c", "\u001d", "
 	"\u200a", "\u2028", "\u2029", "\u202f", "\u205f", "\u3000"]
 ## Ponctuation ramenée à l'alphabet, comme babel.py (_PUNCTUATION) : apostrophes et traits d'union
 ## → espace, « : » « ; » → « , », « ! » « ? » « … » → « . » ; les guillemets sont retirés.
+## Leur conversion efface les blancs qui précèdent (typographie française : « galerie : son »).
+const SPACE_BEFORE := ":;!?…"
 const PUNCTUATION := {
 	"'": " ", "’": " ", "ʼ": " ", "‘": " ",
 	"-": " ", "‐": " ", "‑": " ", "–": " ", "—": " ",
@@ -199,14 +201,19 @@ static func normalize(text: String) -> String:
 			for accented in ACCENTS[letter]:
 				_base[accented] = letter
 	var out := ""
+	var blanks := 0   # blancs de la source qui terminent `out` (ceux qu'un « : ; ! ? … » efface)
 	for c in text.to_lower():
 		var base: String = _base.get(c, c)
 		var mapped: String = LIGATURES.get(base, PUNCTUATION.get(base, base))
-		if mapped in WHITESPACE:
+		var blank: bool = base == " " or base in WHITESPACE
+		if blank:
 			mapped = " "
+		elif SPACE_BEFORE.contains(base):
+			out = out.left(out.length() - blanks)
 		for s in mapped:
 			if ALPHABET.contains(s):
 				out += s
+				blanks = blanks + 1 if blank else 0
 	return out
 
 

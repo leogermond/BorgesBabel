@@ -57,11 +57,13 @@ direct au GPU et la souris reste libre ; le Godot Windows capture la souris et r
   cuir entre 24 et 32 m.
 - Une galerie a toujours le même aspect, quel que soit le chemin qui y mène (à pied, d'un saut,
   au-delà de 2^62 ou à 917 000 chiffres) : la hauteur et le cuir de ses livres et leurs titres se
-  tirent d'une clé calculée sur ses vraies coordonnées (leurs restes modulo 25^8 − 1 et 25^8 + 1,
-  que le jeu suit pas à pas sans relire les coordonnées, et qui valent ceux de la coordonnée relue
-  en entier). Les titres se calculent sur les fils du moteur, et les livres d'images se demandent
-  à un second service Python, sur son propre fil : marcher ne coûte presque rien à l'image
-  (~0,1 ms par image pour les titres).
+  tirent d'une clé calculée sur ses vraies coordonnées (un hachage polynomial de leurs tranches de
+  8 chiffres base 25, modulo deux nombres premiers, que le jeu suit pas à pas à travers retenues et
+  emprunts sans relire les coordonnées, et qui vaut celui de la coordonnée relue en entier). Les
+  titres et les livres d'images se calculent sur le fil d'un second service Python : marcher ne
+  coûte presque rien à l'image (~0,1 ms par image pour les titres). Au-delà de la région habitée,
+  les emplacements vides n'ont pas de filets de livre d'images (les étagères y restent garnies à
+  l'écran ; ouvrir un de ces livres affiche l'erreur du service).
 - Une musique d'ambiance, la même partout et synchronisée, sort d'un haut-parleur au milieu de
   chaque vestibule du niveau du bibliothécaire, et s'éteint avec la distance.
 

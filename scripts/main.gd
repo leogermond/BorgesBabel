@@ -69,7 +69,7 @@ var _level_context: Dictionary = {}
 var _hexagon_parts: Dictionary = {}   # décalage → part de clé (_key_part), pour le pas en cours
 var _level_parts: Dictionary = {}
 ## Pas préparés d'avance, par axe (« hexagon », « level ») : pas (±1) → coordonnée voisine prête
-## (String), ou calcul en cours sur un fil du moteur ({task, result}). Le pas en arrière est la
+## (String), ou calcul en cours sur un fil du moteur ({task, holder}). Le pas en arrière est la
 ## coordonnée d'où l'on vient ; le pas en avant ne se prépare que lorsqu'une retenue doit traverser
 ## une longue suite de chiffres (BookText.long_carry) : le pas lui-même ne copie alors rien.
 var _prepared := {"hexagon": {}, "level": {}}

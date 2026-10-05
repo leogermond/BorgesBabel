@@ -174,6 +174,8 @@ func _test_same_gallery(main: Node3D) -> void:
 		var label: String = route[0]
 		var moves: Vector2i = route[3]
 		main.place_origin(route[1], route[2])
+		await _steps(5)   # comme après un saut en jeu : quelques images avant le premier pas
+		main.player.position = Vector3(0.0, 0.05, 3.2)
 		var worst := 0
 		for _i in absi(moves.x):
 			var t := Time.get_ticks_usec()
@@ -212,6 +214,7 @@ func _test_empty_region(main: Node3D) -> void:
 	var hexagon := "1" + "o".repeat(656000)
 	var level := "-1" + "0".repeat(656000)
 	_check(main.place_origin(hexagon, level), "l'origine se place hors de la région habitée")
+	main.player.position = Vector3(0.0, 0.05, 3.2)
 	var flags := BookTextScript.gallery_image_books(hexagon, level)
 	_check(flags.size() == 640 and flags.all(func(f: Variant) -> bool: return f == null), "le service y rend 640 emplacements vides (null)")
 	var t0 := Time.get_ticks_msec()
